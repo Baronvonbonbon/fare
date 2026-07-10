@@ -30,6 +30,21 @@ const config: HardhatUserConfig = {
     localhost: {
       url: "http://127.0.0.1:8545",
     },
+    pine: {
+      // Paseo via a LOCAL pine-rpc daemon (smoldot light client translating
+      // eth_* to ReviveApi_* — see ~/Documents/pine-rpc). Same chain as
+      // polkadotTestnet but trust-minimized: Merkle-proof-verified reads, no
+      // centralized gateway. Start it with `pine --chain paseo-asset-hub`.
+      // Caveat: eth_getCode currently hangs on Asset Hub (see pine-rpc
+      // CAPABILITIES.md); deploy.ts skips code verification on this network.
+      url: process.env.PINE_RPC ?? "http://127.0.0.1:8545",
+      accounts: process.env.DEPLOYER_PRIVATE_KEY
+        ? [
+            process.env.DEPLOYER_PRIVATE_KEY,
+            ...(process.env.TESTNET_ACCOUNTS ?? "").split(",").filter(Boolean),
+          ]
+        : [],
+    },
     polkadotTestnet: {
       // Paseo testnet — EVM bytecode on pallet-revive.
       // Quirks inherited from the DATUM deploy experience:

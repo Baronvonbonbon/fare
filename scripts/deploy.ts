@@ -16,10 +16,19 @@ import * as fs from "fs";
 import * as path from "path";
 
 // Paseo gas is in weight units (~1.5e15 scale); explicit 500M limit needed
-// there, while local nodes cap per-tx gas far lower — so only set on Paseo.
-const GAS_LIMIT = network.name === "polkadotTestnet" ? 500_000_000n : undefined;
+// there, while local nodes cap per-tx gas far lower — so only set on Paseo
+// (hosted gateway or the local pine light-client daemon, same chain).
+const PASEO_NETWORKS = ["polkadotTestnet", "pine"];
+const GAS_LIMIT = PASEO_NETWORKS.includes(network.name) ? 500_000_000n : undefined;
 
-const suffix = network.name === "polkadotTestnet" ? "" : `.${network.name}`;
+// pine-rpc quirk: eth_getCode hangs on Asset Hub today (CAPABILITIES.md), so
+// on the pine network we skip code-based verification and rely on nonce
+// confirmation + the wiring validation reads (eth_call works fine).
+const CAN_GET_CODE = network.name !== "pine";
+
+// `pine` is Paseo reached through a local light client — same chain, same
+// canonical address book as polkadotTestnet.
+const suffix = ["polkadotTestnet", "pine"].includes(network.name) ? "" : `.${network.name}`;
 const ADDR_FILE = path.join(__dirname, "..", `deployed-addresses${suffix}.json`);
 const WEB_ADDR_FILE = path.join(__dirname, "..", "web", "src", "deployed-addresses.json");
 
@@ -65,6 +74,10 @@ async function main() {
 
   async function deployOrReuse(key: string, contractName: string, args: any[] = []): Promise<string> {
     if (book[key]) {
+      if (!CAN_GET_CODE) {
+        console.log(`  = ${contractName} reused at ${book[key]} (pine: getCode unavailable, trusting address book)`);
+        return book[key];
+      }
       const code = await provider.getCode(book[key]);
       if (code && code !== "0x") {
         console.log(`  = ${contractName} reused at ${book[key]}`);
@@ -77,8 +90,12 @@ async function main() {
     await deployer.sendTransaction({ ...unsigned, nonce, gasLimit: GAS_LIMIT });
     await waitForNonce(provider, deployer.address, nonce);
     const addr = ethers.getCreateAddress({ from: deployer.address, nonce });
-    if (!(await verifyCode(provider, addr))) {
-      throw new Error(`${contractName}: no code at derived address ${addr}`);
+    if (CAN_GET_CODE) {
+      if (!(await verifyCode(provider, addr))) {
+        throw new Error(`${contractName}: no code at derived address ${addr}`);
+      }
+    } else {
+      console.log(`    (pine: skipping getCode verification — nonce confirmed)`);
     }
     console.log(`  + ${contractName} deployed at ${addr}`);
     book[key] = addr;

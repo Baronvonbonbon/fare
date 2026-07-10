@@ -82,6 +82,37 @@ location attestations from the device GPS via the browser Geolocation API.
 Counterparty signatures travel as copy-paste codes (QR in the roadmap), so the
 whole demo runs peer-to-peer with no backend.
 
+## Node options — the trust gradient
+
+Every interface surface can choose how it reaches the chain, from convenient
+to trust-minimized. Pine is [pine-rpc](../pine-rpc): a standalone eth-rpc
+node backed by a **smoldot light client** that verifies Merkle proofs over
+P2P instead of trusting a gateway.
+
+| Surface | Hosted gateway | Pine daemon (local light client) | In-browser light client |
+|---|---|---|---|
+| Web PWA (customer/driver/venue) | default | node picker → "Pine daemon" | node picker → "In-browser light client" (experimental, Paseo only) |
+| Deploy / seed / ops scripts | `--network polkadotTestnet` | `--network pine` (or `TESTNET_RPC=http://127.0.0.1:8545`) | — |
+| Local dev | `--network localhost` | — | — |
+
+```bash
+# run the local light-client node (from ~/Documents/pine-rpc or npx)
+pine --chain paseo-asset-hub          # eth-rpc on http://127.0.0.1:8545
+
+npm run deploy:paseo -- --network pine   # deploy through the light client
+```
+
+The web app's node picker (chip next to the wallet) persists per device and
+reloads on switch. The in-browser mode runs smoldot inside the tab via
+pine-rpc's EIP-1193 `PineProvider` — first sync takes ~10–60 s; the WASM is
+code-split so the default bundle stays light.
+
+Known limits (see pine-rpc `CAPABILITIES.md`, the source of truth):
+`eth_getCode` currently hangs on Asset Hub (deploy.ts skips code
+verification on the `pine` network and relies on nonce confirmation), WS
+subscriptions don't push (the app polls, so unaffected), and receipts are
+session-scoped to transactions submitted through Pine.
+
 ## Docs
 
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — contract-by-contract design, flows, wiring

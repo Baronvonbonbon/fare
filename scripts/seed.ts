@@ -12,7 +12,8 @@ const DROP_LAT = 37_784_900;
 const DROP_LON = -122_419_400;
 
 async function main() {
-  const suffix = network.name === "polkadotTestnet" ? "" : `.${network.name}`;
+  // pine = Paseo via local light client; shares the canonical address book.
+  const suffix = ["polkadotTestnet", "pine"].includes(network.name) ? "" : `.${network.name}`;
   const file = path.join(__dirname, "..", `deployed-addresses${suffix}.json`);
   const book = JSON.parse(fs.readFileSync(file, "utf-8"));
 

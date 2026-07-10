@@ -11,7 +11,14 @@ import {
   encodePayload,
   fmt,
   parse,
+  NodeMode,
+  embeddedAvailable,
+  getNodeMode,
+  getNodeUrl,
+  initNode,
+  nodeLabel,
   randomSalt,
+  setNode,
   short,
   signLocation,
   signReveal,
@@ -64,6 +71,17 @@ export default function App() {
   const [venues, setVenues] = useState<VenueRow[]>([]);
   const [vaultBal, setVaultBal] = useState<bigint>(0n);
   const [busy, setBusy] = useState(false);
+  const [nodeSync, setNodeSync] = useState<string | null>(
+    getNodeMode() === "pine-embedded" ? "connecting…" : null
+  );
+
+  // Boot the selected node (no-op for hosted/daemon; starts the in-tab
+  // smoldot light client for pine-embedded and reports sync progress).
+  useEffect(() => {
+    initNode((step) => setNodeSync(step))
+      .then(() => setNodeSync(null))
+      .catch((e) => setNodeSync(`light client failed: ${e.message}`));
+  }, []);
 
   const say = useCallback((msg: string, err = false) => {
     setToast({ msg, err });
@@ -172,16 +190,28 @@ export default function App() {
           FARE<span className="dot">.</span>
           <small>p2p delivery · polkadot hub</small>
         </div>
-        <WalletChip session={session} onConnect={async (mode, key) => {
-          try {
-            const s = await connect(mode, key);
-            setSession(s);
-            say(`Connected ${short(s.address)}`);
-          } catch (e: any) {
-            say(e.message, true);
-          }
-        }} />
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <NodeChip />
+          <WalletChip session={session} onConnect={async (mode, key) => {
+            try {
+              const s = await connect(mode, key);
+              setSession(s);
+              say(`Connected ${short(s.address)}`);
+            } catch (e: any) {
+              say(e.message, true);
+            }
+          }} />
+        </div>
       </header>
+
+      {nodeSync && (
+        <div className="vault-strip" style={{ borderColor: "rgba(7,255,255,0.3)", background: "rgba(7,255,255,0.05)" }}>
+          <div>
+            <div className="lbl">in-browser light client</div>
+            <div className="mono" style={{ color: "var(--cyan)" }}>{nodeSync}</div>
+          </div>
+        </div>
+      )}
 
       <nav className="roles">
         {(["customer", "driver", "venue"] as Role[]).map((r) => (
@@ -215,11 +245,79 @@ export default function App() {
       )}
 
       <p className="hint mono" style={{ textAlign: "center", marginTop: 20 }}>
-        rpc {RPC_URL} · orders {short(ADDRESSES.orders)} · settlement {short(ADDRESSES.settlement)}
+        node {nodeLabel()} · {RPC_URL} · orders {short(ADDRESSES.orders)} · settlement {short(ADDRESSES.settlement)}
       </p>
 
       {toast && <div className={`toast ${toast.err ? "err" : ""}`}>{toast.msg}</div>}
     </>
+  );
+}
+
+// ---------- node selection ----------
+
+/// The trust gradient, user-selectable per device: hosted gateway → local
+/// pine daemon (verifying light client behind localhost) → in-browser
+/// smoldot light client. Switching persists and reloads the app.
+function NodeChip() {
+  const [open, setOpen] = useState(false);
+  const [mode, setMode] = useState<NodeMode>(getNodeMode());
+  const [url, setUrl] = useState(getNodeUrl());
+  const current = getNodeMode();
+
+  const OPTIONS: { value: NodeMode; label: string; hint: string; disabled?: boolean }[] = [
+    { value: "hosted", label: "Hosted RPC", hint: "eth-rpc gateway — convenient, trusted third party" },
+    { value: "pine-daemon", label: "Pine daemon", hint: "local pine-rpc node — smoldot light client, verified reads" },
+    {
+      value: "pine-embedded",
+      label: "In-browser light client",
+      hint: embeddedAvailable()
+        ? "smoldot runs in this tab (experimental, ~30s sync)"
+        : "Paseo only — unavailable on a local dev chain",
+      disabled: !embeddedAvailable(),
+    },
+  ];
+
+  return (
+    <div style={{ position: "relative" }}>
+      <button className="wallet-chip" onClick={() => setOpen(!open)} title="Node / trust level">
+        <span
+          className="status-dot"
+          style={current !== "hosted" ? { background: "var(--cyan)", boxShadow: "0 0 8px var(--cyan)" } : {}}
+        />
+        {nodeLabel()}
+      </button>
+      {open && (
+        <div className="card" style={{ position: "absolute", right: 0, top: 42, width: 290, zIndex: 20 }}>
+          {OPTIONS.map((o) => (
+            <label key={o.value} style={{ display: "block", marginBottom: 10, opacity: o.disabled ? 0.45 : 1 }}>
+              <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                <input
+                  type="radio"
+                  name="node"
+                  style={{ width: "auto" }}
+                  checked={mode === o.value}
+                  disabled={o.disabled}
+                  onChange={() => setMode(o.value)}
+                />
+                <strong style={{ fontSize: 13 }}>{o.label}</strong>
+              </div>
+              <div className="hint" style={{ marginTop: 2, marginLeft: 24 }}>{o.hint}</div>
+            </label>
+          ))}
+          {mode === "pine-daemon" && (
+            <input value={url} onChange={(e) => setUrl(e.target.value)} placeholder="http://127.0.0.1:8545" />
+          )}
+          <button
+            className="btn small"
+            style={{ width: "100%", marginTop: 10 }}
+            disabled={mode === current && (mode !== "pine-daemon" || url === getNodeUrl())}
+            onClick={() => setNode(mode, mode === "pine-daemon" ? url : undefined)}
+          >
+            Switch node (reloads)
+          </button>
+        </div>
+      )}
+    </div>
   );
 }
 

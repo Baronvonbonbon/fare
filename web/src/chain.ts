@@ -19,6 +19,53 @@ import {
 
 export const ADDRESSES = deployed.addresses as Record<string, string>;
 export const CHAIN_ID = deployed.chainId as number;
+const PASEO_CHAIN_ID = 420420417;
+
+// ---- node selection: the trust gradient ----
+// hosted        → centralized eth-rpc gateway (convenient, trusted)
+// pine-daemon   → local pine-rpc daemon: smoldot light client behind a local
+//                 eth-rpc port; reads are Merkle-proof-verified
+// pine-embedded → PineProvider runs the smoldot light client INSIDE this tab
+//                 (experimental; Paseo only, ~10-60s first sync)
+
+export type NodeMode = "hosted" | "pine-daemon" | "pine-embedded";
+
+const NODE_MODE_KEY = "fare.node.mode";
+const NODE_URL_KEY = "fare.node.url";
+
+export function getNodeMode(): NodeMode {
+  const m = localStorage.getItem(NODE_MODE_KEY) as NodeMode | null;
+  if (m === "pine-embedded" && !embeddedAvailable()) return "hosted";
+  return m ?? "hosted";
+}
+
+export function getNodeUrl(): string {
+  return localStorage.getItem(NODE_URL_KEY) ?? "http://127.0.0.1:8545";
+}
+
+/// Embedded light client only makes sense on a real public chain.
+export function embeddedAvailable(): boolean {
+  return CHAIN_ID === PASEO_CHAIN_ID;
+}
+
+/// Persist the node choice and reload — providers and signer sessions are
+/// bound at module scope, so a clean reload is the honest switch.
+export function setNode(mode: NodeMode, url?: string): void {
+  localStorage.setItem(NODE_MODE_KEY, mode);
+  if (url) localStorage.setItem(NODE_URL_KEY, url);
+  window.location.reload();
+}
+
+export function nodeLabel(): string {
+  switch (getNodeMode()) {
+    case "pine-daemon":
+      return "pine daemon";
+    case "pine-embedded":
+      return "light client";
+    default:
+      return "hosted rpc";
+  }
+}
 
 /// Names resolvable through the FareGovernanceRouter registry. The deploy
 /// file is only the bootstrap: at runtime we re-resolve every address from
@@ -53,14 +100,51 @@ export async function syncAddressesFromRouter(): Promise<boolean> {
   return registrySynced;
 }
 
-export const RPC_URL =
+const HOSTED_URL =
   deployed.network === "polkadotTestnet"
     ? "https://eth-rpc-testnet.polkadot.io/"
     : "http://127.0.0.1:8545";
 
-export const readProvider = new JsonRpcProvider(RPC_URL, CHAIN_ID, {
-  staticNetwork: true,
-});
+export const RPC_URL = (() => {
+  switch (getNodeMode()) {
+    case "pine-daemon":
+      return getNodeUrl();
+    case "pine-embedded":
+      return "smoldot (in-browser)";
+    default:
+      return HOSTED_URL;
+  }
+})();
+
+/// The active read provider. For hosted/pine-daemon it's ready at module
+/// load; for pine-embedded it's a placeholder until initNode() swaps in the
+/// connected light-client provider.
+export let readProvider: ethers.AbstractProvider = new JsonRpcProvider(
+  getNodeMode() === "pine-daemon" ? getNodeUrl() : HOSTED_URL,
+  CHAIN_ID,
+  { staticNetwork: true }
+);
+
+export type PineSyncStep = string;
+let nodeInitPromise: Promise<void> | null = null;
+
+/// Boot the selected node. Hosted/daemon modes resolve immediately; the
+/// embedded mode dynamically imports pine-rpc (keeps smoldot's WASM out of
+/// the main bundle), starts the in-tab light client, and swaps the read
+/// provider once the first finalized block arrives.
+export function initNode(onStep?: (step: PineSyncStep) => void): Promise<void> {
+  if (nodeInitPromise) return nodeInitPromise;
+  nodeInitPromise = (async () => {
+    if (getNodeMode() !== "pine-embedded") return;
+    onStep?.("loading light client…");
+    const { PineProvider } = await import("pine-rpc");
+    const pine = new PineProvider({ chain: "paseo-asset-hub" });
+    await pine.connect((step: any) => onStep?.(String(step?.label ?? step)));
+    readProvider = new BrowserProvider(pine as any, CHAIN_ID);
+    onStep?.("light client synced");
+  })();
+  return nodeInitPromise;
+}
 
 export type SignerMode = "injected" | "burner" | "key";
 
