@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
+  <rect width="128" height="128" rx="28" fill="#0a0a0f"/>
+  <!-- delivery route as polka dots -->
+  <circle cx="32" cy="92" r="12" fill="#FF2670"/>
+  <circle cx="52" cy="66" r="6" fill="#FF2670" opacity="0.75"/>
+  <circle cx="72" cy="48" r="6" fill="#FF2670" opacity="0.55"/>
+  <circle cx="94" cy="34" r="12" fill="none" stroke="#FF2670" stroke-width="5"/>
+</svg>

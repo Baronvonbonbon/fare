@@ -1,0 +1,53 @@
+// Hand-maintained human-readable ABI fragments — only what the app calls.
+// Keep in sync with contracts/ (source of truth: the Solidity files).
+
+export const ORDERS_ABI = [
+  "function nextOrderId() view returns (uint256)",
+  "function orders(uint256) view returns (address customer, uint64 venueId, uint8 status, address driver, uint96 orderValue, uint96 tip, uint96 fare, uint96 maxFare, uint96 escrow, bytes32 dropCommit, uint64 createdAt, uint64 pickupWindowSecs, uint64 deliveryWindowSecs, uint64 pickupDeadline, uint64 deliveryDeadline)",
+  "function biddersOf(uint256) view returns (address[])",
+  "function bidOf(uint256, address) view returns (uint96)",
+  "function createOrder(uint64 venueId, bytes32 dropCommit, uint96 orderValue, uint96 tip, uint96 maxFare, uint64 pickupWindowSecs, uint64 deliveryWindowSecs) payable returns (uint256)",
+  "function placeBid(uint256 orderId, uint96 amount)",
+  "function withdrawBid(uint256 orderId)",
+  "function acceptBid(uint256 orderId, address driver) payable",
+  "function increaseTip(uint256 orderId) payable",
+  "function cancelOpen(uint256 orderId)",
+  "function cancelAssigned(uint256 orderId)",
+  "function abandonOrder(uint256 orderId)",
+];
+
+export const VENUES_ABI = [
+  "function nextVenueId() view returns (uint64)",
+  "function venues(uint64) view returns (address operator, address signer, address payout, int32 lat, int32 lon, bool active, uint32 pickups, string metadataURI)",
+  "function registerVenue(int32 lat, int32 lon, address signer, address payout, string metadataURI) returns (uint64)",
+  "function setActive(uint64 venueId, bool active)",
+];
+
+export const DRIVERS_ABI = [
+  "function drivers(address) view returns (bool registered, bool banned, uint96 stake, uint64 unstakeRequestedAt, uint32 delivered, uint32 failed, string metadataURI)",
+  "function isEligible(address) view returns (bool)",
+  "function register(string metadataURI) payable",
+  "function addStake() payable",
+  "function requestUnstake()",
+  "function withdrawStake()",
+  "function minStake() view returns (uint96)",
+];
+
+export const SETTLEMENT_ABI = [
+  "function confirmPickup((uint256 orderId, uint8 phase, address actor, int32 lat, int32 lon, uint64 timestamp) driverAtt, bytes driverSig, (uint256 orderId, uint8 phase, address actor, int32 lat, int32 lon, uint64 timestamp) venueAtt, bytes venueSig)",
+  "function confirmDropoff((uint256 orderId, uint8 phase, address actor, int32 lat, int32 lon, uint64 timestamp) driverAtt, bytes driverSig, (uint256 orderId, int32 lat, int32 lon, uint256 salt, uint64 timestamp) reveal, bytes customerSig)",
+  "function pickupRadiusMeters() view returns (uint32)",
+  "function dropoffRadiusMeters() view returns (uint32)",
+];
+
+export const VAULT_ABI = [
+  "function balanceOf(address) view returns (uint256)",
+  "function withdraw()",
+  "function pendingPaseoDust(address) view returns (uint256)",
+  "function claimPaseoDust()",
+];
+
+export const DISPUTES_ABI = [
+  "function disputeBond() view returns (uint96)",
+  "function openDispute(uint256 orderId, string evidenceURI) payable returns (uint256)",
+];

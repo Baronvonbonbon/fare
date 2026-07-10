@@ -1,0 +1,755 @@
+import { useCallback, useEffect, useMemo, useState } from "react";
+import {
+  ADDRESSES,
+  RPC_URL,
+  Session,
+  SignerMode,
+  connect,
+  contracts,
+  computeDropCommit,
+  decodePayload,
+  encodePayload,
+  fmt,
+  parse,
+  randomSalt,
+  short,
+  signLocation,
+  signReveal,
+} from "./chain";
+import { MicroDeg, distanceMeters, fmtCoord, getPosition } from "./geo";
+
+// ---- shared types ----
+
+interface OrderRow {
+  id: bigint;
+  customer: string;
+  venueId: bigint;
+  status: number;
+  driver: string;
+  orderValue: bigint;
+  tip: bigint;
+  fare: bigint;
+  maxFare: bigint;
+  dropCommit: string;
+  pickupDeadline: bigint;
+  deliveryDeadline: bigint;
+  bidders: { addr: string; amount: bigint }[];
+}
+
+interface VenueRow {
+  id: bigint;
+  operator: string;
+  signer: string;
+  lat: number;
+  lon: number;
+  active: boolean;
+  pickups: number;
+  metadataURI: string;
+}
+
+const STATUS = ["—", "Open", "Assigned", "PickedUp", "Delivered", "Cancelled", "Disputed", "Resolved"];
+const badgeClass = (s: number) => STATUS[s]?.toLowerCase() ?? "";
+
+type Role = "customer" | "driver" | "venue";
+
+// Drop-location secrets the customer holds until dropoff.
+const dropStoreKey = (commit: string) => `fare.drop.${commit.toLowerCase()}`;
+
+export default function App() {
+  const [session, setSession] = useState<Session | null>(null);
+  const [role, setRole] = useState<Role>(() => (localStorage.getItem("fare.role") as Role) || "customer");
+  const [toast, setToast] = useState<{ msg: string; err?: boolean } | null>(null);
+  const [orders, setOrders] = useState<OrderRow[]>([]);
+  const [venues, setVenues] = useState<VenueRow[]>([]);
+  const [vaultBal, setVaultBal] = useState<bigint>(0n);
+  const [busy, setBusy] = useState(false);
+
+  const say = useCallback((msg: string, err = false) => {
+    setToast({ msg, err });
+    window.setTimeout(() => setToast(null), err ? 8000 : 4500);
+  }, []);
+
+  const refresh = useCallback(async () => {
+    try {
+      const c = contracts();
+      const nextOrder: bigint = await c.orders.nextOrderId();
+      const nextVenue: bigint = await c.venues.nextVenueId();
+
+      const orderIds = Array.from({ length: Number(nextOrder - 1n) }, (_, i) => BigInt(i + 1));
+      const venueIds = Array.from({ length: Number(nextVenue - 1n) }, (_, i) => BigInt(i + 1));
+
+      const [rawOrders, rawVenues] = await Promise.all([
+        Promise.all(orderIds.map((id) => c.orders.orders(id))),
+        Promise.all(venueIds.map((id) => c.venues.venues(id))),
+      ]);
+
+      const withBids = await Promise.all(
+        rawOrders.map(async (o, i) => {
+          const id = orderIds[i];
+          let bidders: { addr: string; amount: bigint }[] = [];
+          if (Number(o.status) === 1) {
+            const addrs: string[] = await c.orders.biddersOf(id);
+            const amounts: bigint[] = await Promise.all(addrs.map((a) => c.orders.bidOf(id, a)));
+            bidders = addrs
+              .map((addr, j) => ({ addr, amount: amounts[j] }))
+              .filter((b) => b.amount > 0n)
+              .sort((a, b) => (a.amount < b.amount ? -1 : 1));
+          }
+          return {
+            id,
+            customer: o.customer,
+            venueId: o.venueId,
+            status: Number(o.status),
+            driver: o.driver,
+            orderValue: o.orderValue,
+            tip: o.tip,
+            fare: o.fare,
+            maxFare: o.maxFare,
+            dropCommit: o.dropCommit,
+            pickupDeadline: o.pickupDeadline,
+            deliveryDeadline: o.deliveryDeadline,
+            bidders,
+          } as OrderRow;
+        })
+      );
+
+      setOrders(withBids.reverse());
+      setVenues(
+        rawVenues.map((v, i) => ({
+          id: venueIds[i],
+          operator: v.operator,
+          signer: v.signer,
+          lat: Number(v.lat),
+          lon: Number(v.lon),
+          active: v.active,
+          pickups: Number(v.pickups),
+          metadataURI: v.metadataURI,
+        }))
+      );
+
+      if (session) setVaultBal(await c.vault.balanceOf(session.address));
+    } catch (e: any) {
+      console.error(e);
+    }
+  }, [session]);
+
+  useEffect(() => {
+    refresh();
+    const t = setInterval(refresh, 8000);
+    return () => clearInterval(t);
+  }, [refresh]);
+
+  useEffect(() => localStorage.setItem("fare.role", role), [role]);
+
+  /// Wrap a tx-sending action with busy state + toast + refresh.
+  const act = useCallback(
+    async (label: string, fn: () => Promise<any>) => {
+      if (!session) return say("Connect a wallet first", true);
+      setBusy(true);
+      try {
+        const tx = await fn();
+        if (tx?.wait) await tx.wait();
+        say(`${label} ✓`);
+        await refresh();
+      } catch (e: any) {
+        const m = e?.reason ?? e?.shortMessage ?? e?.message ?? String(e);
+        say(`${label} failed: ${m}`, true);
+      } finally {
+        setBusy(false);
+      }
+    },
+    [session, say, refresh]
+  );
+
+  const signed = session ? contracts(session.signer) : null;
+
+  return (
+    <>
+      <header className="masthead">
+        <div className="logo">
+          FARE<span className="dot">.</span>
+          <small>p2p delivery · polkadot hub</small>
+        </div>
+        <WalletChip session={session} onConnect={async (mode, key) => {
+          try {
+            const s = await connect(mode, key);
+            setSession(s);
+            say(`Connected ${short(s.address)}`);
+          } catch (e: any) {
+            say(e.message, true);
+          }
+        }} />
+      </header>
+
+      <nav className="roles">
+        {(["customer", "driver", "venue"] as Role[]).map((r) => (
+          <button key={r} className={role === r ? "active" : ""} onClick={() => setRole(r)}>
+            <span className="glyph">{r === "customer" ? "🛍" : r === "driver" ? "🛵" : "🏪"}</span>
+            {r}
+          </button>
+        ))}
+      </nav>
+
+      {session && vaultBal > 0n && (
+        <div className="vault-strip">
+          <div>
+            <div className="lbl">vault balance — pull payment</div>
+            <div className="amt">{fmt(vaultBal)} PAS</div>
+          </div>
+          <button className="btn small" disabled={busy} onClick={() => act("Withdraw", () => signed!.vault.withdraw())}>
+            Withdraw
+          </button>
+        </div>
+      )}
+
+      {role === "customer" && (
+        <CustomerView {...{ session, orders, venues, act, busy, signed, say }} />
+      )}
+      {role === "driver" && (
+        <DriverView {...{ session, orders, venues, act, busy, signed, say }} />
+      )}
+      {role === "venue" && (
+        <VenueView {...{ session, orders, venues, act, busy, signed, say }} />
+      )}
+
+      <p className="hint mono" style={{ textAlign: "center", marginTop: 20 }}>
+        rpc {RPC_URL} · orders {short(ADDRESSES.orders)} · settlement {short(ADDRESSES.settlement)}
+      </p>
+
+      {toast && <div className={`toast ${toast.err ? "err" : ""}`}>{toast.msg}</div>}
+    </>
+  );
+}
+
+// ---------- wallet ----------
+
+function WalletChip({
+  session,
+  onConnect,
+}: {
+  session: Session | null;
+  onConnect: (m: SignerMode, key?: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  if (session) {
+    return (
+      <div className="wallet-chip" title={session.address}>
+        <span className="status-dot" />
+        {short(session.address)}
+      </div>
+    );
+  }
+  return (
+    <div style={{ position: "relative" }}>
+      <button className="wallet-chip disconnected" onClick={() => setOpen(!open)}>
+        <span className="status-dot" /> connect
+      </button>
+      {open && (
+        <div className="card" style={{ position: "absolute", right: 0, top: 42, width: 260, zIndex: 20 }}>
+          <button className="btn ghost small" style={{ width: "100%", marginBottom: 8 }}
+            onClick={() => { setOpen(false); onConnect("injected"); }}>
+            Injected wallet
+          </button>
+          <button className="btn ghost small" style={{ width: "100%", marginBottom: 8 }}
+            onClick={() => { setOpen(false); onConnect("burner"); }}>
+            Burner key (this device)
+          </button>
+          <PasteKey onSubmit={(k) => { setOpen(false); onConnect("key", k); }} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+function PasteKey({ onSubmit }: { onSubmit: (k: string) => void }) {
+  const [k, setK] = useState("");
+  return (
+    <div>
+      <input placeholder="0x… private key (dev only)" value={k} onChange={(e) => setK(e.target.value)} />
+      <button className="btn small" style={{ width: "100%", marginTop: 8 }} disabled={!k} onClick={() => onSubmit(k)}>
+        Use key
+      </button>
+    </div>
+  );
+}
+
+// ---------- shared order pieces ----------
+
+function Route({ status }: { status: number }) {
+  // Open(1) → Assigned(2) → PickedUp(3) → Delivered(4)
+  const step = status >= 4 ? 3 : status - 1;
+  return (
+    <>
+      <div className="route">
+        {[0, 1, 2, 3].map((i) => (
+          <span key={i} style={{ display: "contents" }}>
+            {i > 0 && <span className={`leg ${step >= i ? "done" : ""}`} />}
+            <span className={`stop ${step >= i ? "done" : ""}`} />
+          </span>
+        ))}
+      </div>
+      <div className="route-labels">
+        <span>open</span>
+        <span>assigned</span>
+        <span>picked up</span>
+        <span>delivered</span>
+      </div>
+    </>
+  );
+}
+
+function OrderMeta({ o, venues }: { o: OrderRow; venues: VenueRow[] }) {
+  const venue = venues.find((v) => v.id === o.venueId);
+  return (
+    <>
+      {o.status >= 1 && o.status <= 4 && <Route status={o.status} />}
+      <div className="kv"><span className="k">venue</span><span className="v">#{String(o.venueId)}{venue ? ` · ${venue.metadataURI.replace(/^\w+:\/\//, "")}` : ""}</span></div>
+      <div className="kv"><span className="k">order value</span><span className="v amount">{fmt(o.orderValue)} PAS</span></div>
+      <div className="kv"><span className="k">tip</span><span className="v amount">{fmt(o.tip)} PAS</span></div>
+      <div className="kv">
+        <span className="k">{o.status >= 2 ? "fare" : "max fare"}</span>
+        <span className="v amount">{fmt(o.status >= 2 ? o.fare : o.maxFare)} PAS</span>
+      </div>
+      {o.driver !== "0x0000000000000000000000000000000000000000" && (
+        <div className="kv"><span className="k">driver</span><span className="v">{short(o.driver)}</span></div>
+      )}
+    </>
+  );
+}
+
+function GeoPill({ pos }: { pos: MicroDeg | null }) {
+  return pos ? <span className="geo-pill">◉ {fmtCoord(pos)}</span> : null;
+}
+
+// ---------- customer ----------
+
+function CustomerView({ session, orders, venues, act, busy, signed, say }: any) {
+  const mine = orders.filter((o: OrderRow) => session && o.customer.toLowerCase() === session.address.toLowerCase());
+  return (
+    <>
+      <CreateOrder {...{ session, venues, act, busy, signed, say }} />
+      <div className="section-note">my orders</div>
+      {mine.length === 0 && (
+        <div className="empty"><span className="dots">· · ·</span>No orders yet — place one above.</div>
+      )}
+      {mine.map((o: OrderRow) => (
+        <CustomerOrder key={String(o.id)} {...{ o, venues, act, busy, signed, session, say }} />
+      ))}
+    </>
+  );
+}
+
+function CreateOrder({ session, venues, act, busy, signed, say }: any) {
+  const [venueId, setVenueId] = useState("");
+  const [pos, setPos] = useState<MicroDeg | null>(null);
+  const [orderValue, setOrderValue] = useState("0");
+  const [tip, setTip] = useState("0");
+  const [maxFare, setMaxFare] = useState("0.5");
+  const active = venues.filter((v: VenueRow) => v.active);
+
+  return (
+    <div className="card">
+      <h2>Place a pickup order <span className="tag">escrow</span></h2>
+      <label className="field">
+        <span>pickup venue</span>
+        <select value={venueId} onChange={(e) => setVenueId(e.target.value)}>
+          <option value="">— select —</option>
+          {active.map((v: VenueRow) => (
+            <option key={String(v.id)} value={String(v.id)}>
+              #{String(v.id)} · {v.metadataURI.replace(/^\w+:\/\//, "")} · {fmtCoord({ lat: v.lat, lon: v.lon })}
+            </option>
+          ))}
+        </select>
+      </label>
+      <label className="field">
+        <span>drop location (kept secret — only a commitment goes on-chain)</span>
+        <button className="btn ghost small" type="button"
+          onClick={async () => { try { setPos(await getPosition()); } catch (e: any) { say(e.message, true); } }}>
+          Use my GPS position
+        </button>
+        <GeoPill pos={pos} />
+      </label>
+      <div className="row3">
+        <label className="field"><span>order value (PAS)</span>
+          <input value={orderValue} onChange={(e) => setOrderValue(e.target.value)} inputMode="decimal" /></label>
+        <label className="field"><span>tip (PAS)</span>
+          <input value={tip} onChange={(e) => setTip(e.target.value)} inputMode="decimal" /></label>
+        <label className="field"><span>max fare (PAS)</span>
+          <input value={maxFare} onChange={(e) => setMaxFare(e.target.value)} inputMode="decimal" /></label>
+      </div>
+      <p className="hint">
+        Order value 0 = pay the venue off-chain; the protocol then only escrows the delivery fare.
+      </p>
+      <div className="btn-row">
+        <button className="btn" disabled={busy || !session || !venueId || !pos}
+          onClick={() => {
+            const salt = randomSalt();
+            const commit = computeDropCommit(pos!.lat, pos!.lon, salt);
+            localStorage.setItem(dropStoreKey(commit), JSON.stringify({ lat: pos!.lat, lon: pos!.lon, salt }));
+            act("Create order", () =>
+              signed.orders.createOrder(
+                BigInt(venueId), commit, parse(orderValue), parse(tip), parse(maxFare), 0, 0,
+                { value: parse(orderValue) + parse(tip) }
+              )
+            );
+          }}>
+          Open for bids
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function CustomerOrder({ o, venues, act, busy, signed, session, say }: any) {
+  const [payload, setPayload] = useState("");
+  return (
+    <div className="order">
+      <div className="order-head">
+        <span className="order-id">Order #{String(o.id)}</span>
+        <span className={`badge ${badgeClass(o.status)}`}>{STATUS[o.status]}</span>
+      </div>
+      <OrderMeta o={o} venues={venues} />
+
+      {o.status === 1 && (
+        <>
+          <div className="section-note">driver bids — you pick, price isn't everything</div>
+          {o.bidders.length === 0 && <p className="hint">Waiting for driver bids…</p>}
+          {o.bidders.map((b: any) => (
+            <div className="kv" key={b.addr}>
+              <span className="k mono">{short(b.addr)}</span>
+              <span className="v">
+                <span className="amount">{fmt(b.amount)} PAS </span>
+                <button className="btn small" disabled={busy}
+                  onClick={() => act("Accept bid", () => signed.orders.acceptBid(o.id, b.addr, { value: b.amount }))}>
+                  Accept
+                </button>
+              </span>
+            </div>
+          ))}
+          <div className="btn-row">
+            <button className="btn danger small" disabled={busy}
+              onClick={() => act("Cancel order", () => signed.orders.cancelOpen(o.id))}>Cancel</button>
+          </div>
+        </>
+      )}
+
+      {o.status === 2 && (
+        <div className="btn-row">
+          <button className="btn danger small" disabled={busy}
+            onClick={() => act("Cancel", () => signed.orders.cancelAssigned(o.id))}>
+            Cancel (driver keeps a cut pre-deadline)
+          </button>
+          <button className="btn ghost small" disabled={busy}
+            onClick={() => act("Open dispute", () => signed.disputes.openDispute(o.id, ""))}>Dispute</button>
+        </div>
+      )}
+
+      {o.status === 3 && (
+        <>
+          <p className="hint">
+            Driver is at your door? Sign the handoff — it reveals your committed drop location and
+            releases the fare once the driver submits it with their own GPS attestation.
+          </p>
+          <div className="btn-row">
+            <button className="btn" disabled={busy || !session}
+              onClick={async () => {
+                try {
+                  const stored = localStorage.getItem(dropStoreKey(o.dropCommit));
+                  if (!stored) throw new Error("Drop-location secret not on this device");
+                  const { lat, lon, salt } = JSON.parse(stored);
+                  const reveal = {
+                    orderId: o.id.toString(), lat, lon, salt,
+                    timestamp: Math.floor(Date.now() / 1000),
+                  };
+                  const sig = await signReveal(session, reveal);
+                  setPayload(encodePayload("dropoff-customer", reveal, sig));
+                  say("Handoff signed — give the code to your driver");
+                } catch (e: any) { say(e.message, true); }
+              }}>
+              Sign dropoff handoff
+            </button>
+            <button className="btn ghost small" disabled={busy}
+              onClick={() => act("Open dispute", () => signed.disputes.openDispute(o.id, ""))}>Dispute</button>
+          </div>
+          {payload && (
+            <>
+              <p className="hint">Show this to your driver (they paste it in their app):</p>
+              <div className="payload-box">{payload}</div>
+            </>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+// ---------- driver ----------
+
+function DriverView({ session, orders, venues, act, busy, signed, say }: any) {
+  const [me, setMe] = useState<any>(null);
+  useEffect(() => {
+    if (!session) return;
+    contracts().drivers.drivers(session.address).then(setMe).catch(() => {});
+  }, [session, orders]);
+
+  const open = orders.filter((o: OrderRow) => o.status === 1);
+  const jobs = orders.filter(
+    (o: OrderRow) =>
+      session &&
+      o.driver.toLowerCase() === session.address.toLowerCase() &&
+      (o.status === 2 || o.status === 3)
+  );
+
+  if (session && me && !me.registered) return <DriverRegister {...{ act, busy, signed }} />;
+
+  return (
+    <>
+      {jobs.length > 0 && <div className="section-note">active jobs</div>}
+      {jobs.map((o: OrderRow) => (
+        <DriverJob key={String(o.id)} {...{ o, venues, act, busy, signed, session, say }} />
+      ))}
+      <div className="section-note">open orders — bid your fare</div>
+      {open.length === 0 && (
+        <div className="empty"><span className="dots">· · ·</span>No open orders right now.</div>
+      )}
+      {open.map((o: OrderRow) => (
+        <DriverBid key={String(o.id)} {...{ o, venues, act, busy, signed, session }} />
+      ))}
+    </>
+  );
+}
+
+function DriverRegister({ act, busy, signed }: any) {
+  const [name, setName] = useState("");
+  const [stake, setStake] = useState("0");
+  return (
+    <div className="card">
+      <h2>Register as a driver <span className="tag">one-time</span></h2>
+      <label className="field"><span>profile (name / vehicle)</span>
+        <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Dana · e-bike" /></label>
+      <label className="field"><span>stake (PAS, optional — builds trust, slashable on fraud)</span>
+        <input value={stake} onChange={(e) => setStake(e.target.value)} inputMode="decimal" /></label>
+      <div className="btn-row">
+        <button className="btn" disabled={busy}
+          onClick={() => act("Register", () => signed.drivers.register(`demo://${name || "driver"}`, { value: parse(stake) }))}>
+          Register
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function DriverBid({ o, venues, act, busy, signed, session }: any) {
+  const [amount, setAmount] = useState("");
+  const myBid = o.bidders.find(
+    (b: any) => session && b.addr.toLowerCase() === session.address.toLowerCase()
+  );
+  return (
+    <div className="order">
+      <div className="order-head">
+        <span className="order-id">Order #{String(o.id)}</span>
+        <span className={`badge ${badgeClass(o.status)}`}>{STATUS[o.status]}</span>
+      </div>
+      <OrderMeta o={o} venues={venues} />
+      {myBid && (
+        <div className="kv"><span className="k">your bid</span><span className="v amount">{fmt(myBid.amount)} PAS</span></div>
+      )}
+      <div className="btn-row">
+        <input style={{ flex: 1, minWidth: 120 }} placeholder={`≤ ${fmt(o.maxFare)} PAS`}
+          value={amount} onChange={(e) => setAmount(e.target.value)} inputMode="decimal" />
+        <button className="btn small" disabled={busy || !amount}
+          onClick={() => act("Place bid", () => signed.orders.placeBid(o.id, parse(amount)))}>
+          {myBid ? "Rebid" : "Bid"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function DriverJob({ o, venues, act, busy, signed, session, say }: any) {
+  const [counterpartyPayload, setCounterpartyPayload] = useState("");
+  const venue = venues.find((v: VenueRow) => v.id === o.venueId);
+  const isPickup = o.status === 2;
+
+  async function submitConfirmation() {
+    try {
+      const pos = await getPosition();
+      if (isPickup && venue) {
+        const d = distanceMeters(pos, { lat: venue.lat, lon: venue.lon });
+        if (d > 400) say(`Heads up: you look ~${Math.round(d)} m from the venue pin`, true);
+      }
+      const myAtt = {
+        orderId: o.id.toString(),
+        phase: isPickup ? 1 : 2,
+        actor: session.address,
+        lat: pos.lat,
+        lon: pos.lon,
+        timestamp: Math.floor(Date.now() / 1000),
+      };
+      const mySig = await signLocation(session, myAtt);
+      const other = decodePayload(counterpartyPayload);
+      if (isPickup) {
+        if (other.kind !== "pickup-venue") throw new Error("That's not a venue pickup code");
+        await act("Confirm pickup", () =>
+          signed.settlement.confirmPickup(myAtt, mySig, other.att, other.sig)
+        );
+      } else {
+        if (other.kind !== "dropoff-customer") throw new Error("That's not a customer handoff code");
+        await act("Confirm dropoff", () =>
+          signed.settlement.confirmDropoff(myAtt, mySig, other.att, other.sig)
+        );
+      }
+      setCounterpartyPayload("");
+    } catch (e: any) {
+      say(e?.message ?? String(e), true);
+    }
+  }
+
+  return (
+    <div className="order" style={{ borderColor: "rgba(255,38,112,0.4)" }}>
+      <div className="order-head">
+        <span className="order-id">Job #{String(o.id)}</span>
+        <span className={`badge ${badgeClass(o.status)}`}>{STATUS[o.status]}</span>
+      </div>
+      <OrderMeta o={o} venues={venues} />
+      {venue && (
+        <div className="kv"><span className="k">pickup pin</span>
+          <span className="v">{fmtCoord({ lat: venue.lat, lon: venue.lon })}</span></div>
+      )}
+      <p className="hint">
+        {isPickup
+          ? "At the counter: ask the venue for their signed pickup code, paste it, and confirm. Your GPS position is signed and checked on-chain against the venue pin."
+          : "At the door: ask the customer for their signed handoff code, paste it, and confirm. Your GPS position must be within the dropoff radius of their revealed location."}
+      </p>
+      <label className="field">
+        <span>{isPickup ? "venue pickup code" : "customer handoff code"}</span>
+        <textarea value={counterpartyPayload} onChange={(e) => setCounterpartyPayload(e.target.value)}
+          placeholder="paste code…" />
+      </label>
+      <div className="btn-row">
+        <button className="btn" disabled={busy || !counterpartyPayload} onClick={submitConfirmation}>
+          {isPickup ? "Confirm pickup" : "Confirm dropoff"}
+        </button>
+        {isPickup && (
+          <button className="btn danger small" disabled={busy}
+            onClick={() => act("Abandon", () => signed.orders.abandonOrder(o.id))}>Abandon</button>
+        )}
+        <button className="btn ghost small" disabled={busy}
+          onClick={() => act("Open dispute", () => signed.disputes.openDispute(o.id, ""))}>Dispute</button>
+      </div>
+    </div>
+  );
+}
+
+// ---------- venue ----------
+
+function VenueView({ session, orders, venues, act, busy, signed, say }: any) {
+  const mine = venues.filter(
+    (v: VenueRow) => session && v.operator.toLowerCase() === session.address.toLowerCase()
+  );
+  const mySignerVenues = venues.filter(
+    (v: VenueRow) => session && v.signer.toLowerCase() === session.address.toLowerCase()
+  );
+  const queue = orders.filter(
+    (o: OrderRow) => o.status === 2 && mySignerVenues.some((v: VenueRow) => v.id === o.venueId)
+  );
+
+  return (
+    <>
+      <VenueRegister {...{ act, busy, signed, say }} />
+      {mine.length > 0 && <div className="section-note">my venues</div>}
+      {mine.map((v: VenueRow) => (
+        <div className="order" key={String(v.id)}>
+          <div className="order-head">
+            <span className="order-id">Venue #{String(v.id)}</span>
+            <span className={`badge ${v.active ? "open" : "cancelled"}`}>{v.active ? "Active" : "Inactive"}</span>
+          </div>
+          <div className="kv"><span className="k">profile</span><span className="v">{v.metadataURI}</span></div>
+          <div className="kv"><span className="k">pin</span><span className="v">{fmtCoord({ lat: v.lat, lon: v.lon })}</span></div>
+          <div className="kv"><span className="k">pickups served</span><span className="v">{v.pickups}</span></div>
+        </div>
+      ))}
+      <div className="section-note">pickup queue — driver is here, sign the release</div>
+      {queue.length === 0 && (
+        <div className="empty"><span className="dots">· · ·</span>No assigned orders waiting for pickup.</div>
+      )}
+      {queue.map((o: OrderRow) => (
+        <VenuePickup key={String(o.id)} {...{ o, venues, session, say }} />
+      ))}
+    </>
+  );
+}
+
+function VenueRegister({ act, busy, signed, say }: any) {
+  const [name, setName] = useState("");
+  const [pos, setPos] = useState<MicroDeg | null>(null);
+  return (
+    <div className="card">
+      <h2>Register a venue <span className="tag">public pin</span></h2>
+      <label className="field"><span>name</span>
+        <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Golden Gate Grill" /></label>
+      <label className="field">
+        <span>location pin (public — pickups are geo-checked against it)</span>
+        <button className="btn ghost small" type="button"
+          onClick={async () => { try { setPos(await getPosition()); } catch (e: any) { say(e.message, true); } }}>
+          Use my GPS position
+        </button>
+        <GeoPill pos={pos} />
+      </label>
+      <div className="btn-row">
+        <button className="btn" disabled={busy || !pos || !name}
+          onClick={() =>
+            act("Register venue", () =>
+              signed.venues.registerVenue(
+                pos!.lat, pos!.lon,
+                "0x0000000000000000000000000000000000000000",
+                "0x0000000000000000000000000000000000000000",
+                `demo://${name}`
+              )
+            )}>
+          Register
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function VenuePickup({ o, venues, session, say }: any) {
+  const [payload, setPayload] = useState("");
+  return (
+    <div className="order">
+      <div className="order-head">
+        <span className="order-id">Order #{String(o.id)}</span>
+        <span className={`badge ${badgeClass(o.status)}`}>{STATUS[o.status]}</span>
+      </div>
+      <OrderMeta o={o} venues={venues} />
+      <p className="hint">
+        Handing the goods to driver {short(o.driver)}? Sign the pickup — your GPS position is
+        checked against your registered pin, and the order value releases to your payout address.
+      </p>
+      <div className="btn-row">
+        <button className="btn" disabled={!session}
+          onClick={async () => {
+            try {
+              const pos = await getPosition();
+              const att = {
+                orderId: o.id.toString(), phase: 1, actor: session.address,
+                lat: pos.lat, lon: pos.lon, timestamp: Math.floor(Date.now() / 1000),
+              };
+              const sig = await signLocation(session, att);
+              setPayload(encodePayload("pickup-venue", att, sig));
+              say("Pickup signed — give the code to the driver");
+            } catch (e: any) { say(e.message, true); }
+          }}>
+          Sign pickup release
+        </button>
+      </div>
+      {payload && (
+        <>
+          <p className="hint">Show this to the driver:</p>
+          <div className="payload-box">{payload}</div>
+        </>
+      )}
+    </div>
+  );
+}

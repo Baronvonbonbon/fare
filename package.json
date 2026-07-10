@@ -1,0 +1,24 @@
+{
+  "name": "fare-protocol",
+  "version": "0.1.0",
+  "description": "FARE — P2P delivery network on Polkadot Hub. Customers, drivers, and venues coordinate deliveries through on-chain reverse auctions and dual-signed GPS attestations, with no intermediary.",
+  "license": "GPL-3.0-or-later",
+  "scripts": {
+    "build": "hardhat compile",
+    "test": "hardhat test",
+    "node": "hardhat node",
+    "deploy:local": "hardhat run scripts/deploy.ts --network localhost",
+    "deploy:paseo": "hardhat run scripts/deploy.ts --network polkadotTestnet",
+    "seed:local": "hardhat run scripts/seed.ts --network localhost",
+    "size": "hardhat size-contracts"
+  },
+  "devDependencies": {
+    "@nomicfoundation/hardhat-toolbox": "^5.0.0",
+    "dotenv": "^16.4.5",
+    "hardhat": "^2.22.0",
+    "typescript": "^5.4.0"
+  },
+  "dependencies": {
+    "@openzeppelin/contracts": "^5.0.2"
+  }
+}

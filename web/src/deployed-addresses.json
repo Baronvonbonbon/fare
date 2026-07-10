@@ -1,0 +1,14 @@
+{
+  "network": "localhost",
+  "chainId": 31337,
+  "deployedAt": "2026-07-10T11:46:59.872Z",
+  "addresses": {
+    "pauseRegistry": "0x3de00f44ce68FC56DB0e0E33aD4015C6e78eCB39",
+    "vault": "0x89372b32b8AF3F1272e2efb3088616318D2834cA",
+    "drivers": "0xB1c05b498Cb58568B2470369FEB98B00702063dA",
+    "venues": "0x92A00fc48Ad3dD4A8b5266a8F467a52Ac784fC83",
+    "orders": "0x2f8D338360D095a72680A943A22fE6a0d398a0B4",
+    "settlement": "0x21915b79E1d334499272521a3508061354D13FF0",
+    "disputes": "0x44863F234b137A395e5c98359d16057A9A1fAc55"
+  }
+}

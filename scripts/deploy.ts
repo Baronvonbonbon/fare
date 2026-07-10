@@ -1,0 +1,192 @@
+// deploy.ts — FARE 7-contract deployment + wiring.
+//
+// Paseo eth-rpc workaround (inherited from the DATUM alpha-core deploy
+// experience): getTransactionReceipt can return null for confirmed txs, so
+// we confirm by nonce polling and derive deploy addresses with
+// getCreateAddress(sender, nonce), then verify with getCode().
+//
+// Re-run safe: reads deployed-addresses.<network>.json and skips contracts
+// that already have code; wiring calls are idempotent.
+//
+// Usage:
+//   npx hardhat run scripts/deploy.ts --network localhost
+//   npx hardhat run scripts/deploy.ts --network polkadotTestnet
+import { ethers, network } from "hardhat";
+import * as fs from "fs";
+import * as path from "path";
+
+// Paseo gas is in weight units (~1.5e15 scale); explicit 500M limit needed
+// there, while local nodes cap per-tx gas far lower — so only set on Paseo.
+const GAS_LIMIT = network.name === "polkadotTestnet" ? 500_000_000n : undefined;
+
+const suffix = network.name === "polkadotTestnet" ? "" : `.${network.name}`;
+const ADDR_FILE = path.join(__dirname, "..", `deployed-addresses${suffix}.json`);
+const WEB_ADDR_FILE = path.join(__dirname, "..", "web", "src", "deployed-addresses.json");
+
+type AddressBook = Record<string, string>;
+
+function loadAddresses(): AddressBook {
+  if (fs.existsSync(ADDR_FILE)) return JSON.parse(fs.readFileSync(ADDR_FILE, "utf-8"));
+  return {};
+}
+
+function saveAddresses(book: AddressBook) {
+  fs.writeFileSync(ADDR_FILE, JSON.stringify(book, null, 2) + "\n");
+}
+
+async function waitForNonce(provider: any, address: string, targetNonce: number, maxWait = 180) {
+  for (let i = 0; i < maxWait; i++) {
+    const current = await provider.getTransactionCount(address);
+    if (current > targetNonce) return;
+    if (i % 10 === 0 && i > 0) console.log(`    ...waiting for confirmation (${i}s)`);
+    await new Promise((r) => setTimeout(r, 1000));
+  }
+  throw new Error(`Timeout waiting for nonce > ${targetNonce}`);
+}
+
+async function verifyCode(provider: any, addr: string, maxWait = 60): Promise<boolean> {
+  for (let i = 0; i < maxWait; i++) {
+    const code = await provider.getCode(addr);
+    if (code && code !== "0x") return true;
+    await new Promise((r) => setTimeout(r, 1000));
+  }
+  return false;
+}
+
+async function main() {
+  const [deployer] = await ethers.getSigners();
+  if (!deployer) throw new Error("No deployer account — set DEPLOYER_PRIVATE_KEY in .env");
+  const provider = ethers.provider;
+  console.log(`Network:  ${network.name}`);
+  console.log(`Deployer: ${deployer.address}`);
+  console.log(`Balance:  ${ethers.formatEther(await provider.getBalance(deployer.address))}\n`);
+
+  const book = loadAddresses();
+
+  async function deployOrReuse(key: string, contractName: string, args: any[] = []): Promise<string> {
+    if (book[key]) {
+      const code = await provider.getCode(book[key]);
+      if (code && code !== "0x") {
+        console.log(`  = ${contractName} reused at ${book[key]}`);
+        return book[key];
+      }
+    }
+    const factory = await ethers.getContractFactory(contractName, deployer);
+    const nonce = await provider.getTransactionCount(deployer.address);
+    const unsigned = await factory.getDeployTransaction(...args);
+    await deployer.sendTransaction({ ...unsigned, nonce, gasLimit: GAS_LIMIT });
+    await waitForNonce(provider, deployer.address, nonce);
+    const addr = ethers.getCreateAddress({ from: deployer.address, nonce });
+    if (!(await verifyCode(provider, addr))) {
+      throw new Error(`${contractName}: no code at derived address ${addr}`);
+    }
+    console.log(`  + ${contractName} deployed at ${addr}`);
+    book[key] = addr;
+    saveAddresses(book);
+    return addr;
+  }
+
+  async function send(label: string, txFactory: () => Promise<any>) {
+    const nonce = await provider.getTransactionCount(deployer.address);
+    await txFactory();
+    await waitForNonce(provider, deployer.address, nonce);
+    console.log(`  ~ ${label}`);
+  }
+
+  // ── 1. Deploy ──────────────────────────────────────────────────────────
+  console.log("1. Deploying contracts");
+  const pause = await deployOrReuse("pauseRegistry", "FarePauseRegistry");
+  const vault = await deployOrReuse("vault", "FareVault");
+  const drivers = await deployOrReuse("drivers", "FareDrivers", [pause]);
+  const venues = await deployOrReuse("venues", "FareVenues", [pause]);
+  const orders = await deployOrReuse("orders", "FareOrders", [pause]);
+  const settlement = await deployOrReuse("settlement", "FareSettlement", [pause]);
+  const disputes = await deployOrReuse("disputes", "FareDisputes", [pause]);
+
+  // ── 2. Wiring ──────────────────────────────────────────────────────────
+  console.log("\n2. Wiring");
+  const treasury = process.env.TREASURY_ADDRESS ?? deployer.address;
+  const ordersC = await ethers.getContractAt("FareOrders", orders, deployer);
+  const settlementC = await ethers.getContractAt("FareSettlement", settlement, deployer);
+  const disputesC = await ethers.getContractAt("FareDisputes", disputes, deployer);
+  const vaultC = await ethers.getContractAt("FareVault", vault, deployer);
+  const driversC = await ethers.getContractAt("FareDrivers", drivers, deployer);
+  const venuesC = await ethers.getContractAt("FareVenues", venues, deployer);
+
+  if ((await ordersC.settlement()) !== settlement) {
+    await send("orders.configure", () =>
+      ordersC.configure(vault, drivers, venues, settlement, disputes, treasury, { gasLimit: GAS_LIMIT })
+    );
+  } else console.log("  = orders already configured");
+
+  if ((await settlementC.orders()) !== orders) {
+    await send("settlement.configure", () =>
+      settlementC.configure(orders, venues, { gasLimit: GAS_LIMIT })
+    );
+  } else console.log("  = settlement already configured");
+
+  if ((await disputesC.orders()) !== orders) {
+    await send("disputes.configure", () =>
+      disputesC.configure(orders, vault, drivers, treasury, { gasLimit: GAS_LIMIT })
+    );
+  } else console.log("  = disputes already configured");
+
+  for (const [who, addr] of [
+    ["orders", orders],
+    ["disputes", disputes],
+  ] as const) {
+    if (!(await vaultC.authorized(addr))) {
+      await send(`vault.setAuthorized(${who})`, () =>
+        vaultC.setAuthorized(addr, true, { gasLimit: GAS_LIMIT })
+      );
+    }
+    if (!(await driversC.authorized(addr))) {
+      await send(`drivers.setAuthorized(${who})`, () =>
+        driversC.setAuthorized(addr, true, { gasLimit: GAS_LIMIT })
+      );
+    }
+  }
+  if (!(await venuesC.authorized(orders))) {
+    await send("venues.setAuthorized(orders)", () =>
+      venuesC.setAuthorized(orders, true, { gasLimit: GAS_LIMIT })
+    );
+  }
+
+  // ── 3. Validate ────────────────────────────────────────────────────────
+  console.log("\n3. Validation");
+  const checks: Array<[string, boolean]> = [
+    ["orders.vault", (await ordersC.vault()) === vault],
+    ["orders.settlement", (await ordersC.settlement()) === settlement],
+    ["orders.disputes", (await ordersC.disputes()) === disputes],
+    ["settlement.orders", (await settlementC.orders()) === orders],
+    ["settlement.venues", (await settlementC.venues()) === venues],
+    ["disputes.orders", (await disputesC.orders()) === orders],
+    ["vault auth orders", await vaultC.authorized(orders)],
+    ["vault auth disputes", await vaultC.authorized(disputes)],
+    ["drivers auth orders", await driversC.authorized(orders)],
+    ["drivers auth disputes", await driversC.authorized(disputes)],
+    ["venues auth orders", await venuesC.authorized(orders)],
+  ];
+  let ok = true;
+  for (const [label, pass] of checks) {
+    console.log(`  ${pass ? "OK " : "FAIL"} ${label}`);
+    if (!pass) ok = false;
+  }
+  if (!ok) throw new Error("Wiring validation failed");
+
+  // ── 4. Export for the web app ──────────────────────────────────────────
+  const exportBook = {
+    network: network.name,
+    chainId: Number((await provider.getNetwork()).chainId),
+    deployedAt: new Date().toISOString(),
+    addresses: book,
+  };
+  fs.mkdirSync(path.dirname(WEB_ADDR_FILE), { recursive: true });
+  fs.writeFileSync(WEB_ADDR_FILE, JSON.stringify(exportBook, null, 2) + "\n");
+  console.log(`\nAddresses written to ${ADDR_FILE} and ${WEB_ADDR_FILE}`);
+}
+
+main().catch((e) => {
+  console.error(e);
+  process.exitCode = 1;
+});
