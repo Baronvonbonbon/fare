@@ -4,6 +4,7 @@ pragma solidity ^0.8.24;
 import "@openzeppelin/contracts/access/Ownable2Step.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "./interfaces/IFare.sol";
+import "./lib/FareUpgradable.sol";
 
 /// @title FareOrders
 /// @notice The order book: escrow, driver reverse auction, and lifecycle.
@@ -29,7 +30,7 @@ import "./interfaces/IFare.sol";
 ///           pickup cosign  → orderValue credited to venue payout
 ///           dropoff cosign → fare (minus protocol fee) + tip to driver
 ///         All value leaves through FareVault pull-payments.
-contract FareOrders is Ownable2Step, ReentrancyGuard, IFareOrders {
+contract FareOrders is Ownable2Step, ReentrancyGuard, FareUpgradable, IFareOrders {
     struct Order {
         address customer;
         uint64 venueId;
@@ -107,6 +108,11 @@ contract FareOrders is Ownable2Step, ReentrancyGuard, IFareOrders {
 
     // ---- wiring & params ----
 
+    /// @notice One-time binding to the FareGovernanceRouter (upgrade authority).
+    function setRouter(address _router) external onlyOwner {
+        _setRouterOnce(_router);
+    }
+
     function configure(
         address _vault,
         address _drivers,
@@ -172,7 +178,7 @@ contract FareOrders is Ownable2Step, ReentrancyGuard, IFareOrders {
         uint96 maxFare,
         uint64 pickupWindowSecs,
         uint64 deliveryWindowSecs
-    ) external payable whenNotPaused returns (uint256 orderId) {
+    ) external payable whenNotPaused whenNotFrozen returns (uint256 orderId) {
         require(venues.isActive(venueId), "venue-inactive");
         require(dropCommit != bytes32(0), "no-drop-commit");
         require(maxFare > 0, "no-max-fare");
@@ -200,7 +206,10 @@ contract FareOrders is Ownable2Step, ReentrancyGuard, IFareOrders {
         emit OrderCreated(orderId, msg.sender, venueId, orderValue, tip, maxFare, dropCommit);
     }
 
-    function increaseTip(uint256 orderId) external payable {
+    // whenNotFrozen intentionally absent from everything below createOrder/
+    // placeBid/acceptBid/increaseTip: cancels, settlement callbacks, and
+    // dispute hooks are drain paths that must keep working on a frozen v1.
+    function increaseTip(uint256 orderId) external payable whenNotFrozen {
         Order storage o = orders[orderId];
         require(msg.sender == o.customer, "not-customer");
         require(
@@ -269,7 +278,7 @@ contract FareOrders is Ownable2Step, ReentrancyGuard, IFareOrders {
 
     // ---- drivers: reverse auction ----
 
-    function placeBid(uint256 orderId, uint96 amount) external whenNotPaused {
+    function placeBid(uint256 orderId, uint96 amount) external whenNotPaused whenNotFrozen {
         Order storage o = orders[orderId];
         require(o.status == Status.Open, "bad-status");
         require(drivers.isEligible(msg.sender), "driver-not-eligible");
@@ -290,7 +299,13 @@ contract FareOrders is Ownable2Step, ReentrancyGuard, IFareOrders {
     /// @notice Customer picks the winning driver — any bid, not forced-lowest,
     ///         so reputation and stake can outweigh a marginally cheaper bid.
     ///         The winning fare is escrowed with this call.
-    function acceptBid(uint256 orderId, address driver) external payable whenNotPaused nonReentrant {
+    function acceptBid(uint256 orderId, address driver)
+        external
+        payable
+        whenNotPaused
+        whenNotFrozen
+        nonReentrant
+    {
         Order storage o = orders[orderId];
         require(msg.sender == o.customer, "not-customer");
         require(o.status == Status.Open, "bad-status");

@@ -11,6 +11,7 @@ import {
   DISPUTES_ABI,
   DRIVERS_ABI,
   ORDERS_ABI,
+  ROUTER_ABI,
   SETTLEMENT_ABI,
   VAULT_ABI,
   VENUES_ABI,
@@ -18,6 +19,39 @@ import {
 
 export const ADDRESSES = deployed.addresses as Record<string, string>;
 export const CHAIN_ID = deployed.chainId as number;
+
+/// Names resolvable through the FareGovernanceRouter registry. The deploy
+/// file is only the bootstrap: at runtime we re-resolve every address from
+/// the on-chain registry, so a router-driven upgrade re-points this client
+/// automatically — no redeploy of the web app.
+const REGISTRY_NAMES = [
+  "pauseRegistry",
+  "vault",
+  "drivers",
+  "venues",
+  "orders",
+  "settlement",
+  "disputes",
+] as const;
+
+let registrySynced = false;
+
+export async function syncAddressesFromRouter(): Promise<boolean> {
+  if (registrySynced || !ADDRESSES.router) return registrySynced;
+  try {
+    const router = new Contract(ADDRESSES.router, ROUTER_ABI, readProvider);
+    const live = await Promise.all(
+      REGISTRY_NAMES.map((n) => router.currentAddrOf(ethers.encodeBytes32String(n)))
+    );
+    REGISTRY_NAMES.forEach((n, i) => {
+      if (live[i] && live[i] !== ethers.ZeroAddress) ADDRESSES[n] = live[i];
+    });
+    registrySynced = true;
+  } catch (e) {
+    console.warn("Router address sync failed; using deploy-file addresses", e);
+  }
+  return registrySynced;
+}
 
 export const RPC_URL =
   deployed.network === "polkadotTestnet"
@@ -77,12 +111,16 @@ export function contracts(runner: ethers.ContractRunner = readProvider) {
 
 // ---- EIP-712 attestations ----
 
-export const EIP712_DOMAIN = {
-  name: "FareSettlement",
-  version: "1",
-  chainId: CHAIN_ID,
-  verifyingContract: ADDRESSES.settlement,
-};
+/// Computed lazily: the domain binds the LIVE settlement address, which the
+/// router sync may have re-pointed after an upgrade.
+export function eip712Domain() {
+  return {
+    name: "FareSettlement",
+    version: "1",
+    chainId: CHAIN_ID,
+    verifyingContract: ADDRESSES.settlement,
+  };
+}
 
 export const LOCATION_TYPES = {
   LocationAttestation: [
@@ -123,11 +161,11 @@ export interface RevealAtt {
 }
 
 export async function signLocation(s: Session, att: LocationAtt): Promise<string> {
-  return s.signer.signTypedData(EIP712_DOMAIN, LOCATION_TYPES, att);
+  return s.signer.signTypedData(eip712Domain(), LOCATION_TYPES, att);
 }
 
 export async function signReveal(s: Session, reveal: RevealAtt): Promise<string> {
-  return s.signer.signTypedData(EIP712_DOMAIN, REVEAL_TYPES, reveal);
+  return s.signer.signTypedData(eip712Domain(), REVEAL_TYPES, reveal);
 }
 
 export function computeDropCommit(lat: number, lon: number, salt: string): string {

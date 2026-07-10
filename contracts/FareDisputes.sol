@@ -3,6 +3,7 @@ pragma solidity ^0.8.24;
 
 import "@openzeppelin/contracts/access/Ownable2Step.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import "./lib/FareUpgradable.sol";
 import "./interfaces/IFare.sol";
 
 /// @title FareDisputes
@@ -19,7 +20,7 @@ import "./interfaces/IFare.sol";
 ///         Anti-grief: opening a dispute takes a bond (zeroable during
 ///         bootstrap). Winner gets the bond back; loser's bond goes to the
 ///         treasury.
-contract FareDisputes is Ownable2Step, ReentrancyGuard {
+contract FareDisputes is Ownable2Step, ReentrancyGuard, FareUpgradable {
     enum DisputeStatus {
         None,
         Open,
@@ -76,6 +77,11 @@ contract FareDisputes is Ownable2Step, ReentrancyGuard {
 
     // ---- wiring & params ----
 
+    /// @notice One-time binding to the FareGovernanceRouter (upgrade authority).
+    function setRouter(address _router) external onlyOwner {
+        _setRouterOnce(_router);
+    }
+
     function configure(
         address _orders,
         address _vault,
@@ -111,6 +117,7 @@ contract FareDisputes is Ownable2Step, ReentrancyGuard {
         external
         payable
         whenNotPaused
+        whenNotFrozen // resolve() stays open: pending disputes always finish
         returns (uint256 disputeId)
     {
         require(disputeOfOrder[orderId] == 0, "already-disputed");

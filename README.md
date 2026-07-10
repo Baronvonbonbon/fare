@@ -42,10 +42,11 @@ CUSTOMER                    DRIVERS                    VENUE
 - **All payouts are pull-payments** through `FareVault` — no push-payment
   griefing, one auditable money-out path.
 
-## Contracts (7)
+## Contracts (8)
 
 | Contract | Role |
 |---|---|
+| `FareGovernanceRouter` | Upgrade authority + on-chain address registry (clients auto-follow upgrades) |
 | `FareOrders` | Order book: escrow, reverse auction, lifecycle, cancellation economics |
 | `FareSettlement` | EIP-712 dual-sig GPS attestation verification (pickup + dropoff) |
 | `FareVault` | Pull-payment vault for every payout (venue, driver, refunds, fees) |
@@ -54,8 +55,10 @@ CUSTOMER                    DRIVERS                    VENUE
 | `FareDisputes` | Bonded, arbitrated escape hatch for stuck orders |
 | `FarePauseRegistry` | Per-category emergency pause (guardian fast-pause, owner unpause) |
 
-Plus `lib/GeoLib` (fixed-point equirectangular proximity math, Bhaskara cosine)
-and `lib/PaseoSafeSender` (defeats the Paseo eth-rpc denomination bug).
+Plus `lib/GeoLib` (fixed-point equirectangular proximity math, Bhaskara cosine),
+`lib/PaseoSafeSender` (defeats the Paseo eth-rpc denomination bug), and
+`lib/FareUpgradable` (freeze-and-drain upgrade base — entry mutators freeze,
+exits always drain; see docs/ARCHITECTURE.md "Upgradability").
 
 ## Quick start
 

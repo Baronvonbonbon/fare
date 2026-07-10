@@ -3,6 +3,7 @@ pragma solidity ^0.8.24;
 
 import "@openzeppelin/contracts/access/Ownable2Step.sol";
 import "./lib/PaseoSafeSender.sol";
+import "./lib/FareUpgradable.sol";
 
 /// @title FareVault
 /// @notice Single pull-payment vault for every native-token payout in the
@@ -12,7 +13,12 @@ import "./lib/PaseoSafeSender.sol";
 ///         pull with `withdraw`. One money-out path keeps the escrow
 ///         invariants auditable and removes push-payment griefing
 ///         (a reverting recipient can never block a settlement).
-contract FareVault is Ownable2Step, PaseoSafeSender {
+/// @dev Inherits FareUpgradable for registry/version consistency, but NO
+///      function here is `whenNotFrozen`: the vault is the drain path for
+///      every other contract's freeze-and-drain upgrade, so it must never
+///      block. Upgrade it with `freezeOld = false` — re-point consumers via
+///      their configure() setters and leave v1 live until balances hit zero.
+contract FareVault is Ownable2Step, PaseoSafeSender, FareUpgradable {
     mapping(address => uint256) public balanceOf;
     mapping(address => bool) public authorized;
     uint256 public totalCredited;
@@ -23,6 +29,11 @@ contract FareVault is Ownable2Step, PaseoSafeSender {
     event AuthorizedSet(address indexed account, bool enabled);
 
     constructor() Ownable(msg.sender) {}
+
+    /// @notice One-time binding to the FareGovernanceRouter (upgrade authority).
+    function setRouter(address _router) external onlyOwner {
+        _setRouterOnce(_router);
+    }
 
     function setAuthorized(address account, bool enabled) external onlyOwner {
         require(account != address(0), "zero-addr");

@@ -1,8 +1,47 @@
 # FARE Architecture
 
-Seven small contracts, one money-out path, two dual-signed checkpoints.
-Deliberately a fraction of DATUM alpha-core's surface — the protocol earns
-complexity only when volume demands it (see ROADMAP.md).
+Eight small contracts, one money-out path, two dual-signed checkpoints, one
+upgrade authority. Deliberately a fraction of DATUM alpha-core's surface —
+the protocol earns complexity only when volume demands it (see ROADMAP.md).
+
+## Upgradability: freeze-and-drain
+
+Every protocol contract except the pause registry inherits `FareUpgradable`
+and is registered by name in **`FareGovernanceRouter`** (`currentAddrOf`,
+`versionOf`, address history) — the slim port of DATUM's router registry.
+Clients resolve live addresses from the registry at runtime (the web app
+re-syncs on every refresh), so an upgrade is one transaction and every
+consumer follows.
+
+The upgrade model is **freeze-and-drain**, not state transplant:
+
+```
+router.upgradeContract(name, v2, freezeOld)
+  ├ v1.setFrozen(true)     — ENTRY mutators blocked (create/bid/accept/
+  │                          register/addStake/openDispute/confirms)
+  ├ v2.migrate(v1)         — optional cheap-state copy hook
+  └ registry re-points, version++
+then: operator re-points cached refs (orders.configure, vault auth, …)
+```
+
+- **Exits and completion paths are never freeze-gated**: cancels, settlement
+  callbacks, dispute resolution, stake unbonding, vault withdrawal all keep
+  working on a frozen v1, so in-flight orders and escrow drain naturally.
+  Nothing is ever trapped behind an upgrade.
+- **Escrow is never copied.** `FareOrders` v1 keeps custody of its in-flight
+  orders until each one terminates through its normal paths.
+- **Cheap state imports are paginated**: `FareDrivers.importRecords`
+  (reputation + identity, never stake) and `FareVenues.importVenues`
+  (records with IDs preserved) take explicit batches, so an unbounded loop
+  can never brick a migration (the DATUM U3 paginated-migrate lesson).
+- **The vault is never frozen** (`freezeOld = false`): its withdraw path is
+  the drain for every other contract's upgrade. A vault upgrade re-points
+  consumers and leaves v1 live until balances hit zero.
+- **Rollback**: re-`register` the old address and `setContractFrozen(...,
+  false)`.
+
+Router ownership is the governance ladder: deployer → Safe/council →
+conviction governance, via `Ownable2Step`.
 
 ## Contract map
 

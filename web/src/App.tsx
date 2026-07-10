@@ -15,6 +15,7 @@ import {
   short,
   signLocation,
   signReveal,
+  syncAddressesFromRouter,
 } from "./chain";
 import { MicroDeg, distanceMeters, fmtCoord, getPosition } from "./geo";
 
@@ -71,6 +72,7 @@ export default function App() {
 
   const refresh = useCallback(async () => {
     try {
+      await syncAddressesFromRouter(); // follow router-driven upgrades
       const c = contracts();
       const nextOrder: bigint = await c.orders.nextOrderId();
       const nextVenue: bigint = await c.venues.nextVenueId();

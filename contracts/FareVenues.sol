@@ -3,7 +3,25 @@ pragma solidity ^0.8.24;
 
 import "@openzeppelin/contracts/access/Ownable2Step.sol";
 import "./lib/GeoLib.sol";
+import "./lib/FareUpgradable.sol";
 import "./interfaces/IFare.sol";
+
+/// View surface of a previous FareVenues used by `importVenues`.
+interface IFareVenuesLegacy {
+    function venues(uint64)
+        external
+        view
+        returns (
+            address operator,
+            address signer,
+            address payout,
+            int32 lat,
+            int32 lon,
+            bool active,
+            uint32 pickups,
+            string memory metadataURI
+        );
+}
 
 /// @title FareVenues
 /// @notice Venue (restaurant / store) registry. One operator can run many
@@ -11,7 +29,7 @@ import "./interfaces/IFare.sol";
 ///         inherently public information, unlike customer drop locations —
 ///         plus a hot signer key for cosigning pickups at the counter and a
 ///         payout address for order-value releases.
-contract FareVenues is Ownable2Step {
+contract FareVenues is Ownable2Step, FareUpgradable {
     using GeoLib for int32;
 
     struct Venue {
@@ -63,6 +81,38 @@ contract FareVenues is Ownable2Step {
         emit AuthorizedSet(account, enabled);
     }
 
+    /// @notice One-time binding to the FareGovernanceRouter (upgrade authority).
+    function setRouter(address _router) external onlyOwner {
+        _setRouterOnce(_router);
+    }
+
+    /// @notice Copy venue records (IDs preserved) from a predecessor during
+    ///         an upgrade. Paginated by ID batch; never clobbers a locally
+    ///         registered slot. Operator/signer/payout carry over so venue
+    ///         key custody is uninterrupted.
+    function importVenues(address oldContract, uint64[] calldata ids) external onlyOwner {
+        IFareVenuesLegacy old = IFareVenuesLegacy(oldContract);
+        for (uint256 i = 0; i < ids.length; i++) {
+            uint64 id = ids[i];
+            if (venues[id].operator != address(0)) continue;
+            (
+                address operator,
+                address signer,
+                address payout,
+                int32 lat,
+                int32 lon,
+                bool active,
+                uint32 pickups,
+                string memory metadataURI
+            ) = old.venues(id);
+            if (operator == address(0)) continue;
+            venues[id] = Venue(operator, signer, payout, lat, lon, active, pickups, metadataURI);
+            venuesByOperator[operator].push(id);
+            if (id >= nextVenueId) nextVenueId = id + 1;
+            emit VenueRegistered(id, operator, lat, lon, metadataURI);
+        }
+    }
+
     // ---- venue lifecycle ----
 
     function registerVenue(
@@ -71,7 +121,7 @@ contract FareVenues is Ownable2Step {
         address signer,
         address payout,
         string calldata metadataURI
-    ) external whenNotPaused returns (uint64 venueId) {
+    ) external whenNotPaused whenNotFrozen returns (uint64 venueId) {
         GeoLib.requireValid(lat, lon);
         venueId = nextVenueId++;
         venues[venueId] = Venue({

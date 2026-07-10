@@ -47,6 +47,11 @@ export const VAULT_ABI = [
   "function claimPaseoDust()",
 ];
 
+export const ROUTER_ABI = [
+  "function currentAddrOf(bytes32) view returns (address)",
+  "function versionOf(bytes32) view returns (uint64)",
+];
+
 export const DISPUTES_ABI = [
   "function disputeBond() view returns (uint96)",
   "function openDispute(uint256 orderId, string evidenceURI) payable returns (uint256)",

@@ -5,6 +5,7 @@ import "@openzeppelin/contracts/access/Ownable2Step.sol";
 import "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
 import "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import "./lib/GeoLib.sol";
+import "./lib/FareUpgradable.sol";
 import "./interfaces/IFare.sol";
 
 /// @title FareSettlement
@@ -35,7 +36,7 @@ import "./interfaces/IFare.sol";
 ///         off-chain until the delivery moment, but a ZK proximity circuit
 ///         (proving dist < R against the commitment without revealing
 ///         coordinates) is the documented production upgrade.
-contract FareSettlement is Ownable2Step, EIP712 {
+contract FareSettlement is Ownable2Step, EIP712, FareUpgradable {
     using GeoLib for int32;
 
     /// Signed by the driver (phases 1 and 2) and the venue signer (phase 1).
@@ -105,6 +106,11 @@ contract FareSettlement is Ownable2Step, EIP712 {
 
     // ---- wiring & params ----
 
+    /// @notice One-time binding to the FareGovernanceRouter (upgrade authority).
+    function setRouter(address _router) external onlyOwner {
+        _setRouterOnce(_router);
+    }
+
     function configure(address _orders, address _venues) external onlyOwner {
         require(_orders != address(0) && _venues != address(0), "zero-addr");
         orders = IFareOrders(_orders);
@@ -139,7 +145,7 @@ contract FareSettlement is Ownable2Step, EIP712 {
         bytes calldata driverSig,
         LocationAttestation calldata venueAtt,
         bytes calldata venueSig
-    ) external whenNotPaused {
+    ) external whenNotPaused whenNotFrozen {
         require(driverAtt.orderId == venueAtt.orderId, "order-mismatch");
         uint256 orderId = driverAtt.orderId;
         (, address driver, uint64 venueId) = orders.partiesOf(orderId);
@@ -181,7 +187,7 @@ contract FareSettlement is Ownable2Step, EIP712 {
         bytes calldata driverSig,
         DropoffReveal calldata reveal,
         bytes calldata customerSig
-    ) external whenNotPaused {
+    ) external whenNotPaused whenNotFrozen {
         require(driverAtt.orderId == reveal.orderId, "order-mismatch");
         uint256 orderId = driverAtt.orderId;
         (address customer, address driver, ) = orders.partiesOf(orderId);

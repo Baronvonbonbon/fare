@@ -11,6 +11,9 @@ discipline.
 - [x] Order book + reverse auction + escrow + dual-sig GPS settlement
 - [x] Optional-stake registries with governance-raisable floors
 - [x] Arbitrated disputes, per-category pause, pull-payment vault
+- [x] Upgradable layer: `FareGovernanceRouter` registry + freeze-and-drain
+      `FareUpgradable` base, paginated record imports, router-following web
+      client (DATUM ladder, slim port)
 - [ ] Paseo deployment + a filmed end-to-end field test (two phones, one
       real handoff) — the single most persuasive artifact for the project
 - [ ] Fuzz + invariant tests (escrow conservation: Σcredits = Σescrow deltas)

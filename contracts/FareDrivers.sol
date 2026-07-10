@@ -3,7 +3,24 @@ pragma solidity ^0.8.24;
 
 import "@openzeppelin/contracts/access/Ownable2Step.sol";
 import "./lib/PaseoSafeSender.sol";
+import "./lib/FareUpgradable.sol";
 import "./interfaces/IFare.sol";
+
+/// View surface of a previous FareDrivers used by `importRecords`.
+interface IFareDriversLegacy {
+    function drivers(address)
+        external
+        view
+        returns (
+            bool registered,
+            bool banned,
+            uint96 stake,
+            uint64 unstakeRequestedAt,
+            uint32 delivered,
+            uint32 failed,
+            string memory metadataURI
+        );
+}
 
 /// @title FareDrivers
 /// @notice Driver registry: identity, optional stake, reputation counters,
@@ -11,7 +28,7 @@ import "./interfaces/IFare.sol";
 ///         onboarding is a single free registration; governance can raise
 ///         the floor later without redeploying (easy onboarding now,
 ///         expandable economics later).
-contract FareDrivers is Ownable2Step, PaseoSafeSender {
+contract FareDrivers is Ownable2Step, PaseoSafeSender, FareUpgradable {
     struct Driver {
         bool registered;
         bool banned;
@@ -56,6 +73,42 @@ contract FareDrivers is Ownable2Step, PaseoSafeSender {
 
     // ---- admin ----
 
+    /// @notice One-time binding to the FareGovernanceRouter (upgrade authority).
+    function setRouter(address _router) external onlyOwner {
+        _setRouterOnce(_router);
+    }
+
+    /// @notice Copy identity + reputation records from a predecessor during
+    ///         an upgrade. Paginated (caller supplies address batches) so an
+    ///         unbounded list can never brick the migration — the DATUM
+    ///         multi-claim-fanout U3 lesson. Stake is deliberately NOT
+    ///         copied: it stays withdrawable on the frozen v1 (unstake paths
+    ///         are never freeze-gated), and drivers re-stake here.
+    function importRecords(address oldContract, address[] calldata users) external onlyOwner {
+        IFareDriversLegacy old = IFareDriversLegacy(oldContract);
+        for (uint256 i = 0; i < users.length; i++) {
+            address user = users[i];
+            Driver storage d = drivers[user];
+            if (d.registered) continue; // never clobber live local state
+            (
+                bool registered,
+                bool banned,
+                ,
+                ,
+                uint32 delivered,
+                uint32 failed,
+                string memory metadataURI
+            ) = old.drivers(user);
+            if (!registered) continue;
+            d.registered = true;
+            d.banned = banned;
+            d.delivered = delivered;
+            d.failed = failed;
+            d.metadataURI = metadataURI;
+            emit DriverRegistered(user, 0, metadataURI);
+        }
+    }
+
     function setAuthorized(address account, bool enabled) external onlyOwner {
         require(account != address(0), "zero-addr");
         authorized[account] = enabled;
@@ -80,7 +133,7 @@ contract FareDrivers is Ownable2Step, PaseoSafeSender {
 
     // ---- driver lifecycle ----
 
-    function register(string calldata metadataURI) external payable whenNotPaused {
+    function register(string calldata metadataURI) external payable whenNotPaused whenNotFrozen {
         Driver storage d = drivers[msg.sender];
         require(!d.registered, "already-registered");
         d.registered = true;
@@ -94,7 +147,9 @@ contract FareDrivers is Ownable2Step, PaseoSafeSender {
         drivers[msg.sender].metadataURI = metadataURI;
     }
 
-    function addStake() external payable whenNotPaused {
+    // requestUnstake / withdrawStake / slash are deliberately NOT freeze-
+    // gated: stake must always be able to leave a frozen v1.
+    function addStake() external payable whenNotPaused whenNotFrozen {
         Driver storage d = drivers[msg.sender];
         require(d.registered, "not-registered");
         require(msg.value > 0, "zero-value");

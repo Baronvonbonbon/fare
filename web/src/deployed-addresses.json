@@ -1,14 +1,15 @@
 {
   "network": "localhost",
   "chainId": 31337,
-  "deployedAt": "2026-07-10T11:46:59.872Z",
+  "deployedAt": "2026-07-10T14:27:57.340Z",
   "addresses": {
-    "pauseRegistry": "0x3de00f44ce68FC56DB0e0E33aD4015C6e78eCB39",
-    "vault": "0x89372b32b8AF3F1272e2efb3088616318D2834cA",
-    "drivers": "0xB1c05b498Cb58568B2470369FEB98B00702063dA",
-    "venues": "0x92A00fc48Ad3dD4A8b5266a8F467a52Ac784fC83",
-    "orders": "0x2f8D338360D095a72680A943A22fE6a0d398a0B4",
-    "settlement": "0x21915b79E1d334499272521a3508061354D13FF0",
-    "disputes": "0x44863F234b137A395e5c98359d16057A9A1fAc55"
+    "router": "0x5FbDB2315678afecb367f032d93F642f64180aa3",
+    "pauseRegistry": "0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512",
+    "vault": "0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0",
+    "drivers": "0xCf7Ed3AccA5a467e9e704C703E8D87F634fB0Fc9",
+    "venues": "0xDc64a140Aa3E981100a9becA4E685f962f0cF6C9",
+    "orders": "0x5FC8d32690cc91D4c39d9d3abcBD16989F875707",
+    "settlement": "0x0165878A594ca255338adfa4d48449f69242Eb8F",
+    "disputes": "0xa513E6E4b8f2a923D98304ec87F64353C4D5C853"
   }
 }

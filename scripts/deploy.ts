@@ -95,6 +95,7 @@ async function main() {
 
   // ── 1. Deploy ──────────────────────────────────────────────────────────
   console.log("1. Deploying contracts");
+  const router = await deployOrReuse("router", "FareGovernanceRouter");
   const pause = await deployOrReuse("pauseRegistry", "FarePauseRegistry");
   const vault = await deployOrReuse("vault", "FareVault");
   const drivers = await deployOrReuse("drivers", "FareDrivers", [pause]);
@@ -152,6 +153,35 @@ async function main() {
     );
   }
 
+  // ── 2b. Upgradability: registry + router binding ───────────────────────
+  console.log("\n2b. Governance router registry");
+  const routerC = await ethers.getContractAt("FareGovernanceRouter", router, deployer);
+  const registryEntries: Array<[string, string]> = [
+    ["pauseRegistry", pause],
+    ["vault", vault],
+    ["drivers", drivers],
+    ["venues", venues],
+    ["orders", orders],
+    ["settlement", settlement],
+    ["disputes", disputes],
+  ];
+  for (const [name, addr] of registryEntries) {
+    const key = ethers.encodeBytes32String(name);
+    if ((await routerC.currentAddrOf(key)) !== addr) {
+      await send(`router.register(${name})`, () =>
+        routerC.register(key, addr, { gasLimit: GAS_LIMIT })
+      );
+    } else console.log(`  = router already has ${name}`);
+  }
+  // Bind the router as upgrade authority on the six FareUpgradable contracts
+  // (pauseRegistry is registered for discovery only — not upgradable).
+  for (const [name, addr] of registryEntries.slice(1)) {
+    const c = await ethers.getContractAt("FareVault", addr, deployer); // any FareUpgradable ABI works for router()
+    if ((await c.router()) === ethers.ZeroAddress) {
+      await send(`${name}.setRouter`, () => c.setRouter(router, { gasLimit: GAS_LIMIT }));
+    } else console.log(`  = ${name} router already bound`);
+  }
+
   // ── 3. Validate ────────────────────────────────────────────────────────
   console.log("\n3. Validation");
   const checks: Array<[string, boolean]> = [
@@ -166,6 +196,17 @@ async function main() {
     ["drivers auth orders", await driversC.authorized(orders)],
     ["drivers auth disputes", await driversC.authorized(disputes)],
     ["venues auth orders", await venuesC.authorized(orders)],
+    [
+      "router registry complete",
+      (
+        await Promise.all(
+          registryEntries.map(
+            async ([n, a]) => (await routerC.currentAddrOf(ethers.encodeBytes32String(n))) === a
+          )
+        )
+      ).every(Boolean),
+    ],
+    ["orders router bound", (await ordersC.router()) === router],
   ];
   let ok = true;
   for (const [label, pass] of checks) {
