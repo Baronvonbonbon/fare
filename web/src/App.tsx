@@ -35,7 +35,8 @@ import {
 } from "./chain";
 import { MicroDeg, distanceMeters, fmtCoord, fmtDist, getPosition } from "./geo";
 import { QRScan, QRShow } from "./qr";
-import { MiniMap, VenuePin } from "./map";
+import { VenuePin } from "./map";
+import { AreaMap, PinMap } from "./tilemap";
 
 // ---- shared types ----
 
@@ -662,6 +663,7 @@ function CustomerView({ session, orders, venues, act, busy, signed, say, myLoc, 
 function CreateOrder({ session, venues, act, busy, signed, say, myLoc, locateMe }: any) {
   const [venueId, setVenueId] = useState("");
   const [pos, setPos] = useState<MicroDeg | null>(null);
+  const [mapOpen, setMapOpen] = useState(false);
   const [orderValue, setOrderValue] = useState("0");
   const [tip, setTip] = useState("0");
   const [maxFare, setMaxFare] = useState("0.5");
@@ -693,12 +695,24 @@ function CreateOrder({ session, venues, act, busy, signed, say, myLoc, locateMe 
       </label>
       <label className="field">
         <span>drop location (kept secret — only a commitment goes on-chain)</span>
-        <button className="btn ghost small" type="button"
-          onClick={async () => { try { setPos(await getPosition()); } catch (e: any) { say(e.message, true); } }}>
-          Use my GPS position
-        </button>
+        <div className="btn-row">
+          <button className="btn ghost small" type="button" onClick={() => setMapOpen(true)}>
+            ◎ Drop pin on map
+          </button>
+          <button className="btn ghost small" type="button"
+            onClick={async () => { try { setPos(await getPosition()); } catch (e: any) { say(e.message, true); } }}>
+            Use my GPS
+          </button>
+        </div>
         <GeoPill pos={pos} />
       </label>
+      {mapOpen && (
+        <PinMap
+          initial={pos}
+          onConfirm={(m) => { setPos(m); setMapOpen(false); }}
+          onCancel={() => setMapOpen(false)}
+        />
+      )}
       <div className="row3">
         <label className="field"><span>order value (PAS)</span>
           <input value={orderValue} onChange={(e) => setOrderValue(e.target.value)} inputMode="decimal" /></label>
@@ -892,7 +906,7 @@ function DriverView({ session, orders, venues, act, busy, signed, say, myLoc, ra
       </div>
 
       {myLoc && venuePins.length > 0 && (
-        <MiniMap center={myLoc} venues={venuePins} radiusKm={radiusKm} />
+        <AreaMap center={myLoc} venues={venuePins} radiusKm={radiusKm} />
       )}
 
       <div className="section-note">
@@ -1097,6 +1111,7 @@ function VenueView({ session, orders, venues, act, busy, signed, say }: any) {
 function VenueRegister({ act, busy, signed, say }: any) {
   const [name, setName] = useState("");
   const [pos, setPos] = useState<MicroDeg | null>(null);
+  const [mapOpen, setMapOpen] = useState(false);
   return (
     <div className="card">
       <h2>Register a venue <span className="tag">public pin</span></h2>
@@ -1104,12 +1119,24 @@ function VenueRegister({ act, busy, signed, say }: any) {
         <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Golden Gate Grill" /></label>
       <label className="field">
         <span>location pin (public — pickups are geo-checked against it)</span>
-        <button className="btn ghost small" type="button"
-          onClick={async () => { try { setPos(await getPosition()); } catch (e: any) { say(e.message, true); } }}>
-          Use my GPS position
-        </button>
+        <div className="btn-row">
+          <button className="btn ghost small" type="button" onClick={() => setMapOpen(true)}>
+            ◎ Drop pin on map
+          </button>
+          <button className="btn ghost small" type="button"
+            onClick={async () => { try { setPos(await getPosition()); } catch (e: any) { say(e.message, true); } }}>
+            Use my GPS
+          </button>
+        </div>
         <GeoPill pos={pos} />
       </label>
+      {mapOpen && (
+        <PinMap
+          initial={pos}
+          onConfirm={(m) => { setPos(m); setMapOpen(false); }}
+          onCancel={() => setMapOpen(false)}
+        />
+      )}
       <div className="btn-row">
         <button className="btn" disabled={busy || !pos || !name}
           onClick={() =>

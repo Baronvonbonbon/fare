@@ -680,6 +680,79 @@ button.btn.small {
   padding: 0;
 }
 
+/* interactive tile map (MapLibre) */
+.tilemap-area {
+  width: 100%;
+  height: 240px;
+  margin: 10px 0 4px;
+  border-radius: 14px;
+  overflow: hidden;
+  border: 1px solid var(--line-strong);
+}
+.tilemap-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+}
+.tilemap-canvas {
+  flex: 1;
+  min-height: 0;
+}
+.tilemap-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 12px 14px calc(12px + env(safe-area-inset-bottom));
+  background: var(--surface);
+  border-top: 1px solid var(--line-strong);
+  font-size: 12px;
+}
+.tilemap-err {
+  position: absolute;
+  top: 14px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 2;
+  padding: 8px 14px;
+  border-radius: 999px;
+  background: rgba(255, 38, 112, 0.15);
+  border: 1px solid var(--pink);
+  font-size: 12px;
+}
+/* custom markers */
+.map-you {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--cyan);
+  box-shadow: 0 0 0 4px rgba(7, 255, 255, 0.25), 0 0 8px var(--cyan);
+}
+.map-venue {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--muted);
+  border: 1.5px solid var(--bg);
+  cursor: pointer;
+}
+.map-venue.hot {
+  width: 22px;
+  height: 22px;
+  background: var(--pink);
+  color: #fff;
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 0 8px var(--pink-glow);
+}
+
 /* proximity map */
 .minimap {
   margin: 10px 0 4px;

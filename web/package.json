@@ -11,6 +11,7 @@
   "dependencies": {
     "ethers": "^6.13.0",
     "jsqr": "^1.4.0",
+    "maplibre-gl": "^5.24.0",
     "pine-rpc": "^0.3.0",
     "qrcode-generator": "^2.0.4",
     "react": "^18.3.1",
