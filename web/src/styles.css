@@ -106,10 +106,10 @@ body::before {
 }
 .logo-r .i-mark {
   position: absolute;
-  left: 0.04em;
-  bottom: 0.03em;
-  width: 0.12em;
-  height: 0.66em;
+  left: 0.13em;
+  bottom: 0.20em;
+  width: 0.30em;
+  height: 0.54em;
   background: var(--pink);
   border-radius: 1px;
 }
@@ -117,10 +117,10 @@ body::before {
   content: "";
   position: absolute;
   left: 50%;
-  top: -0.30em;
+  top: -0.34em;
   transform: translateX(-50%);
-  width: 0.17em;
-  height: 0.17em;
+  width: 0.26em;
+  height: 0.26em;
   border-radius: 50%;
   background: var(--pink);
 }
