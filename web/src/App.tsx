@@ -9,6 +9,7 @@ import {
   computeDropCommit,
   currentBlock,
   decodePayload,
+  discoverAssignments,
   discoverOrders,
   DRIP_MIN,
   encodePayload,
@@ -131,10 +132,8 @@ export default function App() {
   const [radiusKm, setRadiusKm] = useState<number>(() => Number(localStorage.getItem("fare.radiuskm")) || 15);
   useEffect(() => localStorage.setItem("fare.radiuskm", String(radiusKm)), [radiusKm]);
 
-  // Event-discovery cursor + struct cache (see chain.discoverOrders).
-  const knownOrderIds = useRef<Set<string>>(new Set());
+  // Struct cache shared across refreshes: terminal orders are never re-read.
   const orderCache = useRef<Map<string, OrderRow>>(new Map());
-  const lastBlock = useRef<number>(-1);
 
   // Boot the selected node (no-op for hosted/daemon; starts the in-tab
   // smoldot light client for pine-embedded and reports sync progress).
@@ -180,25 +179,70 @@ export default function App() {
       await syncAddressesFromRouter(); // follow router-driven upgrades
       const c = contracts();
 
-      // ── 1. Discover order IDs incrementally from OrderCreated logs, so we
-      //       never scan 1..nextOrderId. Fall back to enumeration on a node
-      //       without eth_getLogs (some light-client modes).
+      // ── 1. Venues first — few, read directly, and needed to scope orders
+      //       by venue / region below.
+      const nextVenue: bigint = await c.venues.nextVenueId();
+      const venueIds = Array.from({ length: Number(nextVenue - 1n) }, (_, i) => BigInt(i + 1));
+      const rawVenues = await Promise.all(venueIds.map((id) => c.venues.venues(id)));
+      const venueRows: VenueRow[] = rawVenues.map((v, i) => ({
+        id: venueIds[i],
+        operator: v.operator,
+        signer: v.signer,
+        lat: Number(v.lat),
+        lon: Number(v.lon),
+        active: v.active,
+        pickups: Number(v.pickups),
+        metadataURI: v.metadataURI,
+      }));
+      setVenues(venueRows);
+
+      // ── 2. Role-aware scoping. We fetch the OrderCreated stream once (topic0)
+      //       and filter the decoded args client-side (Paseo can't server-side
+      //       filter non-leading topics). Each role keeps only the orders it
+      //       needs, so the struct reads below stay scoped. The driver also
+      //       pulls their own assigned jobs, so a job never vanishes when it
+      //       drifts out of radius.
       const latest = await currentBlock();
-      const known = knownOrderIds.current;
+      const from = Math.max(0, latest - INITIAL_LOOKBACK);
+      const me = session?.address?.toLowerCase();
+      const relevant = new Set<string>();
+      const add = (ids: bigint[]) => ids.forEach((id) => relevant.add(String(id)));
+      const myVenueIds = new Set(
+        venueRows
+          .filter((v) => me && (v.operator.toLowerCase() === me || v.signer.toLowerCase() === me))
+          .map((v) => String(v.id))
+      );
+      const venueById = new Map(venueRows.map((v) => [String(v.id), v]));
+      const inRegion = (venueId: bigint) => {
+        if (!myLoc || radiusKm === 0) return true;
+        const v = venueById.get(String(venueId));
+        return !!v && distanceMeters(myLoc, { lat: v.lat, lon: v.lon }) <= radiusKm * 1000;
+      };
+
       try {
-        const from = lastBlock.current < 0 ? Math.max(0, latest - INITIAL_LOOKBACK) : lastBlock.current + 1;
-        if (from <= latest) for (const d of await discoverOrders(from, latest)) known.add(String(d.id));
-        lastBlock.current = latest;
+        const created = await discoverOrders(from, latest);
+        if (role === "customer" && me) {
+          add(created.filter((d) => d.customer.toLowerCase() === me).map((d) => d.id));
+        } else if (role === "venue" && me) {
+          add(created.filter((d) => myVenueIds.has(String(d.venueId))).map((d) => d.id));
+        } else if (role === "driver") {
+          add(created.filter((d) => inRegion(d.venueId)).map((d) => d.id)); // open, in region
+          if (me) {
+            const assigns = await discoverAssignments(from, latest);
+            add(assigns.filter((a) => a.driver.toLowerCase() === me).map((a) => a.id)); // my jobs, anywhere
+          }
+        }
+        // account-scoped roles with no session → nothing to show
       } catch {
+        // node without eth_getLogs — enumerate all; views filter locally
         const nextOrder: bigint = await c.orders.nextOrderId();
-        for (let i = 1n; i < nextOrder; i++) known.add(String(i));
+        for (let i = 1n; i < nextOrder; i++) relevant.add(String(i));
       }
 
-      // ── 2. Re-read structs only for newly-seen or still-active orders;
-      //       terminal orders (Delivered/Cancelled/Resolved) stay cached, so
-      //       steady-state cost tracks live orders, not the all-time total.
+      // ── 3. Read structs only for newly-seen or still-active relevant orders;
+      //       terminal orders (Delivered/Cancelled/Resolved) stay cached.
       const cache = orderCache.current;
-      const toRead = [...known].filter((id) => {
+      const toRead = [...relevant].filter((id) => {
         const row = cache.get(id);
         return !row || !TERMINAL_STATUS.has(row.status);
       });
@@ -235,33 +279,22 @@ export default function App() {
         })
       );
       for (const row of readRows) cache.set(String(row.id), row);
-      setOrders([...cache.values()].sort((a, b) => (a.id < b.id ? 1 : -1))); // newest first
 
-      // ── 3. Venues are few and rarely change — read directly.
-      const nextVenue: bigint = await c.venues.nextVenueId();
-      const venueIds = Array.from({ length: Number(nextVenue - 1n) }, (_, i) => BigInt(i + 1));
-      const rawVenues = await Promise.all(venueIds.map((id) => c.venues.venues(id)));
-      setVenues(
-        rawVenues.map((v, i) => ({
-          id: venueIds[i],
-          operator: v.operator,
-          signer: v.signer,
-          lat: Number(v.lat),
-          lon: Number(v.lon),
-          active: v.active,
-          pickups: Number(v.pickups),
-          metadataURI: v.metadataURI,
-        }))
+      // Publish only the current role's relevant orders, newest first.
+      setOrders(
+        ([...relevant].map((id) => cache.get(id)).filter(Boolean) as OrderRow[]).sort((a, b) =>
+          a.id < b.id ? 1 : -1
+        )
       );
 
-      if (session) {
-        setVaultBal(await c.vault.balanceOf(session.address));
-        setNativeBal(await nativeBalance(session.address));
+      if (me) {
+        setVaultBal(await c.vault.balanceOf(me));
+        setNativeBal(await nativeBalance(me));
       }
     } catch (e: any) {
       console.error(e);
     }
-  }, [session]);
+  }, [session, role, myLoc, radiusKm]);
 
   useEffect(() => {
     refresh();

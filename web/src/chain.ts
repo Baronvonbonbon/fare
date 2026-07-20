@@ -219,10 +219,19 @@ export async function currentBlock(): Promise<number> {
   return readProvider.getBlockNumber();
 }
 
-/// OrderCreated logs in [fromBlock, toBlock]. Throws if the node has no
-/// eth_getLogs (e.g. some light-client modes) — callers fall back to a scan.
+function ordersContract(): Contract {
+  return new Contract(ADDRESSES.orders, ORDERS_ABI, readProvider);
+}
+
+// Paseo's eth-rpc rejects `null` topic placeholders and mishandles the `[]`
+// wildcard, so we cannot server-side filter on a non-leading indexed topic
+// (customer/venueId/driver). Instead we fetch the full event stream by topic0
+// (one cheap getLogs) and let callers filter the decoded args client-side —
+// which still scopes the expensive part, the per-order struct reads.
+
+/// All OrderCreated logs in range, decoded (id, customer, venueId).
 export async function discoverOrders(fromBlock: number, toBlock: number): Promise<DiscoveredOrder[]> {
-  const orders = new Contract(ADDRESSES.orders, ORDERS_ABI, readProvider);
+  const orders = ordersContract();
   const logs = await orders.queryFilter(orders.filters.OrderCreated(), fromBlock, toBlock);
   return logs.map((l: any) => ({
     id: l.args.orderId as bigint,
@@ -230,6 +239,19 @@ export async function discoverOrders(fromBlock: number, toBlock: number): Promis
     customer: l.args.customer as string,
     block: l.blockNumber as number,
   }));
+}
+
+export interface Assignment {
+  id: bigint;
+  driver: string;
+}
+
+/// All OrderAssigned logs in range, decoded (id, driver) — for a driver's own
+/// in-flight jobs, filtered client-side.
+export async function discoverAssignments(fromBlock: number, toBlock: number): Promise<Assignment[]> {
+  const orders = ordersContract();
+  const logs = await orders.queryFilter(orders.filters.OrderAssigned(), fromBlock, toBlock);
+  return logs.map((l: any) => ({ id: l.args.orderId as bigint, driver: l.args.driver as string }));
 }
 
 // ---- EIP-712 attestations ----

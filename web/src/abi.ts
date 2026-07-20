@@ -14,9 +14,11 @@ export const ORDERS_ABI = [
   "function cancelOpen(uint256 orderId)",
   "function cancelAssigned(uint256 orderId)",
   "function abandonOrder(uint256 orderId)",
-  // Discovery: enumerate orders (optionally scoped by customer/venue topic)
-  // from logs instead of scanning every id.
+  // Discovery: enumerate orders per role from indexed topics instead of
+  // scanning every id — by customer, by venue, or (for a driver's own jobs)
+  // by assigned driver.
   "event OrderCreated(uint256 indexed orderId, address indexed customer, uint64 indexed venueId, uint96 orderValue, uint96 tip, uint96 maxFare, bytes32 dropCommit)",
+  "event OrderAssigned(uint256 indexed orderId, address indexed driver, uint96 fare, uint64 pickupDeadline)",
 ];
 
 export const VENUES_ABI = [
