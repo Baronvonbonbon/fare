@@ -250,7 +250,7 @@ export default function App() {
         </div>
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
           <NodeChip />
-          <WalletChip session={session} onConnect={async (mode, key) => {
+          <WalletChip session={session} balance={nativeBal} onConnect={async (mode, key) => {
             try {
               const s = await connect(mode, key);
               setSession(s);
@@ -405,9 +405,11 @@ function NodeChip() {
 
 function WalletChip({
   session,
+  balance,
   onConnect,
 }: {
   session: Session | null;
+  balance: bigint;
   onConnect: (m: SignerMode, key?: string) => void;
 }) {
   const [open, setOpen] = useState(false);
@@ -416,6 +418,7 @@ function WalletChip({
       <div className="wallet-chip" title={session.address}>
         <span className="status-dot" />
         {short(session.address)}
+        <span className="wallet-bal">{fmt(balance)} PAS</span>
       </div>
     );
   }

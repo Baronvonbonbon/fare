@@ -135,6 +135,14 @@ body::before {
   box-shadow: 0 0 8px var(--ok);
 }
 
+.wallet-bal {
+  font-weight: 600;
+  color: var(--pink);
+  padding-left: 8px;
+  margin-left: 2px;
+  border-left: 1px solid var(--line-strong);
+}
+
 .wallet-chip.disconnected .status-dot {
   background: var(--muted);
   box-shadow: none;
