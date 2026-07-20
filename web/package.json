@@ -10,7 +10,7 @@
   },
   "dependencies": {
     "ethers": "^6.13.0",
-    "pine-rpc": "file:../../pine-rpc",
+    "pine-rpc": "^0.3.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1"
   },
