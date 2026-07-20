@@ -5,6 +5,7 @@ import "@openzeppelin/contracts/access/Ownable2Step.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "./interfaces/IFare.sol";
 import "./lib/FareUpgradable.sol";
+import "./lib/GeoLib.sol";
 
 /// @title FareOrders
 /// @notice The order book: escrow, driver reverse auction, and lifecycle.
@@ -90,6 +91,9 @@ contract FareOrders is Ownable2Step, ReentrancyGuard, FareUpgradable, IFareOrder
     event OrderDisputed(uint256 indexed orderId);
     event OrderResolved(uint256 indexed orderId, uint96 customerAmount, uint96 driverAmount);
     event ParamsSet(uint16 feeBps, uint16 assignedCancelBps, uint64 defaultPickupWindow, uint64 defaultDeliveryWindow);
+    /// Coarse pickup region (GeoLib.regionOf of the venue pin), indexed FIRST
+    /// so clients can server-side filter open-order discovery by region.
+    event OrderRegion(bytes32 indexed region, uint256 indexed orderId);
 
     // Cancellation reason codes for OrderCancelled
     uint8 public constant REASON_CUSTOMER_OPEN = 0;
@@ -204,6 +208,12 @@ contract FareOrders is Ownable2Step, ReentrancyGuard, FareUpgradable, IFareOrder
         o.deliveryWindowSecs = dw;
 
         emit OrderCreated(orderId, msg.sender, venueId, orderValue, tip, maxFare, dropCommit);
+
+        // Localized discovery: region is the LEADING indexed topic so clients
+        // can server-side filter by it (Paseo's eth-rpc can't filter a
+        // non-leading indexed topic). Additive — OrderCreated is unchanged.
+        (int32 vlat, int32 vlon) = venues.locationOf(venueId);
+        emit OrderRegion(GeoLib.regionOf(vlat, vlon), orderId);
     }
 
     // whenNotFrozen intentionally absent from everything below createOrder/

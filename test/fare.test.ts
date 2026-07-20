@@ -625,4 +625,53 @@ describe("FARE protocol", () => {
       }
     });
   });
+
+  // Localized discovery: createOrder emits OrderRegion(region, orderId) with
+  // region = GeoLib.regionOf(venue pin), region indexed FIRST so clients can
+  // server-side filter open-order discovery by it. Clients recompute the same
+  // region with Math.trunc(coord / REGION_CELL) + keccak(abi.encode(int256,int256)).
+  describe("localized discovery: OrderRegion", () => {
+    const REGION_CELL = 500_000;
+    const regionOf = (lat: number, lon: number) =>
+      ethers.keccak256(
+        abi.encode(["int256", "int256"], [Math.trunc(lat / REGION_CELL), Math.trunc(lon / REGION_CELL)])
+      );
+
+    it("emits OrderRegion matching regionOf(venue pin)", async () => {
+      const f = await loadFixture(deployAll);
+      const commit = dropCommit(DROP_LAT, DROP_LON, DROP_SALT);
+      await expect(
+        f.orders
+          .connect(f.customer)
+          .createOrder(f.venueId, commit, ORDER_VALUE, TIP, MAX_FARE, 0, 0, { value: ORDER_VALUE + TIP })
+      )
+        .to.emit(f.orders, "OrderRegion")
+        .withArgs(regionOf(VENUE_LAT, VENUE_LON), 1n);
+    });
+
+    it("nearby venues share a region; a distant venue differs", async () => {
+      const f = await loadFixture(deployAll);
+      // same ~0.5° cell (~44 m away) vs. ~1.1° north (a different cell)
+      await f.venues
+        .connect(f.venueOp)
+        .registerVenue(VENUE_LAT + 400, VENUE_LON, f.venueSigner.address, f.venueOp.address, "ipfs://near");
+      await f.venues
+        .connect(f.venueOp)
+        .registerVenue(VENUE_LAT + 1_100_000, VENUE_LON, f.venueSigner.address, f.venueOp.address, "ipfs://far");
+      const commit = dropCommit(DROP_LAT, DROP_LON, DROP_SALT);
+      // order at the nearby venue (id 2) shares venue 1's region
+      await expect(
+        f.orders.connect(f.customer).createOrder(2n, commit, 0, 0, MAX_FARE, 0, 0, { value: 0 })
+      )
+        .to.emit(f.orders, "OrderRegion")
+        .withArgs(regionOf(VENUE_LAT, VENUE_LON), 1n);
+      // order at the distant venue (id 3) lands in a different region
+      await expect(
+        f.orders.connect(f.customer).createOrder(3n, commit, 0, 0, MAX_FARE, 0, 0, { value: 0 })
+      )
+        .to.emit(f.orders, "OrderRegion")
+        .withArgs(regionOf(VENUE_LAT + 1_100_000, VENUE_LON), 2n);
+      expect(regionOf(VENUE_LAT + 1_100_000, VENUE_LON)).to.not.equal(regionOf(VENUE_LAT, VENUE_LON));
+    });
+  });
 });

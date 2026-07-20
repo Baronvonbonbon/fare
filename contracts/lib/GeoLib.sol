@@ -24,6 +24,10 @@ library GeoLib {
     /// Scale used for the cosine fixed point.
     int256 internal constant COS_SCALE = 100_000;
 
+    /// Region grid cell size in microdegrees (~0.5° ≈ 55 km). Coarse buckets
+    /// for localized order discovery (see regionOf).
+    int256 internal constant REGION_CELL = 500_000;
+
     error GeoInvalidLatitude(int32 lat);
     error GeoInvalidLongitude(int32 lon);
 
@@ -68,6 +72,17 @@ library GeoLib {
         int256 dxM = (dLon * int256(METERS_PER_DEGREE)) / MICRO;
 
         return uint256(dxM * dxM + dyM * dyM);
+    }
+
+    /// @notice Coarse geographic region id for a coordinate, for localized
+    ///         order discovery. Points in the same ~0.5° cell share a region.
+    /// @dev    Truncated (toward zero) grid indices, hashed for a flat id.
+    ///         Clients mirror this with Math.trunc(coord / REGION_CELL) and
+    ///         keccak256(abi.encode(int256 latCell, int256 lonCell)).
+    function regionOf(int32 lat, int32 lon) internal pure returns (bytes32) {
+        int256 latCell = int256(lat) / REGION_CELL;
+        int256 lonCell = int256(lon) / REGION_CELL;
+        return keccak256(abi.encode(latCell, lonCell));
     }
 
     /// @notice True when the two points are within `radiusMeters` of each other.
