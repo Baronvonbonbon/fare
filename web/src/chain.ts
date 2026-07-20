@@ -7,6 +7,7 @@ import {
   ethers,
 } from "ethers";
 import deployed from "./deployed-addresses.json";
+import { MicroDeg } from "./geo";
 import {
   DISPUTES_ABI,
   DRIVERS_ABI,
@@ -252,6 +253,43 @@ export async function discoverAssignments(fromBlock: number, toBlock: number): P
   const orders = ordersContract();
   const logs = await orders.queryFilter(orders.filters.OrderAssigned(), fromBlock, toBlock);
   return logs.map((l: any) => ({ id: l.args.orderId as bigint, driver: l.args.driver as string }));
+}
+
+// ---- region-scoped discovery (Phase 2: OrderRegion) ----
+// region is the LEADING indexed topic, so — unlike customer/venue/driver — it
+// CAN be server-side filtered on Paseo. A driver fetches only the orders whose
+// pickup falls in the grid cells covering their radius, instead of the whole
+// OrderCreated stream. Must match GeoLib.regionOf exactly.
+
+const REGION_CELL = 500_000; // microdegrees (~0.5°), == GeoLib.REGION_CELL
+
+const cellRegion = (latCell: number, lonCell: number): string =>
+  ethers.keccak256(ethers.AbiCoder.defaultAbiCoder().encode(["int256", "int256"], [latCell, lonCell]));
+
+/// Region ids for every grid cell overlapping the radius around `center`
+/// (padded a cell each way so edges/truncation can't miss one).
+export function regionsCovering(center: MicroDeg, radiusKm: number): string[] {
+  const r = radiusKm * 1000;
+  const dLat = (r / 111_320) * 1e6;
+  const cosLat = Math.max(Math.cos(((center.lat / 1e6) * Math.PI) / 180), 1e-6);
+  const dLon = (r / (111_320 * cosLat)) * 1e6;
+  const latMin = Math.trunc((center.lat - dLat) / REGION_CELL) - 1;
+  const latMax = Math.trunc((center.lat + dLat) / REGION_CELL) + 1;
+  const lonMin = Math.trunc((center.lon - dLon) / REGION_CELL) - 1;
+  const lonMax = Math.trunc((center.lon + dLon) / REGION_CELL) + 1;
+  const out: string[] = [];
+  for (let la = latMin; la <= latMax; la++) for (let lo = lonMin; lo <= lonMax; lo++) out.push(cellRegion(la, lo));
+  return out;
+}
+
+/// Order IDs whose pickup region is one of `regions` (server-side filtered).
+export async function orderIdsInRegions(regions: string[], from: number, to: number): Promise<bigint[]> {
+  if (regions.length === 0) return [];
+  const c = ordersContract();
+  const perRegion = await Promise.all(
+    regions.map((rg) => c.queryFilter(c.filters.OrderRegion(rg), from, to))
+  );
+  return perRegion.flat().map((l: any) => l.args.orderId as bigint);
 }
 
 // ---- EIP-712 attestations ----

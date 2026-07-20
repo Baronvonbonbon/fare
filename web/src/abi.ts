@@ -19,6 +19,8 @@ export const ORDERS_ABI = [
   // by assigned driver.
   "event OrderCreated(uint256 indexed orderId, address indexed customer, uint64 indexed venueId, uint96 orderValue, uint96 tip, uint96 maxFare, bytes32 dropCommit)",
   "event OrderAssigned(uint256 indexed orderId, address indexed driver, uint96 fare, uint64 pickupDeadline)",
+  // region indexed FIRST → server-side filterable on Paseo (localized discovery)
+  "event OrderRegion(bytes32 indexed region, uint256 indexed orderId)",
 ];
 
 export const VENUES_ABI = [

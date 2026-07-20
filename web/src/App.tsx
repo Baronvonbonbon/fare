@@ -11,6 +11,8 @@ import {
   decodePayload,
   discoverAssignments,
   discoverOrders,
+  orderIdsInRegions,
+  regionsCovering,
   DRIP_MIN,
   encodePayload,
   fmt,
@@ -219,14 +221,29 @@ export default function App() {
         return !!v && distanceMeters(myLoc, { lat: v.lat, lon: v.lon }) <= radiusKm * 1000;
       };
 
+      // Fetch the full OrderCreated stream lazily — the driver's region path
+      // avoids it entirely (server-side region query instead).
+      let created: Awaited<ReturnType<typeof discoverOrders>> | null = null;
+      const getCreated = async () => (created ??= await discoverOrders(from, latest));
+
       try {
-        const created = await discoverOrders(from, latest);
         if (role === "customer" && me) {
-          add(created.filter((d) => d.customer.toLowerCase() === me).map((d) => d.id));
+          add((await getCreated()).filter((d) => d.customer.toLowerCase() === me).map((d) => d.id));
         } else if (role === "venue" && me) {
-          add(created.filter((d) => myVenueIds.has(String(d.venueId))).map((d) => d.id));
+          add((await getCreated()).filter((d) => myVenueIds.has(String(d.venueId))).map((d) => d.id));
         } else if (role === "driver") {
-          add(created.filter((d) => inRegion(d.venueId)).map((d) => d.id)); // open, in region
+          if (myLoc && radiusKm > 0) {
+            // Phase 2: fetch only orders whose pickup region covers the radius,
+            // server-side (region is the leading indexed topic). Fall back to
+            // the full stream + client-side filter on a pre-OrderRegion node.
+            try {
+              add(await orderIdsInRegions(regionsCovering(myLoc, radiusKm), from, latest));
+            } catch {
+              add((await getCreated()).filter((d) => inRegion(d.venueId)).map((d) => d.id));
+            }
+          } else {
+            add((await getCreated()).map((d) => d.id)); // everywhere
+          }
           if (me) {
             const assigns = await discoverAssignments(from, latest);
             add(assigns.filter((a) => a.driver.toLowerCase() === me).map((a) => a.id)); // my jobs, anywhere
