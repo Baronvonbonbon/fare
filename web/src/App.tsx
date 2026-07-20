@@ -332,7 +332,7 @@ export default function App() {
     <>
       <header className="masthead">
         <div className="logo">
-          FARE<span className="dot">.</span>
+          FA<span className="logo-r">R<i className="i-mark" aria-hidden="true" /></span>E
           <small>p2p delivery · polkadot hub</small>
         </div>
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>

@@ -97,6 +97,34 @@ body::before {
   color: var(--pink);
 }
 
+/* The R reads as a dotted "i": a pink bar over its left vertical stem plus a
+   pink dot above — FARE, stylised FAiRE. Values are em-relative to the glyph;
+   nudge left/width/height if the bar drifts off the stem in your font. */
+.logo-r {
+  position: relative;
+  display: inline-block;
+}
+.logo-r .i-mark {
+  position: absolute;
+  left: 0.04em;
+  bottom: 0.03em;
+  width: 0.12em;
+  height: 0.66em;
+  background: var(--pink);
+  border-radius: 1px;
+}
+.logo-r .i-mark::before {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: -0.30em;
+  transform: translateX(-50%);
+  width: 0.17em;
+  height: 0.17em;
+  border-radius: 50%;
+  background: var(--pink);
+}
+
 .logo small {
   display: block;
   font-family: var(--mono);

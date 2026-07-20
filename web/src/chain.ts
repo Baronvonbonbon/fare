@@ -125,6 +125,14 @@ export let readProvider: ethers.AbstractProvider = new JsonRpcProvider(
   { staticNetwork: true }
 );
 
+/// Broadcast provider for local-key wallets (burner / pasted key). Reads may
+/// go through a light client, but light clients can't broadcast — so we always
+/// SEND transactions through the hosted eth-rpc gateway. This is the standard
+/// light-client split: verify reads locally, submit through a gateway.
+export const sendProvider: JsonRpcProvider = new JsonRpcProvider(HOSTED_URL, CHAIN_ID, {
+  staticNetwork: true,
+});
+
 export type PineSyncStep = string;
 let nodeInitPromise: Promise<void> | null = null;
 
@@ -169,7 +177,8 @@ export async function connect(mode: SignerMode, privateKey?: string): Promise<Se
   }
   if (mode === "key") {
     if (!privateKey) throw new Error("Private key required");
-    const w = new Wallet(privateKey.trim(), readProvider);
+    // Bind to sendProvider so signing/broadcast works regardless of read node.
+    const w = new Wallet(privateKey.trim(), sendProvider);
     return { mode, address: w.address, signer: w };
   }
   // burner: persistent throwaway key in localStorage
@@ -178,7 +187,7 @@ export async function connect(mode: SignerMode, privateKey?: string): Promise<Se
     key = Wallet.createRandom().privateKey;
     localStorage.setItem(BURNER_KEY, key);
   }
-  const w = new Wallet(key, readProvider);
+  const w = new Wallet(key, sendProvider);
   return { mode, address: w.address, signer: w };
 }
 
