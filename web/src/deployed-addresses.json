@@ -1,15 +1,15 @@
 {
-  "network": "localhost",
-  "chainId": 31337,
-  "deployedAt": "2026-07-10T14:27:57.340Z",
+  "network": "polkadotTestnet",
+  "chainId": 420420417,
+  "deployedAt": "2026-07-20T16:00:38.232Z",
   "addresses": {
-    "router": "0x5FbDB2315678afecb367f032d93F642f64180aa3",
-    "pauseRegistry": "0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512",
-    "vault": "0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0",
-    "drivers": "0xCf7Ed3AccA5a467e9e704C703E8D87F634fB0Fc9",
-    "venues": "0xDc64a140Aa3E981100a9becA4E685f962f0cF6C9",
-    "orders": "0x5FC8d32690cc91D4c39d9d3abcBD16989F875707",
-    "settlement": "0x0165878A594ca255338adfa4d48449f69242Eb8F",
-    "disputes": "0xa513E6E4b8f2a923D98304ec87F64353C4D5C853"
+    "router": "0x0ded05513687A52f3F7E00Ae12472391c4A3b1c0",
+    "pauseRegistry": "0x7CBDf1D9B30B05d77d54d6e6acf2B2aDCA8457bc",
+    "vault": "0xcc672EDbCB7ACE13849E61e3aBb3745De0F7B028",
+    "drivers": "0x2b6f241a692C01219F59cF49A9bA5d9d2084A67B",
+    "venues": "0xAfECacb16c5B68Ed89Fde6db0D89EeA42a824990",
+    "orders": "0x232dA8b8e8B0eE50bBa6DDE03a82c772a5bB12b1",
+    "settlement": "0x5ba079C57BE8F85C3E0838833017d1FE2ac4eaB2",
+    "disputes": "0xc05b2D145afF8379b18453850670e3c1b9CC42e7"
   }
 }
