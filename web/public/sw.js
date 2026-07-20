@@ -1,7 +1,9 @@
-// FARE PWA service worker — cache-first app shell so the driver app opens
-// instantly in the field; chain data is always network-fetched by the app.
-const CACHE = "fare-shell-v1";
-const SHELL = ["/", "/index.html", "/manifest.webmanifest", "/icon.svg"];
+// FARE PWA service worker. Hashed build assets (content-addressed by Vite)
+// are cache-first and safe forever; the HTML shell is network-first so a new
+// deploy is visible on next load instead of being stuck behind a stale cache
+// entry with no way to invalidate itself.
+const CACHE = "fare-shell-v2";
+const SHELL = ["/manifest.webmanifest", "/icon.svg"];
 
 self.addEventListener("install", (e) => {
   e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)));
@@ -19,6 +21,21 @@ self.addEventListener("fetch", (e) => {
   const url = new URL(e.request.url);
   // Never intercept RPC or cross-origin (fonts handle their own caching)
   if (e.request.method !== "GET" || url.origin !== location.origin) return;
+
+  const isShellDoc = e.request.mode === "navigate" || url.pathname === "/index.html";
+  if (isShellDoc) {
+    e.respondWith(
+      fetch(e.request)
+        .then((res) => {
+          const copy = res.clone();
+          caches.open(CACHE).then((c) => c.put(e.request, copy));
+          return res;
+        })
+        .catch(() => caches.match(e.request))
+    );
+    return;
+  }
+
   e.respondWith(
     caches.match(e.request).then(
       (hit) =>
