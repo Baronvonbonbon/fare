@@ -32,6 +32,7 @@ import {
 } from "./chain";
 import { MicroDeg, distanceMeters, fmtCoord, fmtDist, getPosition } from "./geo";
 import { QRScan, QRShow } from "./qr";
+import { MiniMap, VenuePin } from "./map";
 
 // ---- shared types ----
 
@@ -803,6 +804,17 @@ function DriverView({ session, orders, venues, act, busy, signed, say, myLoc, ra
   ).sort((a: any, b: any) => (a.dist ?? Infinity) - (b.dist ?? Infinity));
   const hidden = openTagged.length - shown.length;
 
+  // Venue pins for the proximity map, tagged with their live open-order count.
+  const openByVenue = new Map<string, number>();
+  for (const o of openLive) openByVenue.set(String(o.venueId), (openByVenue.get(String(o.venueId)) ?? 0) + 1);
+  const venuePins: VenuePin[] = venues.map((v: VenueRow) => ({
+    id: String(v.id),
+    lat: v.lat,
+    lon: v.lon,
+    name: v.metadataURI.replace(/^\w+:\/\//, ""),
+    openCount: openByVenue.get(String(v.id)) ?? 0,
+  }));
+
   if (session && me && !me.registered) return <DriverRegister {...{ act, busy, signed }} />;
 
   return (
@@ -828,6 +840,10 @@ function DriverView({ session, orders, venues, act, busy, signed, say, myLoc, ra
           </label>
         )}
       </div>
+
+      {myLoc && venuePins.length > 0 && (
+        <MiniMap center={myLoc} venues={venuePins} radiusKm={radiusKm} />
+      )}
 
       <div className="section-note">
         open orders — bid your fare

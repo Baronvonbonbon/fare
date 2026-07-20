@@ -652,6 +652,46 @@ button.btn.small {
   padding: 0;
 }
 
+/* proximity map */
+.minimap {
+  margin: 10px 0 4px;
+}
+.minimap svg {
+  width: 100%;
+  max-width: 320px;
+  display: block;
+  margin: 0 auto;
+  background:
+    radial-gradient(circle at 50% 50%, rgba(7, 255, 255, 0.04), transparent 70%),
+    var(--bg);
+  border: 1px solid var(--line-strong);
+  border-radius: 14px;
+}
+.mm-grid { fill: none; stroke: var(--line-strong); stroke-width: 1; }
+.mm-radius { fill: rgba(7, 255, 255, 0.05); stroke: var(--cyan); stroke-width: 1; stroke-dasharray: 4 4; opacity: 0.7; }
+.mm-n { fill: var(--muted); font-family: var(--mono); font-size: 9px; }
+.mm-pin circle { fill: var(--muted); opacity: 0.75; }
+.mm-pin.hot circle { fill: var(--pink); opacity: 1; filter: drop-shadow(0 0 5px var(--pink-glow)); }
+.mm-count { fill: #fff; font-family: var(--mono); font-size: 9px; font-weight: 700; }
+.mm-you { fill: var(--cyan); }
+.mm-you-ring { fill: none; stroke: var(--cyan); stroke-width: 1.5; opacity: 0.4; }
+.mm-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  justify-content: center;
+  margin-top: 8px;
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--muted);
+}
+.mm-legend span { display: inline-flex; align-items: center; gap: 5px; }
+.mm-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+.mm-dot.you { background: var(--cyan); }
+.mm-dot.hot { background: var(--pink); }
+.mm-dot.venue { background: var(--muted); }
+.mm-dot.radius { background: transparent; border: 1px dashed var(--cyan); border-radius: 50%; }
+
 .vault-strip {
   display: flex;
   align-items: center;
