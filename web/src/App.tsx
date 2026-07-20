@@ -8,9 +8,12 @@ import {
   contracts,
   computeDropCommit,
   decodePayload,
+  DRIP_MIN,
   encodePayload,
   fmt,
+  nativeBalance,
   parse,
+  requestDrip,
   NodeMode,
   embeddedAvailable,
   getNodeMode,
@@ -25,6 +28,7 @@ import {
   syncAddressesFromRouter,
 } from "./chain";
 import { MicroDeg, distanceMeters, fmtCoord, getPosition } from "./geo";
+import { QRScan, QRShow } from "./qr";
 
 // ---- shared types ----
 
@@ -70,6 +74,7 @@ export default function App() {
   const [orders, setOrders] = useState<OrderRow[]>([]);
   const [venues, setVenues] = useState<VenueRow[]>([]);
   const [vaultBal, setVaultBal] = useState<bigint>(0n);
+  const [nativeBal, setNativeBal] = useState<bigint>(0n);
   const [busy, setBusy] = useState(false);
   const [nodeSync, setNodeSync] = useState<string | null>(
     getNodeMode() === "pine-embedded" ? "connecting…" : null
@@ -147,7 +152,10 @@ export default function App() {
         }))
       );
 
-      if (session) setVaultBal(await c.vault.balanceOf(session.address));
+      if (session) {
+        setVaultBal(await c.vault.balanceOf(session.address));
+        setNativeBal(await nativeBalance(session.address));
+      }
     } catch (e: any) {
       console.error(e);
     }
@@ -181,6 +189,32 @@ export default function App() {
     [session, say, refresh]
   );
 
+  /// Top up a burner's gas from the serverless faucet if it's low. Auto-runs
+  /// on burner connect; also the manual "Top up gas" button. Silent on a
+  /// missing endpoint (local/unconfigured) — the manual button stays available.
+  const maybeDrip = useCallback(
+    async (address: string, manual = false) => {
+      try {
+        if (!manual && (await nativeBalance(address)) >= DRIP_MIN) return;
+        say("Funding demo wallet…");
+        const r = await requestDrip(address);
+        if (r.funded) {
+          say("Demo wallet funded ✓");
+          setTimeout(refresh, 3000);
+        } else if (r.configured === false) {
+          say("Faucet not configured — fund at faucet.polkadot.io", true);
+        } else if (r.reason === "sufficient") {
+          if (manual) say("Wallet already has gas");
+        } else if (r.error) {
+          say(`Faucet: ${r.error}`, true);
+        }
+      } catch {
+        if (manual) say("Faucet unreachable — try faucet.polkadot.io", true);
+      }
+    },
+    [say, refresh]
+  );
+
   const signed = session ? contracts(session.signer) : null;
 
   return (
@@ -197,6 +231,7 @@ export default function App() {
               const s = await connect(mode, key);
               setSession(s);
               say(`Connected ${short(s.address)}`);
+              if (mode === "burner") maybeDrip(s.address);
             } catch (e: any) {
               say(e.message, true);
             }
@@ -221,6 +256,18 @@ export default function App() {
           </button>
         ))}
       </nav>
+
+      {session?.mode === "burner" && nativeBal < DRIP_MIN && (
+        <div className="vault-strip" style={{ borderColor: "rgba(7,255,255,0.3)", background: "rgba(7,255,255,0.05)" }}>
+          <div>
+            <div className="lbl">gas balance low — burner needs PAS to transact</div>
+            <div className="amt" style={{ color: "var(--cyan)" }}>{fmt(nativeBal)} PAS</div>
+          </div>
+          <button className="btn small" disabled={busy} onClick={() => maybeDrip(session.address, true)}>
+            Top up gas
+          </button>
+        </div>
+      )}
 
       {session && vaultBal > 0n && (
         <div className="vault-strip">
@@ -573,8 +620,12 @@ function CustomerOrder({ o, venues, act, busy, signed, session, say }: any) {
           </div>
           {payload && (
             <>
-              <p className="hint">Show this to your driver (they paste it in their app):</p>
-              <div className="payload-box">{payload}</div>
+              <p className="hint">Let your driver scan this (or paste the code below):</p>
+              <QRShow value={payload} />
+              <details className="payload-details">
+                <summary>show code text</summary>
+                <div className="payload-box">{payload}</div>
+              </details>
             </>
           )}
         </>
@@ -668,8 +719,10 @@ function DriverBid({ o, venues, act, busy, signed, session }: any) {
 
 function DriverJob({ o, venues, act, busy, signed, session, say }: any) {
   const [counterpartyPayload, setCounterpartyPayload] = useState("");
+  const [scanning, setScanning] = useState(false);
   const venue = venues.find((v: VenueRow) => v.id === o.venueId);
   const isPickup = o.status === 2;
+  const expectKind = isPickup ? "pickup-venue" : "dropoff-customer";
 
   async function submitConfirmation() {
     try {
@@ -721,10 +774,24 @@ function DriverJob({ o, venues, act, busy, signed, session, say }: any) {
           ? "At the counter: ask the venue for their signed pickup code, paste it, and confirm. Your GPS position is signed and checked on-chain against the venue pin."
           : "At the door: ask the customer for their signed handoff code, paste it, and confirm. Your GPS position must be within the dropoff radius of their revealed location."}
       </p>
+      {scanning && (
+        <QRScan
+          expectKind={expectKind}
+          onResult={(v) => {
+            setCounterpartyPayload(v);
+            setScanning(false);
+            say(isPickup ? "Pickup code scanned ✓" : "Handoff code scanned ✓");
+          }}
+          onCancel={() => setScanning(false)}
+        />
+      )}
       <label className="field">
         <span>{isPickup ? "venue pickup code" : "customer handoff code"}</span>
+        <button className="btn ghost small" type="button" disabled={busy} onClick={() => setScanning(true)}>
+          ⧉ Scan {isPickup ? "venue" : "customer"} QR
+        </button>
         <textarea value={counterpartyPayload} onChange={(e) => setCounterpartyPayload(e.target.value)}
-          placeholder="paste code…" />
+          placeholder="…or paste code" />
       </label>
       <div className="btn-row">
         <button className="btn" disabled={busy || !counterpartyPayload} onClick={submitConfirmation}>
@@ -846,8 +913,12 @@ function VenuePickup({ o, venues, session, say }: any) {
       </div>
       {payload && (
         <>
-          <p className="hint">Show this to the driver:</p>
-          <div className="payload-box">{payload}</div>
+          <p className="hint">Have the driver scan this (or paste the code below):</p>
+          <QRShow value={payload} />
+          <details className="payload-details">
+            <summary>show code text</summary>
+            <div className="payload-box">{payload}</div>
+          </details>
         </>
       )}
     </div>

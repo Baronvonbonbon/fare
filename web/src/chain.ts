@@ -282,3 +282,37 @@ export const fmt = (wei: bigint) => {
 export const parse = (v: string) => ethers.parseEther(v === "" ? "0" : v);
 
 export const short = (a: string) => `${a.slice(0, 6)}…${a.slice(-4)}`;
+
+// ---- burner gas faucet (serverless drip) ----
+// The drip key lives only in the /api/drip Cloudflare Function (server-side
+// secret). The client just asks it to top up a low burner; every tx costs
+// native PAS, so a fresh burner needs gas before it can do anything.
+
+/// Below this native balance a burner can't reliably cover a tx — auto-drip
+/// on connect and surface a manual top-up.
+export const DRIP_MIN = ethers.parseEther("1");
+
+export async function nativeBalance(address: string): Promise<bigint> {
+  return readProvider.getBalance(address);
+}
+
+export interface DripResult {
+  funded?: boolean;
+  txHash?: string;
+  reason?: string;
+  error?: string;
+  configured?: boolean;
+}
+
+/// Ask the serverless faucet to top up `address`. Resolves with the endpoint's
+/// verdict; throws only on network failure. A 503 `{ configured:false }` means
+/// the operator hasn't set DRIP_PRIVATE_KEY yet, so callers fall back to the
+/// public faucet.
+export async function requestDrip(address: string): Promise<DripResult> {
+  const res = await fetch("/api/drip", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ address }),
+  });
+  return (await res.json().catch(() => ({}))) as DripResult;
+}

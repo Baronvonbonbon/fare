@@ -8,3 +8,7 @@ coverage.json
 deployed-addresses.localhost.json
 web/node_modules/
 web/dist/
+# Cloudflare Pages Functions local secrets — NEVER commit (drip faucet key)
+.dev.vars
+web/.dev.vars
+web/tsconfig.tsbuildinfo
