@@ -268,6 +268,7 @@ body::before {
 .badge.cancelled,
 .badge.resolved  { color: var(--muted); border-color: var(--line-strong); }
 .badge.disputed  { color: var(--err);   border-color: rgba(255,93,93,0.45);  background: rgba(255,93,93,0.08); }
+.badge.expired   { color: var(--err);   border-color: rgba(255,93,93,0.45);  background: rgba(255,93,93,0.08); text-transform: uppercase; letter-spacing: 0.04em; }
 
 /* route timeline: polka dots as journey */
 .route {

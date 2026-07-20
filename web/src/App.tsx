@@ -44,6 +44,8 @@ interface OrderRow {
   fare: bigint;
   maxFare: bigint;
   dropCommit: string;
+  createdAt: bigint;
+  pickupWindowSecs: bigint;
   pickupDeadline: bigint;
   deliveryDeadline: bigint;
   bidders: { addr: string; amount: bigint }[];
@@ -62,6 +64,30 @@ interface VenueRow {
 
 const STATUS = ["—", "Open", "Assigned", "PickedUp", "Delivered", "Cancelled", "Disputed", "Resolved"];
 const badgeClass = (s: number) => STATUS[s]?.toLowerCase() ?? "";
+
+// ---- deadline hygiene ----
+// Open orders have no on-chain deadline until assigned, so we treat an unbid
+// open order older than its own pickup window as stale (had it been taken at
+// creation it would already be past pickup — nobody is coming). Assigned /
+// picked-up orders have real on-chain deadlines.
+type Expiry = { late: boolean; label: string } | null;
+function orderExpiry(o: OrderRow, nowSec: number): Expiry {
+  if (o.status === 1) {
+    const staleAt = Number(o.createdAt + o.pickupWindowSecs);
+    return nowSec > staleAt ? { late: true, label: "stale" } : null;
+  }
+  if (o.status === 2) {
+    return nowSec > Number(o.pickupDeadline) ? { late: true, label: "pickup overdue" } : null;
+  }
+  if (o.status === 3) {
+    return nowSec > Number(o.deliveryDeadline) ? { late: true, label: "delivery overdue" } : null;
+  }
+  return null;
+}
+function ExpiryBadge({ o }: { o: OrderRow }) {
+  const e = orderExpiry(o, Math.floor(Date.now() / 1000));
+  return e ? <span className="badge expired">{e.label}</span> : null;
+}
 
 type Role = "customer" | "driver" | "venue";
 
@@ -173,6 +199,8 @@ export default function App() {
             fare: o.fare,
             maxFare: o.maxFare,
             dropCommit: o.dropCommit,
+            createdAt: o.createdAt,
+            pickupWindowSecs: o.pickupWindowSecs,
             pickupDeadline: o.pickupDeadline,
             deliveryDeadline: o.deliveryDeadline,
             bidders,
@@ -626,6 +654,7 @@ function CustomerOrder({ o, venues, act, busy, signed, session, say }: any) {
     <div className="order">
       <div className="order-head">
         <span className="order-id">Order #{String(o.id)}</span>
+        <ExpiryBadge o={o} />
         <span className={`badge ${badgeClass(o.status)}`}>{STATUS[o.status]}</span>
       </div>
       <OrderMeta o={o} venues={venues} />
@@ -726,14 +755,16 @@ function DriverView({ session, orders, venues, act, busy, signed, say, myLoc, ra
   // Open orders, tagged with pickup distance (from my location to the public
   // venue pin). With a radius set we hide out-of-town pickups; either way we
   // sort nearest-first so the closest jobs surface.
+  const nowSec = Math.floor(Date.now() / 1000);
   const venueOf = (o: OrderRow) => venues.find((v: VenueRow) => v.id === o.venueId);
-  const openTagged = orders
-    .filter((o: OrderRow) => o.status === 1)
-    .map((o: OrderRow) => {
-      const v = venueOf(o);
-      const dist = myLoc && v ? distanceMeters(myLoc, { lat: v.lat, lon: v.lon }) : null;
-      return { o, dist };
-    });
+  // Drop stale (abandoned) open orders — a driver shouldn't chase them.
+  const openLive = orders.filter((o: OrderRow) => o.status === 1 && !orderExpiry(o, nowSec));
+  const staleCount = orders.filter((o: OrderRow) => o.status === 1).length - openLive.length;
+  const openTagged = openLive.map((o: OrderRow) => {
+    const v = venueOf(o);
+    const dist = myLoc && v ? distanceMeters(myLoc, { lat: v.lat, lon: v.lon }) : null;
+    return { o, dist };
+  });
   const filtering = !!myLoc && radiusKm > 0;
   const shown = (filtering
     ? openTagged.filter((x: any) => x.dist != null && x.dist <= radiusKm * 1000)
@@ -770,6 +801,7 @@ function DriverView({ session, orders, venues, act, busy, signed, say, myLoc, ra
       <div className="section-note">
         open orders — bid your fare
         {filtering && ` · near you${hidden > 0 ? ` (${hidden} farther away hidden)` : ""}`}
+        {staleCount > 0 && ` · ${staleCount} stale hidden`}
       </div>
       {shown.length === 0 && (
         <div className="empty">
@@ -879,6 +911,7 @@ function DriverJob({ o, venues, act, busy, signed, session, say }: any) {
     <div className="order" style={{ borderColor: "rgba(255,38,112,0.4)" }}>
       <div className="order-head">
         <span className="order-id">Job #{String(o.id)}</span>
+        <ExpiryBadge o={o} />
         <span className={`badge ${badgeClass(o.status)}`}>{STATUS[o.status]}</span>
       </div>
       <OrderMeta o={o} venues={venues} />
@@ -1004,6 +1037,7 @@ function VenuePickup({ o, venues, session, say }: any) {
     <div className="order">
       <div className="order-head">
         <span className="order-id">Order #{String(o.id)}</span>
+        <ExpiryBadge o={o} />
         <span className={`badge ${badgeClass(o.status)}`}>{STATUS[o.status]}</span>
       </div>
       <OrderMeta o={o} venues={venues} />

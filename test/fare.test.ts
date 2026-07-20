@@ -605,4 +605,24 @@ describe("FARE protocol", () => {
       expect(await f.drivers.pendingPaseoDust(f.stranger.address)).to.equal(0n);
     });
   });
+
+  // Localization filters on the PUBLIC venue pin; a driver's own position is
+  // signed live at attestation time and must never be persisted on-chain.
+  // This invariant guards that: no location-shaped field may enter the driver
+  // registry's ABI (struct getter, function params, or event topics).
+  describe("privacy invariant: driver location stays off-chain", () => {
+    it("exposes no location-shaped field in the FareDrivers ABI", async () => {
+      const { drivers } = await loadFixture(deployAll);
+      const locationLike = /(^|[^a-z])(lat|lon|latitude|longitude|location|geohash|coord|position|geo)([^a-z]|$)/i;
+      for (const frag of drivers.interface.fragments) {
+        const f = frag as any;
+        const names: string[] = [];
+        if (f.name) names.push(f.name);
+        for (const io of [...(f.inputs ?? []), ...(f.outputs ?? [])]) if (io?.name) names.push(io.name);
+        for (const n of names) {
+          expect(locationLike.test(n), `FareDrivers ABI leaks a location-shaped field: "${n}"`).to.equal(false);
+        }
+      }
+    });
+  });
 });
