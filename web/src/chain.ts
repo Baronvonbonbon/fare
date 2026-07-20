@@ -296,6 +296,13 @@ export async function nativeBalance(address: string): Promise<bigint> {
   return readProvider.getBalance(address);
 }
 
+/// Cheap liveness probe for the active read provider. Rejects if the selected
+/// node is unreachable (e.g. "pine daemon" chosen with no daemon running) so
+/// the UI can surface it instead of silently showing stale zeros.
+export async function pingNode(): Promise<number> {
+  return readProvider.getBlockNumber();
+}
+
 export interface DripResult {
   funded?: boolean;
   txHash?: string;

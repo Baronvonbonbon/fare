@@ -20,6 +20,7 @@ import {
   getNodeUrl,
   initNode,
   nodeLabel,
+  pingNode,
   randomSalt,
   setNode,
   short,
@@ -79,6 +80,7 @@ export default function App() {
   const [nodeSync, setNodeSync] = useState<string | null>(
     getNodeMode() === "pine-embedded" ? "connecting…" : null
   );
+  const [nodeErr, setNodeErr] = useState<string | null>(null);
 
   // Boot the selected node (no-op for hosted/daemon; starts the in-tab
   // smoldot light client for pine-embedded and reports sync progress).
@@ -86,6 +88,19 @@ export default function App() {
     initNode((step) => setNodeSync(step))
       .then(() => setNodeSync(null))
       .catch((e) => setNodeSync(`light client failed: ${e.message}`));
+  }, []);
+
+  // A "pine daemon" node with no daemon running (e.g. on a phone) fails every
+  // read silently — the app just shows zeros. Probe it and surface a fix.
+  useEffect(() => {
+    if (getNodeMode() !== "pine-daemon") return;
+    let cancelled = false;
+    pingNode().then(
+      () => !cancelled && setNodeErr(null),
+      () => !cancelled &&
+        setNodeErr(`Can't reach the pine daemon at ${getNodeUrl()} — open the node menu and switch to Hosted RPC.`)
+    );
+    return () => { cancelled = true; };
   }, []);
 
   const say = useCallback((msg: string, err = false) => {
@@ -195,12 +210,21 @@ export default function App() {
   const maybeDrip = useCallback(
     async (address: string, manual = false) => {
       try {
-        if (!manual && (await nativeBalance(address)) >= DRIP_MIN) return;
+        const before = await nativeBalance(address);
+        if (!manual && before >= DRIP_MIN) return;
         say("Funding demo wallet…");
         const r = await requestDrip(address);
         if (r.funded) {
-          say("Demo wallet funded ✓");
-          setTimeout(refresh, 3000);
+          // The faucet returns as soon as the tx is submitted; the chain needs
+          // a few seconds to include it. Poll until the balance actually rises
+          // (or time out) so the display updates instead of looking stuck.
+          let landed = false;
+          for (let i = 0; i < 12 && !landed; i++) {
+            await new Promise((res) => setTimeout(res, 1500));
+            landed = (await nativeBalance(address).catch(() => before)) > before;
+          }
+          await refresh();
+          say(landed ? "Gas added ✓" : "Gas sent — balance will update shortly");
         } else if (r.configured === false) {
           say("Faucet not configured — fund at faucet.polkadot.io", true);
         } else if (r.reason === "sufficient") {
@@ -244,6 +268,15 @@ export default function App() {
           <div>
             <div className="lbl">in-browser light client</div>
             <div className="mono" style={{ color: "var(--cyan)" }}>{nodeSync}</div>
+          </div>
+        </div>
+      )}
+
+      {nodeErr && (
+        <div className="vault-strip" style={{ borderColor: "rgba(255,38,112,0.4)", background: "rgba(255,38,112,0.06)" }}>
+          <div>
+            <div className="lbl">node unreachable</div>
+            <div className="mono" style={{ color: "var(--pink)" }}>{nodeErr}</div>
           </div>
         </div>
       )}
