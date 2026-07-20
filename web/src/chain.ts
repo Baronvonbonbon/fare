@@ -193,6 +193,36 @@ export function contracts(runner: ethers.ContractRunner = readProvider) {
   };
 }
 
+// ---- event-based order discovery ----
+// Enumerate order IDs from OrderCreated logs instead of scanning 1..nextOrderId
+// and reading every struct. Callers keep a block cursor and only re-read the
+// structs of still-active orders, so steady-state refresh cost tracks the
+// number of *live* orders, not the all-time total.
+
+export interface DiscoveredOrder {
+  id: bigint;
+  venueId: bigint;
+  customer: string;
+  block: number;
+}
+
+export async function currentBlock(): Promise<number> {
+  return readProvider.getBlockNumber();
+}
+
+/// OrderCreated logs in [fromBlock, toBlock]. Throws if the node has no
+/// eth_getLogs (e.g. some light-client modes) — callers fall back to a scan.
+export async function discoverOrders(fromBlock: number, toBlock: number): Promise<DiscoveredOrder[]> {
+  const orders = new Contract(ADDRESSES.orders, ORDERS_ABI, readProvider);
+  const logs = await orders.queryFilter(orders.filters.OrderCreated(), fromBlock, toBlock);
+  return logs.map((l: any) => ({
+    id: l.args.orderId as bigint,
+    venueId: l.args.venueId as bigint,
+    customer: l.args.customer as string,
+    block: l.blockNumber as number,
+  }));
+}
+
 // ---- EIP-712 attestations ----
 
 /// Computed lazily: the domain binds the LIVE settlement address, which the

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ADDRESSES,
   RPC_URL,
@@ -7,7 +7,9 @@ import {
   connect,
   contracts,
   computeDropCommit,
+  currentBlock,
   decodePayload,
+  discoverOrders,
   DRIP_MIN,
   encodePayload,
   fmt,
@@ -91,6 +93,12 @@ function ExpiryBadge({ o }: { o: OrderRow }) {
 
 type Role = "customer" | "driver" | "venue";
 
+// Order lifecycle end-states — never re-read once cached.
+const TERMINAL_STATUS = new Set([4, 5, 7]); // Delivered, Cancelled, Resolved
+// First-load log backfill window (~46 days at 2s blocks) — well past our
+// deploy, and within Paseo's getLogs range. Incremental after that.
+const INITIAL_LOOKBACK = 2_000_000;
+
 // Drop-location secrets the customer holds until dropoff.
 const dropStoreKey = (commit: string) => `fare.drop.${commit.toLowerCase()}`;
 
@@ -121,6 +129,11 @@ export default function App() {
   });
   const [radiusKm, setRadiusKm] = useState<number>(() => Number(localStorage.getItem("fare.radiuskm")) || 15);
   useEffect(() => localStorage.setItem("fare.radiuskm", String(radiusKm)), [radiusKm]);
+
+  // Event-discovery cursor + struct cache (see chain.discoverOrders).
+  const knownOrderIds = useRef<Set<string>>(new Set());
+  const orderCache = useRef<Map<string, OrderRow>>(new Map());
+  const lastBlock = useRef<number>(-1);
 
   // Boot the selected node (no-op for hosted/daemon; starts the in-tab
   // smoldot light client for pine-embedded and reports sync progress).
@@ -165,20 +178,33 @@ export default function App() {
     try {
       await syncAddressesFromRouter(); // follow router-driven upgrades
       const c = contracts();
-      const nextOrder: bigint = await c.orders.nextOrderId();
-      const nextVenue: bigint = await c.venues.nextVenueId();
 
-      const orderIds = Array.from({ length: Number(nextOrder - 1n) }, (_, i) => BigInt(i + 1));
-      const venueIds = Array.from({ length: Number(nextVenue - 1n) }, (_, i) => BigInt(i + 1));
+      // ── 1. Discover order IDs incrementally from OrderCreated logs, so we
+      //       never scan 1..nextOrderId. Fall back to enumeration on a node
+      //       without eth_getLogs (some light-client modes).
+      const latest = await currentBlock();
+      const known = knownOrderIds.current;
+      try {
+        const from = lastBlock.current < 0 ? Math.max(0, latest - INITIAL_LOOKBACK) : lastBlock.current + 1;
+        if (from <= latest) for (const d of await discoverOrders(from, latest)) known.add(String(d.id));
+        lastBlock.current = latest;
+      } catch {
+        const nextOrder: bigint = await c.orders.nextOrderId();
+        for (let i = 1n; i < nextOrder; i++) known.add(String(i));
+      }
 
-      const [rawOrders, rawVenues] = await Promise.all([
-        Promise.all(orderIds.map((id) => c.orders.orders(id))),
-        Promise.all(venueIds.map((id) => c.venues.venues(id))),
-      ]);
-
-      const withBids = await Promise.all(
-        rawOrders.map(async (o, i) => {
-          const id = orderIds[i];
+      // ── 2. Re-read structs only for newly-seen or still-active orders;
+      //       terminal orders (Delivered/Cancelled/Resolved) stay cached, so
+      //       steady-state cost tracks live orders, not the all-time total.
+      const cache = orderCache.current;
+      const toRead = [...known].filter((id) => {
+        const row = cache.get(id);
+        return !row || !TERMINAL_STATUS.has(row.status);
+      });
+      const readRows = await Promise.all(
+        toRead.map(async (idStr) => {
+          const id = BigInt(idStr);
+          const o = await c.orders.orders(id);
           let bidders: { addr: string; amount: bigint }[] = [];
           if (Number(o.status) === 1) {
             const addrs: string[] = await c.orders.biddersOf(id);
@@ -207,8 +233,13 @@ export default function App() {
           } as OrderRow;
         })
       );
+      for (const row of readRows) cache.set(String(row.id), row);
+      setOrders([...cache.values()].sort((a, b) => (a.id < b.id ? 1 : -1))); // newest first
 
-      setOrders(withBids.reverse());
+      // ── 3. Venues are few and rarely change — read directly.
+      const nextVenue: bigint = await c.venues.nextVenueId();
+      const venueIds = Array.from({ length: Number(nextVenue - 1n) }, (_, i) => BigInt(i + 1));
+      const rawVenues = await Promise.all(venueIds.map((id) => c.venues.venues(id)));
       setVenues(
         rawVenues.map((v, i) => ({
           id: venueIds[i],

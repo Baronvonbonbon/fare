@@ -14,6 +14,9 @@ export const ORDERS_ABI = [
   "function cancelOpen(uint256 orderId)",
   "function cancelAssigned(uint256 orderId)",
   "function abandonOrder(uint256 orderId)",
+  // Discovery: enumerate orders (optionally scoped by customer/venue topic)
+  // from logs instead of scanning every id.
+  "event OrderCreated(uint256 indexed orderId, address indexed customer, uint64 indexed venueId, uint96 orderValue, uint96 tip, uint96 maxFare, bytes32 dropCommit)",
 ];
 
 export const VENUES_ABI = [
