@@ -34,6 +34,11 @@ export function getPosition(): Promise<MicroDeg> {
   });
 }
 
+/// Human distance: metres under 1 km, else 1-decimal km.
+export function fmtDist(meters: number): string {
+  return meters < 1000 ? `${Math.round(meters)} m` : `${(meters / 1000).toFixed(1)} km`;
+}
+
 /// Haversine distance in meters — client-side preview of what the contract
 /// will conclude (the contract uses an equirectangular approximation; at
 /// geofence ranges they agree to well under 1%).

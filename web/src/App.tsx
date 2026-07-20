@@ -28,7 +28,7 @@ import {
   signReveal,
   syncAddressesFromRouter,
 } from "./chain";
-import { MicroDeg, distanceMeters, fmtCoord, getPosition } from "./geo";
+import { MicroDeg, distanceMeters, fmtCoord, fmtDist, getPosition } from "./geo";
 import { QRScan, QRShow } from "./qr";
 
 // ---- shared types ----
@@ -82,6 +82,20 @@ export default function App() {
   );
   const [nodeErr, setNodeErr] = useState<string | null>(null);
 
+  // Shared "my area": the device's location + a radius, used to filter/sort by
+  // proximity to the public pickup (venue) pin. Persisted so it survives a
+  // reload. Drop locations are hidden commitments and are never filtered on.
+  const [myLoc, setMyLoc] = useState<MicroDeg | null>(() => {
+    try {
+      const s = localStorage.getItem("fare.myloc");
+      return s ? (JSON.parse(s) as MicroDeg) : null;
+    } catch {
+      return null;
+    }
+  });
+  const [radiusKm, setRadiusKm] = useState<number>(() => Number(localStorage.getItem("fare.radiuskm")) || 15);
+  useEffect(() => localStorage.setItem("fare.radiuskm", String(radiusKm)), [radiusKm]);
+
   // Boot the selected node (no-op for hosted/daemon; starts the in-tab
   // smoldot light client for pine-embedded and reports sync progress).
   useEffect(() => {
@@ -107,6 +121,19 @@ export default function App() {
     setToast({ msg, err });
     window.setTimeout(() => setToast(null), err ? 8000 : 4500);
   }, []);
+
+  /// Capture the device's GPS once as the shared "my area" anchor for
+  /// proximity filtering/sorting (persisted).
+  const locateMe = useCallback(async () => {
+    try {
+      const p = await getPosition();
+      setMyLoc(p);
+      localStorage.setItem("fare.myloc", JSON.stringify(p));
+      say("Location set — showing what's near you");
+    } catch (e: any) {
+      say(e.message, true);
+    }
+  }, [say]);
 
   const refresh = useCallback(async () => {
     try {
@@ -315,10 +342,10 @@ export default function App() {
       )}
 
       {role === "customer" && (
-        <CustomerView {...{ session, orders, venues, act, busy, signed, say }} />
+        <CustomerView {...{ session, orders, venues, act, busy, signed, say, myLoc, locateMe }} />
       )}
       {role === "driver" && (
-        <DriverView {...{ session, orders, venues, act, busy, signed, say }} />
+        <DriverView {...{ session, orders, venues, act, busy, signed, say, myLoc, radiusKm, setRadiusKm, locateMe }} />
       )}
       {role === "venue" && (
         <VenueView {...{ session, orders, venues, act, busy, signed, say }} />
@@ -506,11 +533,11 @@ function GeoPill({ pos }: { pos: MicroDeg | null }) {
 
 // ---------- customer ----------
 
-function CustomerView({ session, orders, venues, act, busy, signed, say }: any) {
+function CustomerView({ session, orders, venues, act, busy, signed, say, myLoc, locateMe }: any) {
   const mine = orders.filter((o: OrderRow) => session && o.customer.toLowerCase() === session.address.toLowerCase());
   return (
     <>
-      <CreateOrder {...{ session, venues, act, busy, signed, say }} />
+      <CreateOrder {...{ session, venues, act, busy, signed, say, myLoc, locateMe }} />
       <div className="section-note">my orders</div>
       {mine.length === 0 && (
         <div className="empty"><span className="dots">· · ·</span>No orders yet — place one above.</div>
@@ -522,24 +549,34 @@ function CustomerView({ session, orders, venues, act, busy, signed, say }: any) 
   );
 }
 
-function CreateOrder({ session, venues, act, busy, signed, say }: any) {
+function CreateOrder({ session, venues, act, busy, signed, say, myLoc, locateMe }: any) {
   const [venueId, setVenueId] = useState("");
   const [pos, setPos] = useState<MicroDeg | null>(null);
   const [orderValue, setOrderValue] = useState("0");
   const [tip, setTip] = useState("0");
   const [maxFare, setMaxFare] = useState("0.5");
-  const active = venues.filter((v: VenueRow) => v.active);
+  // Nearest venues first when we know where the customer is.
+  const active = venues
+    .filter((v: VenueRow) => v.active)
+    .map((v: VenueRow) => ({ v, dist: myLoc ? distanceMeters(myLoc, { lat: v.lat, lon: v.lon }) : null }))
+    .sort((a: any, b: any) => (a.dist ?? Infinity) - (b.dist ?? Infinity));
 
   return (
     <div className="card">
       <h2>Place a pickup order <span className="tag">escrow</span></h2>
       <label className="field">
-        <span>pickup venue</span>
+        <span>
+          pickup venue
+          {!myLoc && (
+            <button className="link-btn" type="button" onClick={locateMe}> · ◉ sort by distance</button>
+          )}
+        </span>
         <select value={venueId} onChange={(e) => setVenueId(e.target.value)}>
           <option value="">— select —</option>
-          {active.map((v: VenueRow) => (
+          {active.map(({ v, dist }: any) => (
             <option key={String(v.id)} value={String(v.id)}>
-              #{String(v.id)} · {v.metadataURI.replace(/^\w+:\/\//, "")} · {fmtCoord({ lat: v.lat, lon: v.lon })}
+              #{String(v.id)} · {v.metadataURI.replace(/^\w+:\/\//, "")}
+              {dist != null ? ` · ${fmtDist(dist)} away` : ` · ${fmtCoord({ lat: v.lat, lon: v.lon })}`}
             </option>
           ))}
         </select>
@@ -672,20 +709,37 @@ function CustomerOrder({ o, venues, act, busy, signed, session, say }: any) {
 
 // ---------- driver ----------
 
-function DriverView({ session, orders, venues, act, busy, signed, say }: any) {
+function DriverView({ session, orders, venues, act, busy, signed, say, myLoc, radiusKm, setRadiusKm, locateMe }: any) {
   const [me, setMe] = useState<any>(null);
   useEffect(() => {
     if (!session) return;
     contracts().drivers.drivers(session.address).then(setMe).catch(() => {});
   }, [session, orders]);
 
-  const open = orders.filter((o: OrderRow) => o.status === 1);
   const jobs = orders.filter(
     (o: OrderRow) =>
       session &&
       o.driver.toLowerCase() === session.address.toLowerCase() &&
       (o.status === 2 || o.status === 3)
   );
+
+  // Open orders, tagged with pickup distance (from my location to the public
+  // venue pin). With a radius set we hide out-of-town pickups; either way we
+  // sort nearest-first so the closest jobs surface.
+  const venueOf = (o: OrderRow) => venues.find((v: VenueRow) => v.id === o.venueId);
+  const openTagged = orders
+    .filter((o: OrderRow) => o.status === 1)
+    .map((o: OrderRow) => {
+      const v = venueOf(o);
+      const dist = myLoc && v ? distanceMeters(myLoc, { lat: v.lat, lon: v.lon }) : null;
+      return { o, dist };
+    });
+  const filtering = !!myLoc && radiusKm > 0;
+  const shown = (filtering
+    ? openTagged.filter((x: any) => x.dist != null && x.dist <= radiusKm * 1000)
+    : openTagged
+  ).sort((a: any, b: any) => (a.dist ?? Infinity) - (b.dist ?? Infinity));
+  const hidden = openTagged.length - shown.length;
 
   if (session && me && !me.registered) return <DriverRegister {...{ act, busy, signed }} />;
 
@@ -695,12 +749,38 @@ function DriverView({ session, orders, venues, act, busy, signed, say }: any) {
       {jobs.map((o: OrderRow) => (
         <DriverJob key={String(o.id)} {...{ o, venues, act, busy, signed, session, say }} />
       ))}
-      <div className="section-note">open orders — bid your fare</div>
-      {open.length === 0 && (
-        <div className="empty"><span className="dots">· · ·</span>No open orders right now.</div>
+
+      <div className="area-bar">
+        <button className="btn ghost small" type="button" onClick={locateMe}>
+          ◉ {myLoc ? "Update my area" : "Set my area (GPS)"}
+        </button>
+        {myLoc && (
+          <label className="area-radius">
+            within
+            <select value={radiusKm} onChange={(e) => setRadiusKm(Number(e.target.value))}>
+              <option value={5}>5 km</option>
+              <option value={15}>15 km</option>
+              <option value={50}>50 km</option>
+              <option value={0}>everywhere</option>
+            </select>
+          </label>
+        )}
+      </div>
+
+      <div className="section-note">
+        open orders — bid your fare
+        {filtering && ` · near you${hidden > 0 ? ` (${hidden} farther away hidden)` : ""}`}
+      </div>
+      {shown.length === 0 && (
+        <div className="empty">
+          <span className="dots">· · ·</span>
+          {myLoc && hidden > 0
+            ? `No open orders within ${radiusKm} km — widen the radius to see ${hidden} more.`
+            : "No open orders right now."}
+        </div>
       )}
-      {open.map((o: OrderRow) => (
-        <DriverBid key={String(o.id)} {...{ o, venues, act, busy, signed, session }} />
+      {shown.map(({ o, dist }: any) => (
+        <DriverBid key={String(o.id)} {...{ o, venues, act, busy, signed, session, dist }} />
       ))}
     </>
   );
@@ -726,7 +806,7 @@ function DriverRegister({ act, busy, signed }: any) {
   );
 }
 
-function DriverBid({ o, venues, act, busy, signed, session }: any) {
+function DriverBid({ o, venues, act, busy, signed, session, dist }: any) {
   const [amount, setAmount] = useState("");
   const myBid = o.bidders.find(
     (b: any) => session && b.addr.toLowerCase() === session.address.toLowerCase()
@@ -735,6 +815,7 @@ function DriverBid({ o, venues, act, busy, signed, session }: any) {
     <div className="order">
       <div className="order-head">
         <span className="order-id">Order #{String(o.id)}</span>
+        {dist != null && <span className="dist-pill">◉ {fmtDist(dist)} to pickup</span>}
         <span className={`badge ${badgeClass(o.status)}`}>{STATUS[o.status]}</span>
       </div>
       <OrderMeta o={o} venues={venues} />
