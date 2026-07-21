@@ -1,0 +1,247 @@
+# FARE — Product Integration & Process-Flow Plan
+
+Living planning + tracking doc. Two questions it answers:
+
+1. **Which on-chain entry points does the PWA already expose, and which are
+   built on-chain but not yet tied into the app?** (Part 1)
+2. **What does a complete, DoorDash-shaped product need, where does each piece
+   logically live, and what's the build order?** (Parts 2–3)
+
+Keep the checkboxes current as work lands. Source of truth for the contract
+surface is `contracts/`; for the app surface, `web/src/{abi,chain,App}.tsx`.
+
+**Legend**
+| Mark | Meaning |
+|---|---|
+| ✅ | Wired to the PWA (UI + call site) |
+| 🟡 | Partially wired (callable, but incomplete UX) |
+| ⛔ | Exists on-chain, **no PWA UI** — a tie-in gap |
+| ⚙️ | Admin / infra — belongs in an ops console or scripts, not the consumer app |
+| 🆕 | Net-new, mostly **off-chain** — no contract primitive yet |
+
+---
+
+## Part 1 — Contract entry-point audit
+
+### FareOrders (order book + auction + escrow)
+| Entry point | In PWA? | Notes |
+|---|---|---|
+| `createOrder` | ✅ | Per-order burner wallet; no cart/items param (see 🆕 catalog) |
+| `placeBid` | ✅ | Driver bids in the job card |
+| `acceptBid` | ✅ | Customer picks a bid |
+| `increaseTip` | ✅ | Customer top-up |
+| `cancelOpen` / `cancelAssigned` / `abandonOrder` | ✅ | Cancel paths wired |
+| `withdrawBid` | ⛔ | Driver can't **retract** a bid in-app |
+| `statusOf` / `partiesOf` / `biddersOf` / `bidOf` / `dropCommitOf` / `deadlinesOf` / `orders(struct)` | ✅ | Read in discovery/order cards |
+| `onPickupConfirmed` / `onDropoffConfirmed` / `markDisputed` / `resolveDisputed` | ⚙️ | Internal callbacks (settlement/disputes only) |
+| `setParams` / `configure` / `setRouter` | ⚙️ | Governance / deploy wiring |
+
+### FareSettlement (attestation + ZK dropoff)
+| Entry point | In PWA? | Notes |
+|---|---|---|
+| `confirmPickup` | ✅ | Driver+venue dual-sig, QR handoff |
+| `confirmDropoffZK` | ✅ | ZK proof, customer submits |
+| `dropoffRadiusMeters` / `pickupRadiusMeters` (views) | 🟡 | dropoff read; pickup radius not surfaced |
+| `setGeoParams` | ⚙️ | Radii/freshness tuning — ops console |
+| `setLocationVerifier` / `configure` / `setRouter` / `domainSeparator` | ⚙️ | Infra |
+
+### FareDisputes (arbitrated escape hatch)
+| Entry point | In PWA? | Notes |
+|---|---|---|
+| `openDispute` | 🟡 | Wired, but **evidence is always `""`** — no evidence flow |
+| `resolve` (arbiter ruling) | ⛔ | **No arbiter UI at all** — needs an ops/arbiter console |
+| (no dispute list / detail / status view) | ⛔ | Can't see open disputes, evidence, or outcome in-app |
+| `setArbiter` / `setDisputeBond` / `configure` / `setRouter` | ⚙️ | Admin |
+
+### FareDrivers (registry, stake, reputation)
+| Entry point | In PWA? | Notes |
+|---|---|---|
+| `register` | ✅ | Optional stake at signup |
+| `isEligible` / `drivers(struct)` | ✅ | Read for eligibility + own stats |
+| `addStake` / `requestUnstake` / `withdrawStake` | ⛔ | **No stake-lifecycle UI** after signup |
+| `setMetadata` | ⛔ | Can't edit driver profile |
+| `reputationOf` (delivered/failed) | 🟡 | Shown in the driver's own view; **not in bid cards** for customers |
+| `slash` / `recordDelivered` / `recordFailed` / `importRecords` | ⚙️ | Internal / admin |
+| `setBanned` / `setMinStake` / `setUnbondingSeconds` / `setAuthorized` / `setRouter` | ⚙️ | Governance |
+
+### FareVenues (venue registry)
+| Entry point | In PWA? | Notes |
+|---|---|---|
+| `registerVenue` | ✅ | Operator onboarding |
+| `isActive` / `locationOf` / `signerOf` / `payoutOf` / `operatorOf` / `venues(struct)` | ✅ | Read for discovery/order cards |
+| `setActive` | ⛔ | Can't pause/resume a venue in-app |
+| `setLocation` / `setPayout` / `setSigner` / `setMetadata` | ⛔ | **No venue editing** (pin, payout addr, hot signer, profile) |
+| `recordPickup` / `importVenues` / `setAuthorized` / `setRouter` | ⚙️ | Internal / infra |
+
+### FareVault (pull-payment vault)
+| Entry point | In PWA? | Notes |
+|---|---|---|
+| `withdraw` | ✅ | Wallet-chip withdraw |
+| `balanceOf` (view) | ✅ | Shown |
+| `withdrawTo` | ⛔ | Withdraw to a **cold wallet** not exposed |
+| `claimPaseoDust` / `pendingPaseoDust` | ⛔ | Queued dust never surfaced or claimable in-app |
+| `credit` | ⚙️ | Authorized protocol contracts only |
+
+### FarePauseRegistry / FareGovernanceRouter / FareLocationVerifier
+| Entry point | In PWA? | Notes |
+|---|---|---|
+| `isPaused` | ✅ | Read (gates actions) |
+| Router `currentAddrOf` / `versionOf` / `historyOf` | ✅ | Router-following client |
+| `pause` / `unpause` / `setGuardian` | ⚙️ | Guardian/owner — ops console |
+| Router `register` / `upgradeContract` / `setContractFrozen` | ⚙️ | Upgrade admin |
+| Verifier `setVerifyingKey` / `getVK` | ⚙️ | Trusted-setup / deploy |
+
+**Audit summary — the tie-in gaps (⛔) worth wiring:**
+1. Bids: `withdrawBid`
+2. Driver stake lifecycle: `addStake`, `requestUnstake`, `withdrawStake`, `setMetadata`
+3. Disputes: evidence flow on `openDispute`, an **arbiter console** for `resolve`, and a dispute detail/list view
+4. Venue management: `setActive`, `setLocation`, `setPayout`, `setSigner`, `setMetadata`
+5. Vault: `withdrawTo`, `claimPaseoDust` (+ show `pendingPaseoDust`)
+6. Reputation surfaced in **bid cards** (`reputationOf`)
+
+Everything ⚙️ is deliberately out of the consumer PWA — it belongs in an **ops/governance console** (Part 3, group D).
+
+---
+
+## Part 2 — Journeys, mirrored on DoorDash
+
+Each stage: what DoorDash does → the FARE primitive → status → what's missing.
+DoorDash has three apps (Consumer, Dasher, Merchant); FARE's PWA has the three
+role views. The mapping below is the target shape.
+
+### 2.1 Customer (Consumer app)
+| DoorDash stage | FARE primitive | Status | Gap / needed |
+|---|---|---|---|
+| Browse restaurants (list, map, cuisine, search) | `FareVenues` discovery + region index | 🟡 | Venue list/map exists; no search/cuisine/filter, no rich venue page |
+| Restaurant page + **menu**, add to **cart** | venue `metadataURI` (IPFS) | 🆕 | No catalog/menu/cart — `orderValue` is an opaque number today |
+| Checkout: address, tip, schedule | `createOrder(venueId, dropCommit, orderValue, tip, maxFare, windows)` | ✅ | Address = ZK drop commit; tip + windows supported |
+| Pay | native PAS escrow | 🟡 | Works on testnet; needs fiat pricing + gasless + stablecoin (group C) |
+| Order confirmation | `OrderCreated` event | ✅ | — |
+| **Live tracking** (status, driver on map, ETA) | order `status` + `OrderAssigned` | 🟡 | Status shown; no live driver location, no ETA, no map trace |
+| Pick a Dasher (FARE-specific: reverse auction) | `biddersOf` / `acceptBid` | ✅ | Bid cards — but **no driver rating shown** (⛔ `reputationOf`) |
+| Chat with Dasher / support | — | 🆕 | No messaging |
+| Handoff / proof of delivery | `confirmDropoffZK` (ZK) | ✅ | No delivery photo / "leave at door" option |
+| Rate order + driver + restaurant | reputation counts only | 🆕 | No star ratings; only delivered/failed on-chain |
+| Reorder, history, receipts | per-order wallet registry (local) | 🟡 | History is device-local; no receipts/reorder |
+| Refunds / problems | `openDispute` | 🟡 | Opens with empty evidence; no status/outcome view |
+
+### 2.2 Driver (Dasher app)
+| DoorDash stage | FARE primitive | Status | Gap / needed |
+|---|---|---|---|
+| Sign up + (stake) | `register` | ✅ | Stake optional |
+| **Go online / availability + location** | region discovery + radius filter | 🟡 | Radius filter exists; no explicit online/offline toggle or presence |
+| Receive offers (pay, distance) | open-order discovery | ✅ | Sorted by distance |
+| Bid / accept offer (reverse auction) | `placeBid` / `withdrawBid` | 🟡 | Bid ✅; **can't retract** (⛔ `withdrawBid`) |
+| Navigate to restaurant | venue pin | 🟡 | Pin shown; no in-app nav/route |
+| Confirm pickup | `confirmPickup` | ✅ | Dual-sig + QR |
+| Navigate to customer | ZK — driver gets coords at handoff | 🟡 | By design coords are late-bound; needs a nav bridge at handoff |
+| Confirm delivery | `confirmDropoffZK` (driver signs commitment) | ✅ | — |
+| **Earnings dashboard + cash out** | `FareVault.withdraw` | 🟡 | Withdraw exists; no earnings history, no `withdrawTo` cold wallet, no dust claim |
+| Manage stake | `addStake`/`requestUnstake`/`withdrawStake` | ⛔ | Not wired |
+| Ratings / acceptance rate | `reputationOf` | 🟡 | Own stats shown; no acceptance metrics |
+| Edit profile | `setMetadata` | ⛔ | Not wired |
+
+### 2.3 Merchant (Venue / Merchant app)
+| DoorDash stage | FARE primitive | Status | Gap / needed |
+|---|---|---|---|
+| Onboard (location, hours, payout) | `registerVenue` | ✅ | Location + payout + hot signer set at register |
+| Build **menu** | `metadataURI` | 🆕 | No menu editor / catalog |
+| Receive + accept orders | order discovery for the venue | 🟡 | Venue sees its orders; no accept/prep-status step (pickup cosign is the "accept") |
+| Mark ready / hand off to Dasher | `confirmPickup` (venue cosign) | ✅ | Venue hot-signer cosigns pickup |
+| **Manage venue** (pause, edit pin/payout/signer, hours) | `setActive`/`setLocation`/`setPayout`/`setSigner`/`setMetadata` | ⛔ | None wired |
+| Payouts + analytics | vault credit + `pickups` count | 🟡 | Payout via vault; no analytics dashboard |
+
+### 2.4 Cross-cutting
+| Concern | FARE today | Status | Gap / needed |
+|---|---|---|---|
+| Identity / wallet | per-order burners (customer), device key (driver/venue) | ✅ | — (mainnet: shielded funding) |
+| Gas | faucet drip | 🟡 | Testnet only; needs gasless meta-tx (group C) |
+| Notifications | none | 🆕 | Push/webPush for status, offers, bids |
+| Messaging | none | 🆕 | Driver↔customer, order-scoped |
+| Ratings/reputation | delivered/failed counts | 🟡 | Surface in bid cards; add star ratings |
+| Disputes / support | `openDispute` only | 🟡 | Evidence flow + arbiter console + status view |
+| Admin / governance | none in-app | ⚙️ | Ops console (group D) |
+
+---
+
+## Part 3 — Integration backlog (grouped by where it lives)
+
+Ordered roughly by leverage. Check off as landed.
+
+### Group A — On-chain tie-ins (fast wins: primitive already exists)
+*Pure PWA wiring — no new contracts.*
+- [ ] `withdrawBid` — driver retract-bid button
+- [ ] Driver stake lifecycle: `addStake` / `requestUnstake` / `withdrawStake` (+ unbonding countdown)
+- [ ] Driver + venue profile edit: `setMetadata`
+- [ ] Venue management: `setActive` (pause/resume), `setLocation`, `setPayout`, `setSigner`
+- [ ] Vault: `withdrawTo` (cold wallet) + `claimPaseoDust` (+ show `pendingPaseoDust`)
+- [ ] Surface driver **reputation** (`reputationOf`) in bid cards
+- [ ] Dispute **evidence** input on `openDispute` (IPFS URI) + a dispute status/detail view
+
+### Group B — Off-chain product services (net-new)
+*Menu/cart, tracking, comms — the DoorDash "app" layer over the settlement rail.*
+- [ ] **Catalog / menu / cart** behind venue `metadataURI` (IPFS); resolve `orderValue` from a real cart
+- [ ] **Live order tracking**: status timeline + driver location relay + ETA (map trace)
+- [ ] **Messaging**: order-scoped driver↔customer (XMTP/libp2p), keyed to the order
+- [ ] **Notifications**: web-push for status changes, new offers, new bids
+- [ ] **Ratings**: post-delivery stars for driver + venue (on-chain attestation or off-chain aggregate)
+- [ ] Proof-of-delivery photo + "leave at door" option
+- [ ] Order history / receipts / reorder (survive device loss — see identity note)
+
+### Group C — Payments & economics (mainnet blockers)
+- [ ] **Gasless** meta-tx relay (DATUM `DatumRelay` pattern) — createOrder/placeBid/confirms
+- [ ] **Fiat-denominated pricing** via oracle rate captured at acceptance
+- [ ] **Stablecoin escrow** (Asset Hub USDC/USDT via ERC-20 precompile; vault ERC-20 variant)
+- [ ] Shielded **funding path** for per-order burner wallets (privacy mainnet gate)
+
+### Group D — Ops / governance / trust (⚙️ console, not consumer app)
+- [ ] **Arbiter console**: dispute queue + `resolve` (customerShareBps, openerWins, slash)
+- [ ] Governance console: `setParams`, `setGeoParams`, `setMinStake`, `setDisputeBond`, `setArbiter`
+- [ ] Guardian pause console: `pause` / `unpause` / `setGuardian`
+- [ ] Upgrade console: router `register` / `upgradeContract` / `setContractFrozen`
+- [ ] MPC trusted-setup ceremony before mainnet `setVerifyingKey` (lock-once)
+
+### Group E — Trust & release (from ROADMAP R1/R2)
+- [ ] Filmed end-to-end field test (two phones, one real handoff)
+- [ ] Slither/Mythril static-analysis pass
+- [ ] External audit before mainnet value
+- [ ] Device-attestation assurance tier (Play Integrity / App Attest)
+
+---
+
+## Part 4 — Tracking board
+
+| # | Item | Group | Home | Status |
+|---|---|---|---|---|
+| A1 | Retract bid (`withdrawBid`) | A | Driver view | ☐ todo |
+| A2 | Driver stake lifecycle | A | Driver view | ☐ todo |
+| A3 | Profile edit (`setMetadata`) | A | Driver/Venue | ☐ todo |
+| A4 | Venue management (active/pin/payout/signer) | A | Venue view | ☐ todo |
+| A5 | Vault: withdrawTo + dust claim | A | Wallet chip | ☐ todo |
+| A6 | Reputation in bid cards | A | Customer view | ☐ todo |
+| A7 | Dispute evidence + status view | A | Customer/Driver | ☐ todo |
+| B1 | Catalog / menu / cart | B | New service + all views | ☐ todo |
+| B2 | Live tracking + ETA | B | Customer/Driver | ☐ todo |
+| B3 | Order-scoped messaging | B | Customer/Driver | ☐ todo |
+| B4 | Push notifications | B | Cross-cutting | ☐ todo |
+| B5 | Ratings (stars) | B | Post-delivery | ☐ todo |
+| B6 | Proof-of-delivery photo | B | Driver view | ☐ todo |
+| B7 | History / receipts / reorder | B | Customer view | ☐ todo |
+| C1 | Gasless meta-tx relay | C | Infra + all views | ☐ todo |
+| C2 | Fiat pricing (oracle) | C | Checkout | ☐ todo |
+| C3 | Stablecoin escrow | C | Vault + checkout | ☐ todo |
+| C4 | Shielded burner funding | C | Infra | ☐ todo |
+| D1 | Arbiter console (`resolve`) | D | Ops app | ☐ todo |
+| D2 | Governance console | D | Ops app | ☐ todo |
+| D3 | Guardian pause console | D | Ops app | ☐ todo |
+| D4 | Upgrade console | D | Ops app | ☐ todo |
+| D5 | MPC ceremony | D | Ops / offline | ☐ todo |
+| E1 | Filmed field test | E | — | ☐ todo |
+| E2 | Slither/Mythril | E | CI | ☐ todo |
+| E3 | External audit | E | — | ☐ todo |
+| E4 | Device attestation | E | Driver view | ☐ todo |
+
+## See also
+- [ROADMAP.md](ROADMAP.md) — R1/R2/R3 release framing (this doc is the app-integration cut of it)
+- [ARCHITECTURE.md](ARCHITECTURE.md) — contract topology + EIP-712 surface
+- [PRIVACY.md](PRIVACY.md) / [GPS.md](GPS.md) — the privacy + settlement trust model
