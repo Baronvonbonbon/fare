@@ -1,15 +1,17 @@
 {
   "network": "polkadotTestnet",
   "chainId": 420420417,
-  "deployedAt": "2026-07-20T22:32:48.577Z",
+  "deployedAt": "2026-07-21T19:48:24.019Z",
   "addresses": {
-    "router": "0x0ded05513687A52f3F7E00Ae12472391c4A3b1c0",
-    "pauseRegistry": "0x7CBDf1D9B30B05d77d54d6e6acf2B2aDCA8457bc",
-    "vault": "0xcc672EDbCB7ACE13849E61e3aBb3745De0F7B028",
-    "drivers": "0x2b6f241a692C01219F59cF49A9bA5d9d2084A67B",
-    "venues": "0xAfECacb16c5B68Ed89Fde6db0D89EeA42a824990",
-    "orders": "0x7253Eab3148057cfF6e15579700C86F63Fa8d55F",
-    "settlement": "0x5ba079C57BE8F85C3E0838833017d1FE2ac4eaB2",
-    "disputes": "0xc05b2D145afF8379b18453850670e3c1b9CC42e7"
+    "router": "0xD6643539347439583A86F7c9EE46BC0dFD1cD91c",
+    "pauseRegistry": "0x631758fCC31a5cfA826f39397A995E873D387D17",
+    "vault": "0x85df6ff429D8CC49D324cb206A0Edb1a1d7D89fd",
+    "drivers": "0x8f7f8c8197548249aaAE2BcA7b59A703Dd106996",
+    "venues": "0x6Ec53c31bDC858B5995D9d6858fBe93EB14bD352",
+    "orders": "0xF384F2FFfc4553ad6807eF3E8608c6023dB48676",
+    "settlement": "0xF340f06A42E2224B99F31c64C329E705FE1d7f46",
+    "disputes": "0x7d3619FeDCf4591cd0b40D80adcFB1671F0294b7",
+    "locationVerifier": "0xfF3Ed3Bd62D8664f55799ffB8D28E399d53b28E9",
+    "ratings": "0xb07d14ef2e02D0281ff6410472Ae13968ecB6440"
   }
 }
