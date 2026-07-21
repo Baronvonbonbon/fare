@@ -82,7 +82,7 @@ conviction governance, via `Ownable2Step`.
 ## Order lifecycle
 
 ```
-        createOrder            acceptBid              confirmPickup      confirmDropoff
+        createOrder            acceptBid              confirmPickup    confirmDropoffZK
  (none) ───────────► Open ────────────────► Assigned ───────────► PickedUp ─────────► Delivered
                       │ cancelOpen             │ cancelAssigned / abandonOrder │
                       ▼                        ▼                               │
@@ -108,16 +108,22 @@ Domain: `FareSettlement` / `1` / chainId / settlement address.
 
 ```
 LocationAttestation(uint256 orderId, uint8 phase, address actor,
-                    int32 lat, int32 lon, uint64 timestamp)
-DropoffReveal(uint256 orderId, int32 lat, int32 lon,
-              uint256 salt, uint64 timestamp)
+                    int32 lat, int32 lon, uint64 timestamp)          // pickup
+DriverCommitAttestation(uint256 orderId, uint8 phase, address actor,
+                        bytes32 posCommit, uint64 timestamp)          // dropoff
 ```
 
+- **Pickup** (`confirmPickup`) uses two `LocationAttestation`s — driver + venue
+  signer, both plaintext GPS, checked within radius of the public venue pin.
+- **Dropoff** (`confirmDropoffZK`) uses one `DriverCommitAttestation`: the driver
+  signs a Poseidon *commitment* to their position (`posCommit`), not the
+  coordinates. The customer supplies a Groth16 proximity proof; no coordinate
+  goes on-chain. See [GPS.md](GPS.md) and `circuits/proximity.circom`.
 - `phase` (1 = pickup, 2 = dropoff) prevents cross-phase replay.
 - `actor` binds the signature to the expected party (driver / venue signer),
   checked against the order and the venue registry at verification time.
-- Replay across submissions is prevented by the order-status gate (each
-  phase transition fires once).
+- Replay is prevented by the order-status gate (each phase transition fires
+  once), and at dropoff additionally by a single-use `nullifier`.
 - Venue signing uses a **hot signer key** (`FareVenues.signerOf`) — the
   counter tablet key — distinct from the operator (cold) and payout
   addresses. Same key-role separation as DATUM's `relaySigner` pattern.

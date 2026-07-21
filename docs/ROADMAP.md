@@ -59,11 +59,16 @@ discipline.
 **Security**
 - External audit before any mainnet value (internal DATUM passes kept
   finding HIGHs at a much more mature stage — assume this needs one too)
-- MPC ceremony only if/when the ZK proximity circuit ships
+- **MPC trusted-setup ceremony** — now a concrete prerequisite: the ZK
+  proximity circuit has shipped (`circuits/proximity.circom`) with a
+  single-party setup; a real ceremony must run before the mainnet
+  `setVerifyingKey` (lock-once)
 
 ## R3 — Scale & decentralization
 
-- **ZK proximity settlement** (docs/GPS.md) — location privacy end-state
+- ~~**ZK proximity settlement** (docs/GPS.md) — location privacy end-state~~
+  **shipped for dropoff** (`confirmDropoffZK`); remaining: pickup-side privacy
+  + the trusted-setup ceremony above
 - **Batch settlement**: high-volume venues confirm N pickups in one tx
   (DATUM `settleClaimsMulti` shape)
 - **Driver discovery/matching off-chain, settlement on-chain** — the
