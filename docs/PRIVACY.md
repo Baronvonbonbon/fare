@@ -23,13 +23,16 @@ axes — do not conflate them.
   driver's position to a ~33 m grid before signing, so the exact spot never
   enters calldata. The venue signer's coordinates stay in calldata — they are
   the venue's public location.
-- On-chain identities are persistent, and the app reuses **one burner per
-  device**, so the customer↔venue *relationship graph* is still derivable even
-  though the drop coordinates are now hidden.
-- For a **testnet demo/pilot** the posture is now solid on the home-address
-  axis. Before **real-money mainnet**, close the remaining pickup-event leak and
-  the linkability posture (per-order burners), and run a real trusted-setup
-  ceremony (the current setup is single-party).
+- **Linkability — addressed on the customer side.** The app now creates every
+  order from a **fresh, faucet-funded wallet** (per-order burners), so
+  consecutive orders share no on-chain identity and the customer↔venue
+  relationship graph no longer collapses to one address. Unlinkable on testnet
+  *because the faucet is a shared funding source*; on mainnet the funding tx
+  would re-link (see the funding caveat under Mitigations).
+- For a **testnet demo/pilot** the posture is now solid: home address hidden
+  (ZK), driver movements scrubbed, and per-order identities. Before **real-money
+  mainnet**, solve private *funding* of the per-order wallets and run a real
+  trusted-setup ceremony (the current setup is single-party).
 
 ## What FARE writes on-chain
 
@@ -72,11 +75,16 @@ can fetch. "Not stored" ≠ "not on-chain."
    aggregate-inference gap it couldn't. (A `withArgs` test now pins the
    `PickupConfirmed` arity so a regression re-adding coords fails CI.)
 
-3. **Linkability defeats pseudonymity — and burner reuse makes it worse.**
-   On-chain addresses are persistent. The web app keeps **one burner key per
-   device** (`localStorage` `fare.burner.key`), so every order and drop reveal
-   from a customer links to one identity; their home is derivable after a
-   single delivery. Same failure mode for drivers.
+3. **Linkability — resolved for customers via per-order burners.** On-chain
+   addresses are persistent, so reusing one key would collapse every order to
+   one identity. The app now mints a fresh wallet per order (`web/src/wallets.ts`,
+   registry in `localStorage` `fare.customer.wallets`), faucet-funded, and
+   creates the order from it; discovery reassembles "my orders" from the local
+   registry, and each order's later actions (cancel/tip/accept/confirm) are
+   signed by that order's wallet. Drivers/venues intentionally keep one identity
+   (reputation, stake, payouts, registry are per-address). Residual: (a) mainnet
+   funding would re-link (below); (b) the registry is device-local — losing the
+   device loses access to those orders.
 
 4. **Metadata leaks even with the commitment intact.** `OrderCreated` indexes
    `customer` and `venueId`, so *before any reveal* the chain shows "person X
@@ -120,8 +128,15 @@ trusted-setup ceremony before `setVerifyingKey` (lock-once); the shipped setup
 is single-party (fine for testnet).
 
 ### Near-term stopgaps (rough value/effort order)
-1. **Per-order fresh burner wallets** (default) — breaks the linkability chain
-   cheaply; cost is that each order-wallet needs a drip top-up. App-level.
+1. ~~**Per-order fresh burner wallets** (default)~~ **DONE** — every order is
+   created from a fresh faucet-funded wallet (`web/src/wallets.ts`); the app
+   reassembles order history from a device-local registry and offers a
+   privacy-costed "sweep refunds → main" for consolidating funds. Closed risk #3
+   on the customer side.
+   - **Funding caveat (mainnet):** the burners are unlinkable *only because the
+     testnet faucet is a shared source*. On mainnet, topping a fresh wallet from
+     your real wallet links them; genuine mainnet unlinkability needs a shielded
+     funding path (mixer / shielded pool / relayer-funded meta-txs) — not built.
 2. **Coarsen the on-chain reveal** — geohash-truncate to ~±300–600 m and push
    exact-coordinate verification into the off-chain signature exchange.
    Weakens the on-chain distance check (a real tradeoff); a stopgap only.
@@ -139,13 +154,15 @@ Before any real-money launch:
   done (`confirmDropoffZK`). Remaining: run a real trusted-setup ceremony.
 - ✅ Remove driver coordinates from the **pickup** path — done: not emitted, and
   coarsened to ~33 m in calldata.
-- ☐ Address the linkability posture (per-order identities or equivalent) — the
-  drop coordinates are hidden, but the customer↔venue relationship graph and
-  timing patterns remain.
+- ◑ Linkability — per-order customer identities shipped (`web/src/wallets.ts`);
+  what remains is **private funding** of those wallets (testnet uses a shared
+  faucet; mainnet funding from a real wallet re-links). Timing-pattern leakage
+  also remains.
 
 The single worst exposure — a public, permanent index of customers' **home
-addresses** — is closed. The remaining items are real but lower-severity; do not
-ship for real value until they're addressed too.
+addresses** — is closed, driver movements are scrubbed, and orders no longer
+chain to one customer identity. The remaining mainnet gates are: a real
+trusted-setup ceremony, and a shielded funding path for the per-order wallets.
 
 ## See also
 

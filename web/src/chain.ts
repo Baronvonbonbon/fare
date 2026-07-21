@@ -410,6 +410,23 @@ export async function nativeBalance(address: string): Promise<bigint> {
   return readProvider.getBalance(address);
 }
 
+/// Poll until `address` holds at least `minWei` (e.g. after a faucet drip lands),
+/// or reject on timeout. Used before a fresh per-order wallet escrows an order.
+export async function waitForFunding(
+  address: string,
+  minWei: bigint,
+  timeoutMs = 60_000
+): Promise<void> {
+  const started = Date.now();
+  for (;;) {
+    if ((await sendProvider.getBalance(address)) >= minWei) return;
+    if (Date.now() - started > timeoutMs) {
+      throw new Error("Faucet funding timed out — try the manual top-up and retry");
+    }
+    await new Promise((r) => setTimeout(r, 2000));
+  }
+}
+
 /// Cheap liveness probe for the active read provider. Rejects if the selected
 /// node is unreachable (e.g. "pine daemon" chosen with no daemon running) so
 /// the UI can surface it instead of silently showing stale zeros.
