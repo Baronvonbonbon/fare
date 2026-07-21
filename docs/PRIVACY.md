@@ -6,28 +6,36 @@ FARE writes to a public ledger. This is the *data-exposure* companion to
 why the adverse-interest model is sound). Integrity and privacy are separate
 axes — do not conflate them.
 
+> **Update (ZK dropoff implemented).** The drop-reveal risk below (risk #1) is
+> resolved: `confirmDropoffZK` puts a Groth16 proximity proof on-chain instead
+> of coordinates, so the customer's drop location **never** enters calldata,
+> storage, or events. This document's original analysis is retained for the
+> record; risks #2 (driver coords at *pickup*), #3 (linkability) and #4–#5
+> remain and still gate mainnet. See [GPS.md](GPS.md) for the design.
+
 ## TL;DR
 
-- The commitment scheme gives **temporal** privacy (a drop location is hidden
-  *until* dropoff), **not permanent** privacy. At dropoff the exact
-  coordinates enter public calldata forever.
-- **Driver coordinates are the most exposed of all** — they are *emitted in
-  event logs*, which are trivially indexable (the same logs the app's own
-  discovery reads).
+- ~~The commitment scheme gives temporal, not permanent, privacy — at dropoff
+  the coordinates enter public calldata forever.~~ **Fixed:** the drop location
+  is now proven in zero knowledge; no coordinate is written at dropoff.
+- **Driver coordinates at pickup are still exposed** — `PickupConfirmed` still
+  emits them, and they sit in pickup calldata. Lower sensitivity than a home
+  address (the venue pin is public anyway), but still on the mainnet checklist.
 - On-chain identities are persistent, and the app reuses **one burner per
-  device**, so a customer's home is derivable after ~1 delivery.
-- For a **testnet demo/pilot** the current posture is acceptable *with* a user
-  warning + per-order burners. Before **real-money mainnet** the ZK path (or
-  moving reveals off-chain) is a **hard prerequisite** — otherwise FARE
-  permanently publishes customers' home addresses.
+  device**, so the customer↔venue *relationship graph* is still derivable even
+  though the drop coordinates are now hidden.
+- For a **testnet demo/pilot** the posture is now solid on the home-address
+  axis. Before **real-money mainnet**, close the remaining pickup-event leak and
+  the linkability posture (per-order burners), and run a real trusted-setup
+  ceremony (the current setup is single-party).
 
 ## What FARE writes on-chain
 
 | Data | Where | Storage form | Exposure |
 |---|---|---|---|
 | Venue pin | `FareVenues.registerVenue` | plaintext storage | Public **by design** (business location) |
-| Drop location — at order creation | `FareOrders.createOrder` | `keccak256(abi.encode(lat, lon, salt))` | **Private** — commitment reveals nothing |
-| Drop location — at dropoff | `FareSettlement.confirmDropoff` | `DropoffReveal(lat, lon, salt)` in **calldata** (not stored, not emitted) | **Public & permanent** |
+| Drop location — at order creation | `FareOrders.createOrder` | `Poseidon(latEnc, lonEnc, salt)` | **Private** — commitment reveals nothing |
+| Drop location — at dropoff | `FareSettlement.confirmDropoffZK` | **nothing** — a Groth16 proof + hashed public signals `(orderId, dropCommit, driverCommit, radiusMeters, nullifier)` | **Private** — no coordinate on-chain |
 | Driver GPS (pickup + dropoff) | `confirmPickup` / `confirmDropoff` | calldata **and emitted** in `PickupConfirmed` / `DropoffConfirmed` | **Public & trivially indexable** |
 | Venue GPS at pickup | `confirmPickup` | calldata | Public (venue pin is public anyway) |
 | Order metadata | `OrderCreated(orderId, customer, venueId — all indexed)` | event topics | Public relationship graph |
@@ -41,10 +49,14 @@ can fetch. "Not stored" ≠ "not on-chain."
 
 ## Risks
 
-1. **The drop reveal is a home address, made permanent.** The commitment buys
-   privacy only *until* dropoff; then the exact coordinates sit in public
-   calldata forever, bound to the customer's address and a timestamp, and
-   geocodable to a street address. There is no delete.
+1. ~~**The drop reveal is a home address, made permanent.**~~ **RESOLVED by the
+   ZK dropoff.** The drop location is now committed with Poseidon at creation and
+   proven within-radius at dropoff via `confirmDropoffZK` — no coordinate ever
+   enters calldata, storage, or events. What remains on-chain is a proof and
+   hashed public signals from which the location is not recoverable. (Original
+   risk retained below for context.) The customer's drop coordinates never leave
+   their device in the clear; the driver shares their own position face-to-face
+   only so the customer can build the proof locally.
 
 2. **Driver location is the most exposed — via events.** `PickupConfirmed` and
    `DropoffConfirmed` both emit `driverAtt.lat / driverAtt.lon`. Event logs are
@@ -90,13 +102,17 @@ can fetch. "Not stored" ≠ "not on-chain."
 
 ## Mitigations
 
-### The real fix (mainnet-grade)
+### The real fix (mainnet-grade) — **IMPLEMENTED**
 **ZK proximity proof** (Groth16), as laid out in GPS.md: prove
-`dist(driver, customer) < R ∧ H(customer, salt) = commit` with only
-`(orderId, commit, nullifier)` public. **Neither party's coordinates ever hit
-calldata or an event.** Reuses the DATUM circom/snarkjs pipeline (Poseidon
-commitments, BN254 verifier, trusted-setup scripts). This is a substantial
-project and the correct long-term answer.
+`dist(driver, customer) < R ∧ Poseidon(customer, salt) = dropCommit ∧
+Poseidon(driver, drvSalt) = driverCommit` with only
+`(orderId, dropCommit, driverCommit, radiusMeters, nullifier)` public.
+**Neither party's coordinates ever hit calldata or an event.** Landed as
+`circuits/proximity.circom`, `FareLocationVerifier.sol` (BN254 precompiles),
+`FareSettlement.confirmDropoffZK`, the browser prover `web/src/zk.ts`, and
+`scripts/setup-zk.mjs`. Remaining mainnet caveat: run a real multi-party
+trusted-setup ceremony before `setVerifyingKey` (lock-once); the shipped setup
+is single-party (fine for testnet).
 
 ### Near-term stopgaps (rough value/effort order)
 1. **Per-order fresh burner wallets** (default) — breaks the linkability chain
@@ -112,16 +128,19 @@ project and the correct long-term answer.
 
 ## The mainnet gate
 
-Before any real-money launch, at least one of the following **must** hold:
+Before any real-money launch:
 
-- ZK proximity proofs are live (coordinates never on-chain), **or**
-- Exact-coordinate verification is fully off-chain and only coarse/hashed data
-  is ever written,
+- ✅ ZK proximity proofs are live for **dropoff** (coordinates never on-chain) —
+  done (`confirmDropoffZK`). Remaining: run a real trusted-setup ceremony.
+- ☐ Remove driver coordinates from the **pickup** path — still emitted in
+  `PickupConfirmed` and present in pickup calldata.
+- ☐ Address the linkability posture (per-order identities or equivalent) — the
+  drop coordinates are hidden, but the customer↔venue relationship graph and
+  timing patterns remain.
 
-**and** driver coordinates are removed from emitted events, **and** the
-linkability posture (per-order identities or equivalent) is addressed. Absent
-these, FARE is a public, permanent index of customers' home addresses and
-drivers' movements — do not ship it for real value in that state.
+The single worst exposure — a public, permanent index of customers' **home
+addresses** — is closed. The remaining items are real but lower-severity; do not
+ship for real value until they're addressed too.
 
 ## See also
 

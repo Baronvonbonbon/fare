@@ -120,6 +120,7 @@ async function main() {
   const orders = await deployOrReuse("orders", "FareOrders", [pause]);
   const settlement = await deployOrReuse("settlement", "FareSettlement", [pause]);
   const disputes = await deployOrReuse("disputes", "FareDisputes", [pause]);
+  const locationVerifier = await deployOrReuse("locationVerifier", "FareLocationVerifier");
 
   // ── 2. Wiring ──────────────────────────────────────────────────────────
   console.log("\n2. Wiring");
@@ -142,6 +143,30 @@ async function main() {
       settlementC.configure(orders, venues, { gasLimit: GAS_LIMIT })
     );
   } else console.log("  = settlement already configured");
+
+  // ── ZK proximity verifier: set the VK, then wire it into settlement ─────
+  const verifierC = await ethers.getContractAt("FareLocationVerifier", locationVerifier, deployer);
+  const VK_CALLDATA = path.join(__dirname, "..", "circuits", "build", "setVK-calldata.json");
+  if (!(await verifierC.vkSet())) {
+    if (fs.existsSync(VK_CALLDATA)) {
+      const vk = JSON.parse(fs.readFileSync(VK_CALLDATA, "utf-8"));
+      await send("locationVerifier.setVerifyingKey", () =>
+        verifierC.setVerifyingKey(
+          vk.alpha1, vk.beta2, vk.gamma2, vk.delta2,
+          vk.IC0, vk.IC1, vk.IC2, vk.IC3, vk.IC4, vk.IC5,
+          { gasLimit: GAS_LIMIT }
+        )
+      );
+    } else {
+      console.log("  ! setVK-calldata.json missing — run `node scripts/setup-zk.mjs` then re-run deploy");
+    }
+  } else console.log("  = locationVerifier VK already set");
+
+  if ((await settlementC.locationVerifier()) !== locationVerifier) {
+    await send("settlement.setLocationVerifier", () =>
+      settlementC.setLocationVerifier(locationVerifier, { gasLimit: GAS_LIMIT })
+    );
+  } else console.log("  = settlement verifier already wired");
 
   if ((await disputesC.orders()) !== orders) {
     await send("disputes.configure", () =>
@@ -207,6 +232,8 @@ async function main() {
     ["orders.disputes", (await ordersC.disputes()) === disputes],
     ["settlement.orders", (await settlementC.orders()) === orders],
     ["settlement.venues", (await settlementC.venues()) === venues],
+    ["settlement.verifier", (await settlementC.locationVerifier()) === locationVerifier],
+    ["verifier VK set", await verifierC.vkSet()],
     ["disputes.orders", (await disputesC.orders()) === orders],
     ["vault auth orders", await vaultC.authorized(orders)],
     ["vault auth disputes", await vaultC.authorized(disputes)],

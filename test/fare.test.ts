@@ -20,8 +20,23 @@ const MAX_FARE = ethers.parseEther("0.5");
 
 const abi = ethers.AbiCoder.defaultAbiCoder();
 
+// Opaque drop commitment for the lifecycle tests. The real protocol commit is
+// Poseidon(latEnc, lonEnc, salt) computed off-chain (web/src/zk.ts); these
+// tests run the confirmDropoffZK path against MockLocationVerifier, which does
+// NOT check the commitment's preimage — so any deterministic bytes32 stands in
+// for the commit here. The real Groth16 verifier + a genuine Poseidon commit
+// are exercised in zk.test.ts against the committed proof fixture.
 function dropCommit(lat: number, lon: number, salt: bigint): string {
   return ethers.keccak256(abi.encode(["int32", "int32", "uint256"], [lat, lon, salt]));
+}
+
+// A driver position commitment stand-in (Poseidon in production; opaque here).
+function driverCommit(orderId: bigint): string {
+  return ethers.keccak256(abi.encode(["string", "uint256"], ["driver-pos", orderId]));
+}
+
+function nullifierOf(orderId: bigint, salt: bigint): string {
+  return ethers.keccak256(abi.encode(["uint256", "uint256"], [salt, orderId]));
 }
 
 describe("FARE protocol", () => {
@@ -36,6 +51,7 @@ describe("FARE protocol", () => {
     const orders = await (await ethers.getContractFactory("FareOrders")).deploy(pause.target);
     const settlement = await (await ethers.getContractFactory("FareSettlement")).deploy(pause.target);
     const disputes = await (await ethers.getContractFactory("FareDisputes")).deploy(pause.target);
+    const verifier = await (await ethers.getContractFactory("MockLocationVerifier")).deploy();
 
     // wiring
     await orders.configure(
@@ -47,6 +63,7 @@ describe("FARE protocol", () => {
       treasury.address
     );
     await settlement.configure(orders.target, venues.target);
+    await settlement.setLocationVerifier(verifier.target);
     await disputes.configure(orders.target, vault.target, drivers.target, treasury.address);
     await vault.setAuthorized(orders.target, true);
     await vault.setAuthorized(disputes.target, true);
@@ -72,7 +89,7 @@ describe("FARE protocol", () => {
 
     return {
       deployer, treasury, customer, driver1, driver2, venueOp, venueSigner, stranger,
-      pause, vault, drivers, venues, orders, settlement, disputes,
+      pause, vault, drivers, venues, orders, settlement, disputes, verifier,
       venueId, domain,
     };
   }
@@ -87,12 +104,12 @@ describe("FARE protocol", () => {
       { name: "timestamp", type: "uint64" },
     ],
   };
-  const REVEAL_TYPES = {
-    DropoffReveal: [
+  const DRIVER_COMMIT_TYPES = {
+    DriverCommitAttestation: [
       { name: "orderId", type: "uint256" },
-      { name: "lat", type: "int32" },
-      { name: "lon", type: "int32" },
-      { name: "salt", type: "uint256" },
+      { name: "phase", type: "uint8" },
+      { name: "actor", type: "address" },
+      { name: "posCommit", type: "bytes32" },
       { name: "timestamp", type: "uint64" },
     ],
   };
@@ -105,13 +122,15 @@ describe("FARE protocol", () => {
     return signer.signTypedData(domain, LOCATION_TYPES, att);
   }
 
-  async function signReveal(
+  async function signDriverCommit(
     signer: HardhatEthersSigner,
     domain: any,
-    reveal: { orderId: bigint; lat: number; lon: number; salt: bigint; timestamp: number }
+    att: { orderId: bigint; phase: number; actor: string; posCommit: string; timestamp: number }
   ) {
-    return signer.signTypedData(domain, REVEAL_TYPES, reveal);
+    return signer.signTypedData(domain, DRIVER_COMMIT_TYPES, att);
   }
+
+  const DUMMY_PROOF = "0x" + "00".repeat(256); // MockLocationVerifier ignores proof bytes
 
   /// Create a standard order, run the auction, return assigned orderId.
   async function createAndAssign(f: Awaited<ReturnType<typeof deployAll>>) {
@@ -148,20 +167,27 @@ describe("FARE protocol", () => {
     return f.settlement.confirmPickup(dAtt, dSig, vAtt, vSig);
   }
 
+  /// Drive the ZK dropoff path with the mock verifier: the driver signs a
+  /// commitment to their position, and the (mock-accepted) proof carries the
+  /// public signals the settlement contract binds to the order.
   async function confirmDropoffOk(
     f: Awaited<ReturnType<typeof deployAll>>,
     orderId: bigint,
     driver: HardhatEthersSigner
   ) {
     const now = await time.latest();
-    const dAtt = {
-      orderId, phase: 2, actor: driver.address,
-      lat: NEAR_DROP.lat, lon: NEAR_DROP.lon, timestamp: now,
-    };
-    const reveal = { orderId, lat: DROP_LAT, lon: DROP_LON, salt: DROP_SALT, timestamp: now };
-    const dSig = await signLocation(driver, f.domain, dAtt);
-    const cSig = await signReveal(f.customer, f.domain, reveal);
-    return f.settlement.confirmDropoff(dAtt, dSig, reveal, cSig);
+    const posCommit = driverCommit(orderId);
+    const dAtt = { orderId, phase: 2, actor: driver.address, posCommit, timestamp: now };
+    const dSig = await signDriverCommit(driver, f.domain, dAtt);
+    const radius = await f.settlement.dropoffRadiusMeters();
+    const pubSignals = [
+      orderId,
+      BigInt(dropCommit(DROP_LAT, DROP_LON, DROP_SALT)),
+      BigInt(posCommit),
+      radius,
+      BigInt(nullifierOf(orderId, DROP_SALT)),
+    ];
+    return f.settlement.confirmDropoffZK(dAtt, dSig, DUMMY_PROOF, pubSignals);
   }
 
   // ---------------------------------------------------------------
@@ -440,21 +466,84 @@ describe("FARE protocol", () => {
       );
     });
 
-    it("rejects a dropoff reveal that doesn't match the commitment", async () => {
+    it("rejects a dropoff proof whose commit signal ≠ the order's commit", async () => {
       const f = await loadFixture(deployAll);
       const { orderId } = await createAndAssign(f);
       await confirmPickupOk(f, orderId, f.driver2);
       const now = await time.latest();
-      const dAtt = {
-        orderId, phase: 2, actor: f.driver2.address,
-        lat: NEAR_DROP.lat, lon: NEAR_DROP.lon, timestamp: now,
-      };
-      const badReveal = { orderId, lat: DROP_LAT, lon: DROP_LON, salt: 999n, timestamp: now };
-      const dSig = await signLocation(f.driver2, f.domain, dAtt);
-      const cSig = await signReveal(f.customer, f.domain, badReveal);
+      const posCommit = driverCommit(orderId);
+      const dAtt = { orderId, phase: 2, actor: f.driver2.address, posCommit, timestamp: now };
+      const dSig = await signDriverCommit(f.driver2, f.domain, dAtt);
+      const radius = await f.settlement.dropoffRadiusMeters();
+      // commit signal points at a DIFFERENT drop location than the order's.
+      const pubSignals = [
+        orderId,
+        BigInt(dropCommit(DROP_LAT, DROP_LON, 999n)),
+        BigInt(posCommit),
+        radius,
+        BigInt(nullifierOf(orderId, DROP_SALT)),
+      ];
       await expect(
-        f.settlement.confirmDropoff(dAtt, dSig, badReveal, cSig)
+        f.settlement.confirmDropoffZK(dAtt, dSig, DUMMY_PROOF, pubSignals)
       ).to.be.revertedWith("commit-mismatch");
+    });
+
+    it("rejects a dropoff whose driverCommit signal ≠ the driver's signed commitment", async () => {
+      const f = await loadFixture(deployAll);
+      const { orderId } = await createAndAssign(f);
+      await confirmPickupOk(f, orderId, f.driver2);
+      const now = await time.latest();
+      const posCommit = driverCommit(orderId);
+      const dAtt = { orderId, phase: 2, actor: f.driver2.address, posCommit, timestamp: now };
+      const dSig = await signDriverCommit(f.driver2, f.domain, dAtt);
+      const radius = await f.settlement.dropoffRadiusMeters();
+      const pubSignals = [
+        orderId,
+        BigInt(dropCommit(DROP_LAT, DROP_LON, DROP_SALT)),
+        BigInt(driverCommit(orderId + 7n)), // mismatched driver commitment
+        radius,
+        BigInt(nullifierOf(orderId, DROP_SALT)),
+      ];
+      await expect(
+        f.settlement.confirmDropoffZK(dAtt, dSig, DUMMY_PROOF, pubSignals)
+      ).to.be.revertedWith("driver-commit-mismatch");
+    });
+
+    it("rejects a dropoff whose radius signal ≠ the governance radius", async () => {
+      const f = await loadFixture(deployAll);
+      const { orderId } = await createAndAssign(f);
+      await confirmPickupOk(f, orderId, f.driver2);
+      const now = await time.latest();
+      const posCommit = driverCommit(orderId);
+      const dAtt = { orderId, phase: 2, actor: f.driver2.address, posCommit, timestamp: now };
+      const dSig = await signDriverCommit(f.driver2, f.domain, dAtt);
+      const pubSignals = [
+        orderId,
+        BigInt(dropCommit(DROP_LAT, DROP_LON, DROP_SALT)),
+        BigInt(posCommit),
+        99999n, // not dropoffRadiusMeters — a prover-chosen loose fence
+        BigInt(nullifierOf(orderId, DROP_SALT)),
+      ];
+      await expect(
+        f.settlement.confirmDropoffZK(dAtt, dSig, DUMMY_PROOF, pubSignals)
+      ).to.be.revertedWith("radius-mismatch");
+    });
+
+    it("rejects a dropoff when the verifier rejects the proof (out-of-fence)", async () => {
+      const f = await loadFixture(deployAll);
+      const { orderId } = await createAndAssign(f);
+      await confirmPickupOk(f, orderId, f.driver2);
+      await f.verifier.setResult(false); // circuit would reject: driver not within radius
+      await expect(confirmDropoffOk(f, orderId, f.driver2)).to.be.revertedWith("bad-proof");
+    });
+
+    it("nullifier is single-use: a dropoff proof can't be replayed", async () => {
+      const f = await loadFixture(deployAll);
+      const { orderId } = await createAndAssign(f);
+      await confirmPickupOk(f, orderId, f.driver2);
+      await confirmDropoffOk(f, orderId, f.driver2);
+      // second attempt trips the status gate first (order already Delivered)
+      await expect(confirmDropoffOk(f, orderId, f.driver2)).to.be.revertedWith("bad-status");
     });
 
     it("cannot confirm pickup twice (status gate = replay protection)", async () => {
@@ -462,24 +551,6 @@ describe("FARE protocol", () => {
       const { orderId } = await createAndAssign(f);
       await confirmPickupOk(f, orderId, f.driver2);
       await expect(confirmPickupOk(f, orderId, f.driver2)).to.be.revertedWith("bad-status");
-    });
-
-    it("dropoff requires the driver near the REVEALED drop point", async () => {
-      const f = await loadFixture(deployAll);
-      const { orderId } = await createAndAssign(f);
-      await confirmPickupOk(f, orderId, f.driver2);
-      const now = await time.latest();
-      // driver still at the venue (~1.1 km from the drop)
-      const dAtt = {
-        orderId, phase: 2, actor: f.driver2.address,
-        lat: NEAR_VENUE.lat, lon: NEAR_VENUE.lon, timestamp: now,
-      };
-      const reveal = { orderId, lat: DROP_LAT, lon: DROP_LON, salt: DROP_SALT, timestamp: now };
-      const dSig = await signLocation(f.driver2, f.domain, dAtt);
-      const cSig = await signReveal(f.customer, f.domain, reveal);
-      await expect(f.settlement.confirmDropoff(dAtt, dSig, reveal, cSig)).to.be.revertedWith(
-        "driver-out-of-range"
-      );
     });
   });
 

@@ -31,11 +31,17 @@ import "./interfaces/IFare.sol";
 ///         anyway), which keeps the path relay-friendly: a driver's phone, a
 ///         venue tablet, or a gasless relay can carry the transaction.
 ///
-///         Privacy note (MVP posture): the customer's revealed coordinates
-///         appear in calldata, which is public. The commit scheme keeps them
-///         off-chain until the delivery moment, but a ZK proximity circuit
-///         (proving dist < R against the commitment without revealing
-///         coordinates) is the documented production upgrade.
+///         Dropoff privacy (ZK): the customer's drop coordinates NEVER touch
+///         the chain — not calldata, not storage, not events. `confirmDropoffZK`
+///         takes a Groth16 proof (circuits/proximity.circom) that, against the
+///         Poseidon `dropCommit` published at order creation, the driver's
+///         committed position is within `dropoffRadiusMeters` of the customer's
+///         committed position. Both parties' coordinates are private circuit
+///         witnesses. The adverse-interest model is preserved: the driver
+///         ECDSA-signs a commitment to their OWN position (they won't sign a
+///         false one that the proximity proof would then fail), and only the
+///         customer can produce the proof (it needs the drop salt, which only
+///         they hold) — so the proof is the customer's consent. See docs/GPS.md.
 contract FareSettlement is Ownable2Step, EIP712, FareUpgradable {
     using GeoLib for int32;
 
@@ -49,12 +55,14 @@ contract FareSettlement is Ownable2Step, EIP712, FareUpgradable {
         uint64 timestamp;
     }
 
-    /// Signed by the customer at dropoff; reveals the committed drop location.
-    struct DropoffReveal {
+    /// Signed by the driver at dropoff. Instead of plaintext coordinates the
+    /// driver attests a Poseidon COMMITMENT to their position — the proximity
+    /// proof binds against this without the coordinates ever going on-chain.
+    struct DriverCommitAttestation {
         uint256 orderId;
-        int32 lat;
-        int32 lon;
-        uint256 salt;
+        uint8 phase; // 2 = dropoff
+        address actor; // driver
+        bytes32 posCommit; // Poseidon(drvLatEnc, drvLonEnc, drvSalt)
         uint64 timestamp;
     }
 
@@ -62,9 +70,9 @@ contract FareSettlement is Ownable2Step, EIP712, FareUpgradable {
         keccak256(
             "LocationAttestation(uint256 orderId,uint8 phase,address actor,int32 lat,int32 lon,uint64 timestamp)"
         );
-    bytes32 public constant DROPOFF_REVEAL_TYPEHASH =
+    bytes32 public constant DRIVER_COMMIT_TYPEHASH =
         keccak256(
-            "DropoffReveal(uint256 orderId,int32 lat,int32 lon,uint256 salt,uint64 timestamp)"
+            "DriverCommitAttestation(uint256 orderId,uint8 phase,address actor,bytes32 posCommit,uint64 timestamp)"
         );
 
     uint8 public constant PHASE_PICKUP = 1;
@@ -72,7 +80,12 @@ contract FareSettlement is Ownable2Step, EIP712, FareUpgradable {
 
     IFareOrders public orders;
     IFareVenues public venues;
+    IFareLocationVerifier public locationVerifier;
     IFarePauseRegistry public pauseRegistry;
+
+    /// Poseidon(salt, orderId) → consumed. Single-use guard on the dropoff
+    /// proof; a belt-and-suspenders complement to the status gate below.
+    mapping(bytes32 => bool) public usedNullifiers;
 
     uint32 public pickupRadiusMeters = 150;
     uint32 public dropoffRadiusMeters = 100;
@@ -86,14 +99,15 @@ contract FareSettlement is Ownable2Step, EIP712, FareUpgradable {
         int32 driverLat,
         int32 driverLon
     );
+    /// No coordinates emitted — the ZK dropoff path keeps both parties'
+    /// positions off-chain entirely (see docs/PRIVACY.md risk #2).
     event DropoffConfirmed(
         uint256 indexed orderId,
         address indexed driver,
-        address indexed customer,
-        int32 driverLat,
-        int32 driverLon
+        address indexed customer
     );
     event GeoParamsSet(uint32 pickupRadius, uint32 dropoffRadius, uint64 maxAge, uint64 futureSkew);
+    event LocationVerifierSet(address indexed verifier);
 
     constructor(address _pauseRegistry) Ownable(msg.sender) EIP712("FareSettlement", "1") {
         pauseRegistry = IFarePauseRegistry(_pauseRegistry);
@@ -115,6 +129,16 @@ contract FareSettlement is Ownable2Step, EIP712, FareUpgradable {
         require(_orders != address(0) && _venues != address(0), "zero-addr");
         orders = IFareOrders(_orders);
         venues = IFareVenues(_venues);
+    }
+
+    /// @notice Wire the Groth16 proximity verifier. Kept separate from
+    ///         `configure` so the verifier can be deployed after its trusted
+    ///         setup, then bound (and re-bound to a fresh verifier if the VK
+    ///         must ever be rotated — the verifier itself is lock-once).
+    function setLocationVerifier(address _verifier) external onlyOwner {
+        require(_verifier != address(0), "zero-addr");
+        locationVerifier = IFareLocationVerifier(_verifier);
+        emit LocationVerifierSet(_verifier);
     }
 
     function setGeoParams(
@@ -179,56 +203,60 @@ contract FareSettlement is Ownable2Step, EIP712, FareUpgradable {
         emit PickupConfirmed(orderId, driver, venueSigner, driverAtt.lat, driverAtt.lon);
     }
 
-    /// @notice Verify driver + customer dropoff attestations. The customer's
-    ///         reveal must match the drop commitment from order creation, and
-    ///         the driver must be within radius of the revealed coordinates.
-    function confirmDropoff(
-        LocationAttestation calldata driverAtt,
+    /// @notice Zero-knowledge dropoff confirmation. NO coordinates go on-chain.
+    ///
+    ///         The driver ECDSA-signs a Poseidon commitment to their own
+    ///         position (`driverAtt.posCommit`). The customer builds a Groth16
+    ///         proof (circuits/proximity.circom) proving, entirely over private
+    ///         witnesses, that:
+    ///           - dropCommit  = Poseidon(their drop coords, salt)  [== on-chain commit]
+    ///           - driverCommit = Poseidon(driver coords, drvSalt)  [== driverAtt.posCommit]
+    ///           - dist(driver, customer) ≤ radiusMeters
+    ///           - nullifier = Poseidon(salt, orderId)
+    ///
+    ///         This contract binds those public signals to the order, the
+    ///         driver's signed commitment, and the governance radius, then
+    ///         verifies the proof. Callable by anyone holding the proof + the
+    ///         driver signature (relay-friendly).
+    ///
+    /// @param driverAtt  driver's signed commitment to their dropoff position
+    /// @param driverSig  EIP-712 signature over driverAtt (recovers to driver)
+    /// @param proof      256-byte ABI-encoded Groth16 proof
+    /// @param pubSignals [orderId, dropCommit, driverCommit, radiusMeters, nullifier]
+    function confirmDropoffZK(
+        DriverCommitAttestation calldata driverAtt,
         bytes calldata driverSig,
-        DropoffReveal calldata reveal,
-        bytes calldata customerSig
+        bytes calldata proof,
+        uint256[5] calldata pubSignals
     ) external whenNotPaused whenNotFrozen {
-        require(driverAtt.orderId == reveal.orderId, "order-mismatch");
+        require(address(locationVerifier) != address(0), "no-verifier");
         uint256 orderId = driverAtt.orderId;
+        require(pubSignals[0] == orderId, "order-mismatch");
+
         (address customer, address driver, ) = orders.partiesOf(orderId);
         require(orders.statusOf(orderId) == IFareOrders.Status.PickedUp, "bad-status");
 
-        // Driver side
+        // Driver side: signed commitment to their own position.
         require(driverAtt.phase == PHASE_DROPOFF && driverAtt.actor == driver, "bad-driver-att");
-        _verifyLocationSig(driverAtt, driverSig);
+        _verifyDriverCommitSig(driverAtt, driverSig);
         _requireFresh(driverAtt.timestamp);
 
-        // Customer side: signature + commitment binding
-        bytes32 digest = _hashTypedDataV4(
-            keccak256(
-                abi.encode(
-                    DROPOFF_REVEAL_TYPEHASH,
-                    reveal.orderId,
-                    reveal.lat,
-                    reveal.lon,
-                    reveal.salt,
-                    reveal.timestamp
-                )
-            )
-        );
-        require(ECDSA.recover(digest, customerSig) == customer, "bad-customer-sig");
-        _requireFresh(reveal.timestamp);
-        require(
-            keccak256(abi.encode(reveal.lat, reveal.lon, reveal.salt)) ==
-                orders.dropCommitOf(orderId),
-            "commit-mismatch"
-        );
+        // Bind the public signals to on-chain truth.
+        require(bytes32(pubSignals[1]) == orders.dropCommitOf(orderId), "commit-mismatch");
+        require(bytes32(pubSignals[2]) == driverAtt.posCommit, "driver-commit-mismatch");
+        require(pubSignals[3] == dropoffRadiusMeters, "radius-mismatch");
 
-        // Geo: driver within radius of the revealed drop location
-        GeoLib.requireValid(driverAtt.lat, driverAtt.lon);
-        GeoLib.requireValid(reveal.lat, reveal.lon);
-        require(
-            GeoLib.withinRadius(driverAtt.lat, driverAtt.lon, reveal.lat, reveal.lon, dropoffRadiusMeters),
-            "driver-out-of-range"
-        );
+        // Single-use nullifier (the status gate already blocks replay; this is
+        // an explicit, auditable second lock and matches the documented design).
+        bytes32 nullifier = bytes32(pubSignals[4]);
+        require(!usedNullifiers[nullifier], "nullifier-used");
 
+        // The proof itself: proximity + both commitment openings, all private.
+        require(locationVerifier.verifyProximity(proof, pubSignals), "bad-proof");
+
+        usedNullifiers[nullifier] = true;
         orders.onDropoffConfirmed(orderId);
-        emit DropoffConfirmed(orderId, driver, customer, driverAtt.lat, driverAtt.lon);
+        emit DropoffConfirmed(orderId, driver, customer);
     }
 
     // ---- helpers ----
@@ -243,6 +271,25 @@ contract FareSettlement is Ownable2Step, EIP712, FareUpgradable {
                     att.actor,
                     att.lat,
                     att.lon,
+                    att.timestamp
+                )
+            )
+        );
+        require(ECDSA.recover(digest, sig) == att.actor, "bad-signature");
+    }
+
+    function _verifyDriverCommitSig(DriverCommitAttestation calldata att, bytes calldata sig)
+        internal
+        view
+    {
+        bytes32 digest = _hashTypedDataV4(
+            keccak256(
+                abi.encode(
+                    DRIVER_COMMIT_TYPEHASH,
+                    att.orderId,
+                    att.phase,
+                    att.actor,
+                    att.posCommit,
                     att.timestamp
                 )
             )

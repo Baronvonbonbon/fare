@@ -12,3 +12,13 @@ web/dist/
 .dev.vars
 web/.dev.vars
 web/tsconfig.tsbuildinfo
+# ZK build intermediates — heavy + regenerable via `node scripts/setup-zk.mjs`.
+# The runtime prover artifacts (web/public/zk/*), the deploy VK calldata
+# (circuits/build/setVK-calldata.json, vk.json) and the test fixture stay tracked.
+circuits/*.ptau
+circuits/build/*.ptau
+circuits/build/*.r1cs
+circuits/build/*.sym
+circuits/build/*.zkey
+circuits/build/proximity_js/
+circuits/build/sample-input.json

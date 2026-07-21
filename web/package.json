@@ -13,9 +13,11 @@
     "jsqr": "^1.4.0",
     "maplibre-gl": "^5.24.0",
     "pine-rpc": "^0.3.0",
+    "poseidon-lite": "^0.3.0",
     "qrcode-generator": "^2.0.4",
     "react": "^18.3.1",
-    "react-dom": "^18.3.1"
+    "react-dom": "^18.3.1",
+    "snarkjs": "^0.7.6"
   },
   "devDependencies": {
     "@types/react": "^18.3.3",

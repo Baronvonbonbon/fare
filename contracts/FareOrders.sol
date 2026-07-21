@@ -42,7 +42,7 @@ contract FareOrders is Ownable2Step, ReentrancyGuard, FareUpgradable, IFareOrder
         uint96 fare;
         uint96 maxFare;
         uint96 escrow; // conservation tracker: everything not yet released
-        bytes32 dropCommit; // keccak256(abi.encode(lat, lon, salt)) — customer reveals at dropoff
+        bytes32 dropCommit; // Poseidon(latEnc, lonEnc, salt) — never revealed on-chain; proven in ZK at dropoff
         uint64 createdAt;
         uint64 pickupWindowSecs;
         uint64 deliveryWindowSecs;
@@ -167,8 +167,12 @@ contract FareOrders is Ownable2Step, ReentrancyGuard, FareUpgradable, IFareOrder
     // ---- customer: create / tip / cancel ----
 
     /// @param venueId       registered pickup venue
-    /// @param dropCommit    keccak256(abi.encode(int32 lat, int32 lon, uint256 salt));
-    ///                      the exact drop location stays off-chain until dropoff
+    /// @param dropCommit    Poseidon(latEnc, lonEnc, salt) where
+    ///                      latEnc = lat + 90_000_000, lonEnc = lon + 180_000_000
+    ///                      (offset-encoded microdegrees, kept non-negative for the
+    ///                      field). The exact drop location NEVER goes on-chain — at
+    ///                      dropoff it is proven in zero knowledge (confirmDropoffZK)
+    ///                      against this commitment. See circuits/proximity.circom.
     /// @param orderValue    goods value owed to the venue; 0 = paid off-chain
     /// @param tip           optional driver tip; 0 allowed
     /// @param maxFare       bid ceiling for the auction; must be > 0

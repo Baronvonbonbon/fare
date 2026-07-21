@@ -8,6 +8,7 @@ import {
 } from "ethers";
 import deployed from "./deployed-addresses.json";
 import { MicroDeg } from "./geo";
+import { positionCommit } from "./zk";
 import {
   DISPUTES_ABI,
   DRIVERS_ABI,
@@ -316,12 +317,12 @@ export const LOCATION_TYPES = {
   ],
 };
 
-export const REVEAL_TYPES = {
-  DropoffReveal: [
+export const DRIVER_COMMIT_TYPES = {
+  DriverCommitAttestation: [
     { name: "orderId", type: "uint256" },
-    { name: "lat", type: "int32" },
-    { name: "lon", type: "int32" },
-    { name: "salt", type: "uint256" },
+    { name: "phase", type: "uint8" },
+    { name: "actor", type: "address" },
+    { name: "posCommit", type: "bytes32" },
     { name: "timestamp", type: "uint64" },
   ],
 };
@@ -335,11 +336,11 @@ export interface LocationAtt {
   timestamp: number;
 }
 
-export interface RevealAtt {
+export interface DriverCommitAtt {
   orderId: string;
-  lat: number;
-  lon: number;
-  salt: string;
+  phase: number;
+  actor: string;
+  posCommit: string; // Poseidon(drvLatEnc, drvLonEnc, drvSalt)
   timestamp: number;
 }
 
@@ -347,14 +348,14 @@ export async function signLocation(s: Session, att: LocationAtt): Promise<string
   return s.signer.signTypedData(eip712Domain(), LOCATION_TYPES, att);
 }
 
-export async function signReveal(s: Session, reveal: RevealAtt): Promise<string> {
-  return s.signer.signTypedData(eip712Domain(), REVEAL_TYPES, reveal);
+export async function signDriverCommit(s: Session, att: DriverCommitAtt): Promise<string> {
+  return s.signer.signTypedData(eip712Domain(), DRIVER_COMMIT_TYPES, att);
 }
 
+/// Poseidon(latEnc, lonEnc, salt) — the ZK-native drop commitment (never
+/// revealed on-chain; proven in zero knowledge at dropoff). See web/src/zk.ts.
 export function computeDropCommit(lat: number, lon: number, salt: string): string {
-  return ethers.keccak256(
-    ethers.AbiCoder.defaultAbiCoder().encode(["int32", "int32", "uint256"], [lat, lon, salt])
-  );
+  return positionCommit(lat, lon, salt);
 }
 
 export function randomSalt(): string {
@@ -363,11 +364,25 @@ export function randomSalt(): string {
 
 // ---- attestation hand-off payloads (copy/paste or QR between parties) ----
 
-export function encodePayload(kind: string, att: object, sig: string): string {
-  return btoa(JSON.stringify({ v: 1, kind, att, sig }));
+/// `pos` (optional) carries plaintext coordinates + salt for the ZK dropoff
+/// handoff — the driver shares their position with the customer face-to-face so
+/// the customer can build the proximity proof locally. It rides inside the QR
+/// exchanged in person; it never goes on-chain.
+export function encodePayload(
+  kind: string,
+  att: object,
+  sig: string,
+  pos?: { lat: number; lon: number; salt: string }
+): string {
+  return btoa(JSON.stringify({ v: 1, kind, att, sig, pos }));
 }
 
-export function decodePayload(s: string): { kind: string; att: any; sig: string } {
+export function decodePayload(s: string): {
+  kind: string;
+  att: any;
+  sig: string;
+  pos?: { lat: number; lon: number; salt: string };
+} {
   const o = JSON.parse(atob(s.trim()));
   if (o.v !== 1) throw new Error("Unknown payload version");
   return o;
