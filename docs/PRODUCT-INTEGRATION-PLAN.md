@@ -168,15 +168,15 @@ role views. The mapping below is the target shape.
 
 Ordered roughly by leverage. Check off as landed.
 
-### Group A — On-chain tie-ins (fast wins: primitive already exists)
+### Group A — On-chain tie-ins (fast wins: primitive already exists) ✅ DONE
 *Pure PWA wiring — no new contracts.*
-- [ ] `withdrawBid` — driver retract-bid button
-- [ ] Driver stake lifecycle: `addStake` / `requestUnstake` / `withdrawStake` (+ unbonding countdown)
-- [ ] Driver + venue profile edit: `setMetadata`
-- [ ] Venue management: `setActive` (pause/resume), `setLocation`, `setPayout`, `setSigner`
-- [ ] Vault: `withdrawTo` (cold wallet) + `claimPaseoDust` (+ show `pendingPaseoDust`)
-- [ ] Surface driver **reputation** (`reputationOf`) in bid cards
-- [ ] Dispute **evidence** input on `openDispute` (IPFS URI) + a dispute status/detail view
+- [x] `withdrawBid` — driver retract-bid button (`DriverBid`)
+- [x] Driver stake lifecycle: `addStake` / `requestUnstake` / `withdrawStake` (+ unbonding countdown) (`DriverAccount`)
+- [x] Driver + venue profile edit: `setMetadata` (`DriverAccount` / `VenueManage`)
+- [x] Venue management: `setActive` (pause/resume), `setLocation`, `setPayout`, `setSigner` (`VenueManage`)
+- [x] Vault: `withdrawTo` (cold wallet) + `claimPaseoDust` (+ show `pendingPaseoDust`) (`VaultStrip`)
+- [x] Surface driver **reputation** (delivered/failed + success %) in bid cards (`CustomerOrder`)
+- [x] Dispute **evidence** input on `openDispute` + a dispute status/detail view (`DisputeControl`)
 
 ### Group B — Off-chain product services (net-new)
 *Menu/cart, tracking, comms — the DoorDash "app" layer over the settlement rail.*
@@ -213,13 +213,13 @@ Ordered roughly by leverage. Check off as landed.
 
 | # | Item | Group | Home | Status |
 |---|---|---|---|---|
-| A1 | Retract bid (`withdrawBid`) | A | Driver view | ☐ todo |
-| A2 | Driver stake lifecycle | A | Driver view | ☐ todo |
-| A3 | Profile edit (`setMetadata`) | A | Driver/Venue | ☐ todo |
-| A4 | Venue management (active/pin/payout/signer) | A | Venue view | ☐ todo |
-| A5 | Vault: withdrawTo + dust claim | A | Wallet chip | ☐ todo |
-| A6 | Reputation in bid cards | A | Customer view | ☐ todo |
-| A7 | Dispute evidence + status view | A | Customer/Driver | ☐ todo |
+| A1 | Retract bid (`withdrawBid`) | A | Driver view | ✅ done |
+| A2 | Driver stake lifecycle | A | Driver view | ✅ done |
+| A3 | Profile edit (`setMetadata`) | A | Driver/Venue | ✅ done |
+| A4 | Venue management (active/pin/payout/signer) | A | Venue view | ✅ done |
+| A5 | Vault: withdrawTo + dust claim | A | Wallet chip | ✅ done |
+| A6 | Reputation in bid cards | A | Customer view | ✅ done |
+| A7 | Dispute evidence + status view | A | Customer/Driver | ✅ done |
 | B1 | Catalog / menu / cart | B | New service + all views | ☐ todo |
 | B2 | Live tracking + ETA | B | Customer/Driver | ☐ todo |
 | B3 | Order-scoped messaging | B | Customer/Driver | ☐ todo |

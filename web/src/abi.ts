@@ -28,6 +28,10 @@ export const VENUES_ABI = [
   "function venues(uint64) view returns (address operator, address signer, address payout, int32 lat, int32 lon, bool active, uint32 pickups, string metadataURI)",
   "function registerVenue(int32 lat, int32 lon, address signer, address payout, string metadataURI) returns (uint64)",
   "function setActive(uint64 venueId, bool active)",
+  "function setLocation(uint64 venueId, int32 lat, int32 lon)",
+  "function setPayout(uint64 venueId, address payout)",
+  "function setSigner(uint64 venueId, address signer)",
+  "function setMetadata(uint64 venueId, string metadataURI)",
 ];
 
 export const DRIVERS_ABI = [
@@ -37,7 +41,9 @@ export const DRIVERS_ABI = [
   "function addStake() payable",
   "function requestUnstake()",
   "function withdrawStake()",
+  "function setMetadata(string metadataURI)",
   "function minStake() view returns (uint96)",
+  "function unbondingSeconds() view returns (uint64)",
 ];
 
 export const SETTLEMENT_ABI = [
@@ -54,6 +60,7 @@ export const SETTLEMENT_ABI = [
 export const VAULT_ABI = [
   "function balanceOf(address) view returns (uint256)",
   "function withdraw()",
+  "function withdrawTo(address recipient)",
   "function pendingPaseoDust(address) view returns (uint256)",
   "function claimPaseoDust()",
 ];
@@ -66,4 +73,6 @@ export const ROUTER_ABI = [
 export const DISPUTES_ABI = [
   "function disputeBond() view returns (uint96)",
   "function openDispute(uint256 orderId, string evidenceURI) payable returns (uint256)",
+  "function disputeOfOrder(uint256 orderId) view returns (uint256)",
+  "function disputes(uint256) view returns (uint256 orderId, address opener, uint96 bond, uint8 status, string evidenceURI)",
 ];

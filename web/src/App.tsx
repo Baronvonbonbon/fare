@@ -40,6 +40,7 @@ import {
   contractsForOrder,
   sweepToMain,
 } from "./wallets";
+import { isAddress } from "ethers";
 import { proveProximity, positionCommit } from "./zk";
 import { MicroDeg, distanceMeters, fmtCoord, fmtDist, getPosition, snapToGrid } from "./geo";
 import { QRScan, QRShow } from "./qr";
@@ -63,7 +64,7 @@ interface OrderRow {
   pickupWindowSecs: bigint;
   pickupDeadline: bigint;
   deliveryDeadline: bigint;
-  bidders: { addr: string; amount: bigint }[];
+  bidders: { addr: string; amount: bigint; delivered: number; failed: number }[];
 }
 
 interface VenueRow {
@@ -122,6 +123,7 @@ export default function App() {
   const [orders, setOrders] = useState<OrderRow[]>([]);
   const [venues, setVenues] = useState<VenueRow[]>([]);
   const [vaultBal, setVaultBal] = useState<bigint>(0n);
+  const [pendingDust, setPendingDust] = useState<bigint>(0n);
   const [nativeBal, setNativeBal] = useState<bigint>(0n);
   const [busy, setBusy] = useState(false);
   const [nodeSync, setNodeSync] = useState<string | null>(
@@ -279,14 +281,24 @@ export default function App() {
         toRead.map(async (idStr) => {
           const id = BigInt(idStr);
           const o = await c.orders.orders(id);
-          let bidders: { addr: string; amount: bigint }[] = [];
+          let bidders: OrderRow["bidders"] = [];
           if (Number(o.status) === 1) {
             const addrs: string[] = await c.orders.biddersOf(id);
-            const amounts: bigint[] = await Promise.all(addrs.map((a) => c.orders.bidOf(id, a)));
-            bidders = addrs
-              .map((addr, j) => ({ addr, amount: amounts[j] }))
-              .filter((b) => b.amount > 0n)
-              .sort((a, b) => (a.amount < b.amount ? -1 : 1));
+            // Enrich each bid with the driver's on-chain reputation so the
+            // customer can weigh trust against price (A6).
+            const rows = await Promise.all(
+              addrs.map(async (addr) => {
+                const amount: bigint = await c.orders.bidOf(id, addr);
+                let delivered = 0, failed = 0;
+                try {
+                  const d = await c.drivers.drivers(addr);
+                  delivered = Number(d.delivered);
+                  failed = Number(d.failed);
+                } catch {}
+                return { addr, amount, delivered, failed };
+              })
+            );
+            bidders = rows.filter((b) => b.amount > 0n).sort((a, b) => (a.amount < b.amount ? -1 : 1));
           }
           return {
             id,
@@ -318,6 +330,7 @@ export default function App() {
 
       if (me) {
         setVaultBal(await c.vault.balanceOf(me));
+        setPendingDust(await c.vault.pendingPaseoDust(me));
         setNativeBal(await nativeBalance(me));
       }
     } catch (e: any) {
@@ -451,16 +464,8 @@ export default function App() {
         </div>
       )}
 
-      {session && vaultBal > 0n && (
-        <div className="vault-strip">
-          <div>
-            <div className="lbl">vault balance — pull payment</div>
-            <div className="amt">{fmt(vaultBal)} PAS</div>
-          </div>
-          <button className="btn small" disabled={busy} onClick={() => act("Withdraw", () => signed!.vault.withdraw())}>
-            Withdraw
-          </button>
-        </div>
+      {session && (vaultBal > 0n || pendingDust > 0n) && (
+        <VaultStrip {...{ vaultBal, pendingDust, busy, act, signed, say }} />
       )}
 
       {role === "customer" && (
@@ -651,6 +656,78 @@ function OrderMeta({ o, venues }: { o: OrderRow; venues: VenueRow[] }) {
 
 function GeoPill({ pos }: { pos: MicroDeg | null }) {
   return pos ? <span className="geo-pill">◉ {fmtCoord(pos)}</span> : null;
+}
+
+// Shared dispute UI. Openable (evidence + bond) on Assigned/PickedUp; shows the
+// dispute detail on a Disputed order. `handle` is the contracts object to sign
+// the openDispute with (the order's per-order wallet for a customer; the session
+// for a driver) — the contract requires msg.sender to be a party. (A7)
+function DisputeControl({ o, handle, busy, act }: any) {
+  const [evidence, setEvidence] = useState("");
+  const [bond, setBond] = useState<bigint>(0n);
+  const [detail, setDetail] = useState<any>(null);
+  useEffect(() => {
+    contracts().disputes.disputeBond().then(setBond).catch(() => {});
+    if (o.status === 6) {
+      contracts().disputes.disputeOfOrder(o.id).then(async (did: bigint) => {
+        if (did > 0n) setDetail(await contracts().disputes.disputes(did));
+      }).catch(() => {});
+    }
+  }, [o.status, String(o.id)]);
+
+  if (o.status === 6) {
+    const st = detail ? ["—", "open", "resolved"][Number(detail.status)] : "…";
+    return (
+      <div className="kv-block" style={{ marginTop: 8 }}>
+        <div className="kv"><span className="k">dispute</span><span className="v">{st}</span></div>
+        {detail && <div className="kv"><span className="k">opened by</span><span className="v mono">{short(detail.opener)}</span></div>}
+        {detail?.evidenceURI && <div className="kv"><span className="k">evidence</span><span className="v">{detail.evidenceURI}</span></div>}
+        <p className="hint">{Number(detail?.status) === 2 ? "Resolved by the arbiter." : "Frozen — awaiting arbiter ruling."}</p>
+      </div>
+    );
+  }
+  if (o.status !== 2 && o.status !== 3) return null;
+  return (
+    <div className="btn-row" style={{ flexWrap: "wrap", marginTop: 8 }}>
+      <input style={{ flex: 1, minWidth: 120 }} placeholder="evidence URI / note (optional)"
+        value={evidence} onChange={(e) => setEvidence(e.target.value)} />
+      <button className="btn ghost small" disabled={busy || !handle}
+        onClick={() => act("Open dispute", () => handle.disputes.openDispute(o.id, evidence, { value: bond }))}>
+        Dispute{bond > 0n ? ` · ${fmt(bond)} PAS bond` : ""}
+      </button>
+    </div>
+  );
+}
+
+function VaultStrip({ vaultBal, pendingDust, busy, act, signed, say }: any) {
+  const [cold, setCold] = useState("");
+  return (
+    <div className="vault-strip">
+      <div>
+        <div className="lbl">vault balance — pull payment</div>
+        <div className="amt">{fmt(vaultBal)} PAS</div>
+        {pendingDust > 0n && (
+          <div className="hint">+ {fmt(pendingDust)} PAS queued dust (Paseo rounding)</div>
+        )}
+      </div>
+      <div className="btn-row" style={{ flexWrap: "wrap" }}>
+        <button className="btn small" disabled={busy || vaultBal === 0n}
+          onClick={() => act("Withdraw", () => signed!.vault.withdraw())}>Withdraw</button>
+        <button className="btn ghost small" disabled={busy || vaultBal === 0n}
+          onClick={() => {
+            const to = cold.trim();
+            if (!isAddress(to)) return say("Enter a valid cold-wallet address", true);
+            act("Withdraw to cold wallet", () => signed!.vault.withdrawTo(to));
+          }}>→ cold wallet</button>
+        {pendingDust > 0n && (
+          <button className="btn ghost small" disabled={busy}
+            onClick={() => act("Claim dust", () => signed!.vault.claimPaseoDust())}>Claim dust</button>
+        )}
+        <input style={{ flex: 1, minWidth: 150 }} placeholder="cold wallet 0x… (optional)"
+          value={cold} onChange={(e) => setCold(e.target.value)} />
+      </div>
+    </div>
+  );
 }
 
 // ---------- customer ----------
@@ -878,7 +955,15 @@ function CustomerOrder({ o, venues, act, busy, session, say }: any) {
           {o.bidders.length === 0 && <p className="hint">Waiting for driver bids…</p>}
           {o.bidders.map((b: any) => (
             <div className="kv" key={b.addr}>
-              <span className="k mono">{short(b.addr)}</span>
+              <span className="k mono">
+                {short(b.addr)}
+                <span className="hint" title="delivered / failed on-chain">
+                  {" "}· ✓{b.delivered} ✗{b.failed}
+                  {b.delivered + b.failed > 0
+                    ? ` · ${Math.round((b.delivered / (b.delivered + b.failed)) * 100)}%`
+                    : " · new"}
+                </span>
+              </span>
               <span className="v">
                 <span className="amount">{fmt(b.amount)} PAS </span>
                 <button className="btn small" disabled={busy || orphaned}
@@ -901,8 +986,6 @@ function CustomerOrder({ o, venues, act, busy, session, say }: any) {
             onClick={() => act("Cancel", () => os!.orders.cancelAssigned(o.id))}>
             Cancel (driver keeps a cut pre-deadline)
           </button>
-          <button className="btn ghost small" disabled={busy || orphaned}
-            onClick={() => act("Open dispute", () => os!.disputes.openDispute(o.id, ""))}>Dispute</button>
         </div>
       )}
 
@@ -931,10 +1014,11 @@ function CustomerOrder({ o, venues, act, busy, session, say }: any) {
               onClick={() => confirmDelivery(payload)}>
               Confirm delivery
             </button>
-            <button className="btn ghost small" disabled={busy || orphaned}
-              onClick={() => act("Open dispute", () => os!.disputes.openDispute(o.id, ""))}>Dispute</button>
           </div>
         </>
+      )}
+      {(o.status === 2 || o.status === 3 || o.status === 6) && (
+        <DisputeControl o={o} handle={os} busy={busy} act={act} />
       )}
     </div>
   );
@@ -953,7 +1037,7 @@ function DriverView({ session, orders, venues, act, busy, signed, say, myLoc, ra
     (o: OrderRow) =>
       session &&
       o.driver.toLowerCase() === session.address.toLowerCase() &&
-      (o.status === 2 || o.status === 3)
+      (o.status === 2 || o.status === 3 || o.status === 6)
   );
 
   // Open orders, tagged with pickup distance (from my location to the public
@@ -991,6 +1075,7 @@ function DriverView({ session, orders, venues, act, busy, signed, say, myLoc, ra
 
   return (
     <>
+      {me?.registered && <DriverAccount {...{ me, act, busy, signed, say }} />}
       {jobs.length > 0 && <div className="section-note">active jobs</div>}
       {jobs.map((o: OrderRow) => (
         <DriverJob key={String(o.id)} {...{ o, venues, act, busy, signed, session, say }} />
@@ -1057,6 +1142,49 @@ function DriverRegister({ act, busy, signed }: any) {
   );
 }
 
+function DriverAccount({ me, act, busy, signed, say }: any) {
+  const [add, setAdd] = useState("");
+  const [profile, setProfile] = useState("");
+  const [unbonding, setUnbonding] = useState(0);
+  useEffect(() => {
+    contracts().drivers.unbondingSeconds().then((s: bigint) => setUnbonding(Number(s))).catch(() => {});
+  }, []);
+  const reqAt = Number(me.unstakeRequestedAt);
+  const remaining = reqAt > 0 ? reqAt + unbonding - Math.floor(Date.now() / 1000) : 0;
+  const dur = (s: number) => (s > 3600 ? `${Math.ceil(s / 3600)}h` : s > 60 ? `${Math.ceil(s / 60)}m` : `${s}s`);
+  return (
+    <div className="card">
+      <h2>My driver account</h2>
+      <div className="kv"><span className="k">stake</span><span className="v amount">{fmt(me.stake)} PAS</span></div>
+      <div className="kv"><span className="k">reputation</span>
+        <span className="v">✓{Number(me.delivered)} delivered · ✗{Number(me.failed)} failed</span></div>
+      {reqAt > 0 && (
+        <div className="kv"><span className="k">unbonding</span>
+          <span className="v">{remaining > 0 ? `unlocks in ~${dur(remaining)}` : "ready to withdraw"}</span></div>
+      )}
+      <div className="btn-row" style={{ flexWrap: "wrap" }}>
+        <input style={{ flex: 1, minWidth: 90 }} placeholder="add PAS" value={add}
+          onChange={(e) => setAdd(e.target.value)} inputMode="decimal" />
+        <button className="btn small" disabled={busy || !add}
+          onClick={() => act("Add stake", () => signed.drivers.addStake({ value: parse(add) }))}>Add stake</button>
+        {reqAt === 0 ? (
+          <button className="btn ghost small" disabled={busy || me.stake === 0n}
+            onClick={() => act("Request unstake", () => signed.drivers.requestUnstake())}>Request unstake</button>
+        ) : (
+          <button className="btn ghost small" disabled={busy || remaining > 0}
+            onClick={() => act("Withdraw stake", () => signed.drivers.withdrawStake())}>Withdraw stake</button>
+        )}
+      </div>
+      <div className="btn-row" style={{ flexWrap: "wrap" }}>
+        <input style={{ flex: 1, minWidth: 120 }} placeholder="update profile (name / vehicle)"
+          value={profile} onChange={(e) => setProfile(e.target.value)} />
+        <button className="btn ghost small" disabled={busy || !profile}
+          onClick={() => act("Update profile", () => signed.drivers.setMetadata(`demo://${profile}`))}>Save</button>
+      </div>
+    </div>
+  );
+}
+
 function DriverBid({ o, venues, act, busy, signed, session, dist }: any) {
   const [amount, setAmount] = useState("");
   const myBid = o.bidders.find(
@@ -1080,6 +1208,12 @@ function DriverBid({ o, venues, act, busy, signed, session, dist }: any) {
           onClick={() => act("Place bid", () => signed.orders.placeBid(o.id, parse(amount)))}>
           {myBid ? "Rebid" : "Bid"}
         </button>
+        {myBid && (
+          <button className="btn ghost small" disabled={busy}
+            onClick={() => act("Withdraw bid", () => signed.orders.withdrawBid(o.id))}>
+            Withdraw
+          </button>
+        )}
       </div>
     </div>
   );
@@ -1156,7 +1290,9 @@ function DriverJob({ o, venues, act, busy, signed, session, say }: any) {
           <span className="v">{fmtCoord({ lat: venue.lat, lon: venue.lon })}</span></div>
       )}
 
-      {isPickup ? (
+      {o.status === 6 ? (
+        <DisputeControl o={o} handle={signed} busy={busy} act={act} />
+      ) : isPickup ? (
         <>
           <p className="hint">
             At the counter: ask the venue for their signed pickup code, paste it, and confirm. Your
@@ -1183,8 +1319,6 @@ function DriverJob({ o, venues, act, busy, signed, session, say }: any) {
             </button>
             <button className="btn danger small" disabled={busy}
               onClick={() => act("Abandon", () => signed.orders.abandonOrder(o.id))}>Abandon</button>
-            <button className="btn ghost small" disabled={busy}
-              onClick={() => act("Open dispute", () => signed.disputes.openDispute(o.id, ""))}>Dispute</button>
           </div>
         </>
       ) : (
@@ -1197,8 +1331,6 @@ function DriverJob({ o, venues, act, busy, signed, session, say }: any) {
             <button className="btn" disabled={busy || !session} onClick={signDropoffHandoff}>
               Sign dropoff handoff
             </button>
-            <button className="btn ghost small" disabled={busy}
-              onClick={() => act("Open dispute", () => signed.disputes.openDispute(o.id, ""))}>Dispute</button>
           </div>
           {payload && (
             <>
@@ -1211,6 +1343,9 @@ function DriverJob({ o, venues, act, busy, signed, session, say }: any) {
             </>
           )}
         </>
+      )}
+      {(o.status === 2 || o.status === 3) && (
+        <DisputeControl o={o} handle={signed} busy={busy} act={act} />
       )}
     </div>
   );
@@ -1234,15 +1369,7 @@ function VenueView({ session, orders, venues, act, busy, signed, say }: any) {
       <VenueRegister {...{ act, busy, signed, say }} />
       {mine.length > 0 && <div className="section-note">my venues</div>}
       {mine.map((v: VenueRow) => (
-        <div className="order" key={String(v.id)}>
-          <div className="order-head">
-            <span className="order-id">Venue #{String(v.id)}</span>
-            <span className={`badge ${v.active ? "open" : "cancelled"}`}>{v.active ? "Active" : "Inactive"}</span>
-          </div>
-          <div className="kv"><span className="k">profile</span><span className="v">{v.metadataURI}</span></div>
-          <div className="kv"><span className="k">pin</span><span className="v">{fmtCoord({ lat: v.lat, lon: v.lon })}</span></div>
-          <div className="kv"><span className="k">pickups served</span><span className="v">{v.pickups}</span></div>
-        </div>
+        <VenueManage key={String(v.id)} {...{ v, act, busy, signed, say }} />
       ))}
       <div className="section-note">pickup queue — driver is here, sign the release</div>
       {queue.length === 0 && (
@@ -1252,6 +1379,66 @@ function VenueView({ session, orders, venues, act, busy, signed, say }: any) {
         <VenuePickup key={String(o.id)} {...{ o, venues, session, say }} />
       ))}
     </>
+  );
+}
+
+function VenueManage({ v, act, busy, signed, say }: any) {
+  const [payout, setPayout] = useState("");
+  const [signer, setSigner] = useState("");
+  const [profile, setProfile] = useState("");
+  const [pos, setPos] = useState<MicroDeg | null>(null);
+  const [mapOpen, setMapOpen] = useState(false);
+  return (
+    <div className="order">
+      <div className="order-head">
+        <span className="order-id">Venue #{String(v.id)}</span>
+        <span className={`badge ${v.active ? "open" : "cancelled"}`}>{v.active ? "Active" : "Inactive"}</span>
+      </div>
+      <div className="kv"><span className="k">profile</span><span className="v">{v.metadataURI}</span></div>
+      <div className="kv"><span className="k">pin</span><span className="v">{fmtCoord({ lat: v.lat, lon: v.lon })}</span></div>
+      <div className="kv"><span className="k">payout</span><span className="v mono">{short(v.payout)}</span></div>
+      <div className="kv"><span className="k">hot signer</span><span className="v mono">{short(v.signer)}</span></div>
+      <div className="kv"><span className="k">pickups served</span><span className="v">{v.pickups}</span></div>
+      <details className="payload-details">
+        <summary>manage</summary>
+        <div className="btn-row" style={{ flexWrap: "wrap" }}>
+          <button className="btn ghost small" disabled={busy}
+            onClick={() => act(v.active ? "Pause venue" : "Activate venue", () => signed.venues.setActive(v.id, !v.active))}>
+            {v.active ? "Pause" : "Activate"}
+          </button>
+        </div>
+        <div className="btn-row" style={{ flexWrap: "wrap" }}>
+          <input style={{ flex: 1, minWidth: 120 }} placeholder="new payout 0x…" value={payout} onChange={(e) => setPayout(e.target.value)} />
+          <button className="btn ghost small" disabled={busy || !isAddress(payout.trim())}
+            onClick={() => act("Set payout", () => signed.venues.setPayout(v.id, payout.trim()))}>Set payout</button>
+        </div>
+        <div className="btn-row" style={{ flexWrap: "wrap" }}>
+          <input style={{ flex: 1, minWidth: 120 }} placeholder="new hot signer 0x…" value={signer} onChange={(e) => setSigner(e.target.value)} />
+          <button className="btn ghost small" disabled={busy || !isAddress(signer.trim())}
+            onClick={() => act("Set signer", () => signed.venues.setSigner(v.id, signer.trim()))}>Set signer</button>
+        </div>
+        <div className="btn-row" style={{ flexWrap: "wrap" }}>
+          <input style={{ flex: 1, minWidth: 120 }} placeholder="update name / profile" value={profile} onChange={(e) => setProfile(e.target.value)} />
+          <button className="btn ghost small" disabled={busy || !profile}
+            onClick={() => act("Set profile", () => signed.venues.setMetadata(v.id, `demo://${profile}`))}>Save</button>
+        </div>
+        <div className="btn-row" style={{ flexWrap: "wrap" }}>
+          <button className="btn ghost small" type="button" onClick={() => setMapOpen(true)}>◎ Move pin</button>
+          <button className="btn ghost small" type="button"
+            onClick={async () => { try { setPos(await getPosition()); } catch (e: any) { say(e.message, true); } }}>Use GPS</button>
+          {pos && (
+            <button className="btn small" disabled={busy}
+              onClick={() => act("Move pin", () => signed.venues.setLocation(v.id, pos.lat, pos.lon))}>
+              Save {fmtCoord(pos)}
+            </button>
+          )}
+        </div>
+        {mapOpen && (
+          <PinMap initial={pos ?? { lat: v.lat, lon: v.lon }}
+            onConfirm={(m) => { setPos(m); setMapOpen(false); }} onCancel={() => setMapOpen(false)} />
+        )}
+      </details>
+    </div>
   );
 }
 
