@@ -67,12 +67,17 @@ prerequisite — `setVerifyingKey` is lock-once). The circuit's distance check
 mirrors GeoLib's equirectangular + Bhaskara-cosine math, made division-free by
 cross-multiplying `dx²+dy² ≤ R²`.
 
-**Still plaintext (follow-up):** driver + venue coordinates at **pickup** remain
-in calldata, and the driver's pickup coordinates are still emitted in
-`PickupConfirmed`. The venue pin is public by design, so the sensitivity is far
-lower than the customer's home — but the mainnet gate (docs/PRIVACY.md) also
-wants driver coordinates out of pickup events. A pickup-side circuit or simply
-dropping the coordinates from the event is the remaining step.
+**Pickup (driver-coordinate scrub):** the venue pin is public by design, so the
+only sensitive datum at pickup is the *driver's* position. `PickupConfirmed` no
+longer emits driver coordinates (killing the bulk-indexable movement leak,
+docs/PRIVACY.md risk #2), and the client coarsens the driver's position to a
+~33 m grid before signing, so the exact spot (~11 cm, risk #6) never enters
+calldata either. Verification still runs against the public venue pin, and 33 m
+is far inside `pickupRadiusMeters` (150 m) so the check is unchanged in practice.
+A full pickup ZK circuit was considered and deliberately skipped: with the venue
+public, its marginal gain (exact point → "within 150 m of a known venue") didn't
+justify a second circuit + trusted setup. The venue signer's coordinates remain
+in calldata — they *are* the venue's public location.
 
 ## Radii and freshness
 
@@ -111,6 +116,7 @@ avoid an on-chain square root.
    assurance tier for high-value orders — mirrors DATUM's AssuranceLevel
    gradient rather than a single global rule.
 4. ~~**ZK proximity circuit** for location privacy~~ — **done** for dropoff
-   (`confirmDropoffZK`); pickup-side is the remaining follow-up (above).
+   (`confirmDropoffZK`); the pickup driver-coordinate leak is closed by the
+   event scrub + client-side coarsening (above), not a circuit.
 5. **Witness diversity**: for very high-value orders, require an extra
    attestor (a second staked driver nearby, or a venue-adjacent beacon).

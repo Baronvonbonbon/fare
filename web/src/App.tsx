@@ -34,7 +34,7 @@ import {
   syncAddressesFromRouter,
 } from "./chain";
 import { proveProximity, positionCommit } from "./zk";
-import { MicroDeg, distanceMeters, fmtCoord, fmtDist, getPosition } from "./geo";
+import { MicroDeg, distanceMeters, fmtCoord, fmtDist, getPosition, snapToGrid } from "./geo";
 import { QRScan, QRShow } from "./qr";
 import { VenuePin } from "./map";
 import { AreaMap, PinMap } from "./tilemap";
@@ -1022,9 +1022,12 @@ function DriverJob({ o, venues, act, busy, signed, session, say }: any) {
         const d = distanceMeters(pos, { lat: venue.lat, lon: venue.lon });
         if (d > 400) say(`Heads up: you look ~${Math.round(d)} m from the venue pin`, true);
       }
+      // Coarsen to a ~33 m grid before signing so the exact spot never enters
+      // calldata (privacy); still well within the pickup radius. See geo.ts.
+      const at = snapToGrid(pos);
       const myAtt = {
         orderId: o.id.toString(), phase: 1, actor: session.address,
-        lat: pos.lat, lon: pos.lon, timestamp: Math.floor(Date.now() / 1000),
+        lat: at.lat, lon: at.lon, timestamp: Math.floor(Date.now() / 1000),
       };
       const mySig = await signLocation(session, myAtt);
       const other = decodePayload(counterpartyPayload);

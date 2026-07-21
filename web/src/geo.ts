@@ -13,6 +13,19 @@ export function fromMicroDeg(m: MicroDeg): { lat: number; lon: number } {
   return { lat: m.lat / 1e6, lon: m.lon / 1e6 };
 }
 
+/// Coarsen a position to a ~33 m grid before it is signed for an on-chain
+/// pickup attestation. GPS gives ~11 cm-resolution microdegrees; a proximity
+/// check against a 150 m radius needs nowhere near that, and the exact spot is
+/// a privacy leak (docs/PRIVACY.md risk #6). Rounding to the nearest 300 µdeg
+/// (~33 m) keeps the check sound (33 m ≪ 150 m) while dropping the precise
+/// location from calldata. NOT used for dropoff — there the driver's position
+/// is a private ZK witness and never goes on-chain at all.
+export const PICKUP_GRID_UDEG = 300;
+export function snapToGrid(m: MicroDeg, gridUDeg: number = PICKUP_GRID_UDEG): MicroDeg {
+  const snap = (v: number) => Math.round(v / gridUDeg) * gridUDeg;
+  return { lat: snap(m.lat), lon: snap(m.lon) };
+}
+
 export function fmtCoord(m: MicroDeg): string {
   const { lat, lon } = fromMicroDeg(m);
   return `${lat.toFixed(5)}, ${lon.toFixed(5)}`;
