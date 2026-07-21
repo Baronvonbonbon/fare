@@ -236,7 +236,12 @@ describe("FARE protocol", () => {
 
       expect(await f.orders.statusOf(orderId)).to.equal(2n); // Assigned
 
-      await expect(confirmPickupOk(f, orderId, f.driver2)).to.emit(f.settlement, "PickupConfirmed");
+      // PickupConfirmed carries NO coordinates — exactly (orderId, driver,
+      // venueSigner). withArgs enforces the arity, so a regression that re-adds
+      // driver coords to the log fails here (docs/PRIVACY.md risk #2).
+      await expect(confirmPickupOk(f, orderId, f.driver2))
+        .to.emit(f.settlement, "PickupConfirmed")
+        .withArgs(orderId, f.driver2.address, f.venueSigner.address);
       expect(await f.orders.statusOf(orderId)).to.equal(3n); // PickedUp
       // venue got its order value in the vault
       expect(await f.vault.balanceOf(f.venueOp.address)).to.equal(ORDER_VALUE);

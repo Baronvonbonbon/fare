@@ -18,9 +18,11 @@ axes — do not conflate them.
 - ~~The commitment scheme gives temporal, not permanent, privacy — at dropoff
   the coordinates enter public calldata forever.~~ **Fixed:** the drop location
   is now proven in zero knowledge; no coordinate is written at dropoff.
-- **Driver coordinates at pickup are still exposed** — `PickupConfirmed` still
-  emits them, and they sit in pickup calldata. Lower sensitivity than a home
-  address (the venue pin is public anyway), but still on the mainnet checklist.
+- **Driver coordinates at pickup — scrubbed.** `PickupConfirmed` no longer emits
+  them (closing risk #2's bulk-indexable leak), and the client coarsens the
+  driver's position to a ~33 m grid before signing, so the exact spot never
+  enters calldata. The venue signer's coordinates stay in calldata — they are
+  the venue's public location.
 - On-chain identities are persistent, and the app reuses **one burner per
   device**, so the customer↔venue *relationship graph* is still derivable even
   though the drop coordinates are now hidden.
@@ -36,7 +38,8 @@ axes — do not conflate them.
 | Venue pin | `FareVenues.registerVenue` | plaintext storage | Public **by design** (business location) |
 | Drop location — at order creation | `FareOrders.createOrder` | `Poseidon(latEnc, lonEnc, salt)` | **Private** — commitment reveals nothing |
 | Drop location — at dropoff | `FareSettlement.confirmDropoffZK` | **nothing** — a Groth16 proof + hashed public signals `(orderId, dropCommit, driverCommit, radiusMeters, nullifier)` | **Private** — no coordinate on-chain |
-| Driver GPS (pickup + dropoff) | `confirmPickup` / `confirmDropoff` | calldata **and emitted** in `PickupConfirmed` / `DropoffConfirmed` | **Public & trivially indexable** |
+| Driver GPS — pickup | `confirmPickup` | coarsened (~33 m) in calldata; **not emitted** (`PickupConfirmed` carries no coords) | Coarse; near a venue that is public anyway |
+| Driver GPS — dropoff | `confirmDropoffZK` | **nothing** — private ZK witness | **Private** — no coordinate on-chain |
 | Venue GPS at pickup | `confirmPickup` | calldata | Public (venue pin is public anyway) |
 | Order metadata | `OrderCreated(orderId, customer, venueId — all indexed)` | event topics | Public relationship graph |
 | Pickup region (Phase 2) | `OrderRegion(region, orderId)` | event; region = ~0.5° (~55 km) cell of the venue pin | Coarse; derived from the public venue pin |
@@ -58,14 +61,16 @@ can fetch. "Not stored" ≠ "not on-chain."
    their device in the clear; the driver shares their own position face-to-face
    only so the customer can build the proof locally.
 
-2. **Driver location is the most exposed — via events.** `PickupConfirmed` and
-   `DropoffConfirmed` both emit `driverAtt.lat / driverAtt.lon`. Event logs are
-   the cheapest thing on a chain to index (it is exactly how this app's
-   discovery works), so a driver's pickup/dropoff points are queryable in
-   bulk. Over many jobs: routes, operating area, and likely home (start/end
-   clustering). The `FareDrivers` ABI privacy-invariant test prevents a driver
-   location being *stored as a profile field*, but does nothing about the
-   aggregate inference from attestation events — **necessary, not sufficient.**
+2. ~~**Driver location is the most exposed — via events.**~~ **RESOLVED.**
+   `PickupConfirmed` and `DropoffConfirmed` used to emit `driverAtt.lat/lon`,
+   which event-log indexing turns into bulk driver-movement inference (routes,
+   operating area, home from start/end clustering). Neither event emits
+   coordinates now: dropoff is fully ZK (no coords anywhere), and pickup emits
+   only `(orderId, driver, venueSigner)` with the driver's position coarsened to
+   a ~33 m grid in calldata. The `FareDrivers` ABI privacy-invariant test
+   already blocked a *stored* location field; the event scrub closes the
+   aggregate-inference gap it couldn't. (A `withArgs` test now pins the
+   `PickupConfirmed` arity so a regression re-adding coords fails CI.)
 
 3. **Linkability defeats pseudonymity — and burner reuse makes it worse.**
    On-chain addresses are persistent. The web app keeps **one burner key per
@@ -120,11 +125,11 @@ is single-party (fine for testnet).
 2. **Coarsen the on-chain reveal** — geohash-truncate to ~±300–600 m and push
    exact-coordinate verification into the off-chain signature exchange.
    Weakens the on-chain distance check (a real tradeoff); a stopgap only.
-3. **Reduce driver-coordinate exposure** — stop emitting `driverAtt.lat/lon`
-   in `PickupConfirmed` / `DropoffConfirmed` (keep only in calldata) and/or
-   round them. Removes the trivially-indexable leak (risk #2).
-4. **Blunt user warning** at dropoff that the location becomes public — honest,
-   zero-engineering.
+3. ~~**Reduce driver-coordinate exposure**~~ **DONE** — `DropoffConfirmed` and
+   `PickupConfirmed` no longer emit driver coordinates, and pickup coords are
+   coarsened to a ~33 m grid in calldata. Closed risk #2.
+4. **Blunt user warning** at dropoff — now moot: the ZK path means the location
+   never becomes public, so there is nothing to warn about.
 
 ## The mainnet gate
 
@@ -132,8 +137,8 @@ Before any real-money launch:
 
 - ✅ ZK proximity proofs are live for **dropoff** (coordinates never on-chain) —
   done (`confirmDropoffZK`). Remaining: run a real trusted-setup ceremony.
-- ☐ Remove driver coordinates from the **pickup** path — still emitted in
-  `PickupConfirmed` and present in pickup calldata.
+- ✅ Remove driver coordinates from the **pickup** path — done: not emitted, and
+  coarsened to ~33 m in calldata.
 - ☐ Address the linkability posture (per-order identities or equivalent) — the
   drop coordinates are hidden, but the customer↔venue relationship graph and
   timing patterns remain.

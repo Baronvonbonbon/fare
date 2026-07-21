@@ -92,12 +92,16 @@ contract FareSettlement is Ownable2Step, EIP712, FareUpgradable {
     uint64 public attestationMaxAgeSecs = 15 minutes;
     uint64 public attestationFutureSkewSecs = 5 minutes;
 
+    /// No coordinates emitted. Driver position at pickup used to be emitted here,
+    /// which made drivers' movements trivially indexable in bulk across jobs
+    /// (docs/PRIVACY.md risk #2). The venue pin is public, so verification still
+    /// happens against it in calldata — but the driver's coordinates are kept out
+    /// of the log, and the client coarsens them before signing so the exact spot
+    /// (~11 cm precision, risk #6) never lands in calldata either.
     event PickupConfirmed(
         uint256 indexed orderId,
         address indexed driver,
-        address indexed venueSigner,
-        int32 driverLat,
-        int32 driverLon
+        address indexed venueSigner
     );
     /// No coordinates emitted — the ZK dropoff path keeps both parties'
     /// positions off-chain entirely (see docs/PRIVACY.md risk #2).
@@ -186,7 +190,10 @@ contract FareSettlement is Ownable2Step, EIP712, FareUpgradable {
         _verifyLocationSig(venueAtt, venueSig);
         _requireFresh(venueAtt.timestamp);
 
-        // Geo: both parties within radius of the venue's registered pin
+        // Geo: both parties within radius of the venue's registered (public) pin.
+        // The driver's coordinates arrive coarsened (~33 m grid, client-side) —
+        // far inside pickupRadiusMeters (default 150 m), so the check is
+        // unaffected in practice while the exact spot never enters calldata.
         (int32 vLat, int32 vLon) = venues.locationOf(venueId);
         GeoLib.requireValid(driverAtt.lat, driverAtt.lon);
         GeoLib.requireValid(venueAtt.lat, venueAtt.lon);
@@ -200,7 +207,7 @@ contract FareSettlement is Ownable2Step, EIP712, FareUpgradable {
         );
 
         orders.onPickupConfirmed(orderId);
-        emit PickupConfirmed(orderId, driver, venueSigner, driverAtt.lat, driverAtt.lon);
+        emit PickupConfirmed(orderId, driver, venueSigner);
     }
 
     /// @notice Zero-knowledge dropoff confirmation. NO coordinates go on-chain.
