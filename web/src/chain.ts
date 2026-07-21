@@ -404,7 +404,7 @@ export const fmt = (wei: bigint) => {
 
 export const parse = (v: string) => ethers.parseEther(v === "" ? "0" : v);
 
-export const short = (a: string) => `${a.slice(0, 6)}…${a.slice(-4)}`;
+export const short = (a: string) => (a ? `${a.slice(0, 6)}…${a.slice(-4)}` : "—");
 
 // ---- burner gas faucet (serverless drip) ----
 // The drip key lives only in the /api/drip Cloudflare Function (server-side

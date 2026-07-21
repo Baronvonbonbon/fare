@@ -76,6 +76,7 @@ interface VenueRow {
   id: bigint;
   operator: string;
   signer: string;
+  payout: string;
   lat: number;
   lon: number;
   active: boolean;
@@ -259,6 +260,7 @@ export default function App() {
         id: venueIds[i],
         operator: v.operator,
         signer: v.signer,
+        payout: v.payout,
         lat: Number(v.lat),
         lon: Number(v.lon),
         active: v.active,
