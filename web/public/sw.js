@@ -2,8 +2,16 @@
 // are cache-first and safe forever; the HTML shell is network-first so a new
 // deploy is visible on next load instead of being stuck behind a stale cache
 // entry with no way to invalidate itself.
-const CACHE = "fare-shell-v2";
-const SHELL = ["/manifest.webmanifest", "/icon.svg"];
+const CACHE = "fare-shell-v3";
+// Precache the ZK prover artifacts: a customer confirms a dropoff by BUILDING a
+// proof at the doorstep, which may be a dead-signal spot. Fetch them up front so
+// proving works offline rather than failing when it matters. (~2.9 MB, one time.)
+const SHELL = [
+  "/manifest.webmanifest",
+  "/icon.svg",
+  "/zk/proximity.wasm",
+  "/zk/proximity.zkey",
+];
 
 self.addEventListener("install", (e) => {
   e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)));

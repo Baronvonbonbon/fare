@@ -3,8 +3,19 @@
 //
 // Usage: npx hardhat run scripts/seed.ts --network localhost
 import { ethers, network } from "hardhat";
+import { poseidon3 } from "poseidon-lite";
 import * as fs from "fs";
 import * as path from "path";
+
+// Poseidon drop commitment — MUST match circuits/proximity.circom and
+// web/src/zk.ts: offset-encode coordinates to stay non-negative in the field,
+// then Poseidon(latEnc, lonEnc, salt). A keccak commit here would create an
+// order that confirmDropoffZK can never settle.
+function poseidonDropCommit(latMicro: number, lonMicro: number, salt: bigint): string {
+  const latEnc = BigInt(latMicro) + 90_000_000n;
+  const lonEnc = BigInt(lonMicro) + 180_000_000n;
+  return "0x" + poseidon3([latEnc, lonEnc, salt]).toString(16).padStart(64, "0");
+}
 
 const VENUE_LAT = 37_774_900; // SF: 37.7749 N
 const VENUE_LON = -122_419_400; // 122.4194 W
@@ -36,9 +47,7 @@ async function main() {
 
   console.log("Creating demo order...");
   const salt = BigInt(ethers.hexlify(ethers.randomBytes(16)));
-  const commit = ethers.keccak256(
-    ethers.AbiCoder.defaultAbiCoder().encode(["int32", "int32", "uint256"], [DROP_LAT, DROP_LON, salt])
-  );
+  const commit = poseidonDropCommit(DROP_LAT, DROP_LON, salt);
   await (
     await orders.connect(customer).createOrder(
       venueId,
