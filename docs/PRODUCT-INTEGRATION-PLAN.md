@@ -202,7 +202,9 @@ Ordered roughly by leverage. Check off as landed.
       are device-local (survive-device-loss needs a backup/export — see identity note).
 
 ### Group C — Payments & economics (mainnet blockers)
-- [ ] **Gasless** meta-tx relay (DATUM `DatumRelay` pattern) — createOrder/placeBid/confirms
+- 🟡 **Gasless** relay — venue-node relay shipped (`venue-node/`): gas sponsorship +
+  settlement relay (confirmPickup/confirmDropoffZK), no contract change. EIP-2771
+  forwarder for full meta-tx (createOrder/placeBid/…) is the next step.
 - [ ] **Fiat-denominated pricing** via oracle rate captured at acceptance
 - [ ] **Stablecoin escrow** (Asset Hub USDC/USDT via ERC-20 precompile; vault ERC-20 variant)
 - [ ] Shielded **funding path** for per-order burner wallets (privacy mainnet gate)
@@ -240,7 +242,7 @@ Ordered roughly by leverage. Check off as landed.
 | B5 | Ratings (stars) | B | Post-delivery | ✅ done |
 | B6 | Proof-of-delivery photo | B | Driver view | 🟡 partial |
 | B7 | History / receipts / reorder | B | Customer view | ✅ done |
-| C1 | Gasless meta-tx relay | C | Infra + all views | ☐ todo |
+| C1 | Gasless meta-tx relay | C | Infra + all views | 🟡 partial |
 | C2 | Fiat pricing (oracle) | C | Checkout | ☐ todo |
 | C3 | Stablecoin escrow | C | Vault + checkout | ☐ todo |
 | C4 | Shielded burner funding | C | Infra | ☐ todo |

@@ -22,3 +22,7 @@ circuits/build/*.sym
 circuits/build/*.zkey
 circuits/build/proximity_js/
 circuits/build/sample-input.json
+
+# venue node relay secrets
+venue-node/.env
+venue-node/node_modules/

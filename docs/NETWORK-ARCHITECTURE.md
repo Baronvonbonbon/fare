@@ -182,7 +182,7 @@ Ranked by leverage:
 | F5 | DA scoring (challenge-response + client reports), off-chain leaderboard | F3 | M |
 | F6 | On-chain DA rewards (`FareDataAvailability`: fee discount / token) | F5 | L |
 | F7 | Hosted super-node mode (multi-venue appliance) | F2 | M |
-| F8 | Venue-operated gasless relay (region meta-tx) | — | L |
+| F8 | Venue-operated gasless relay | — | 🟡 relay shipped (`venue-node/`): gas sponsorship + settlement relay, no contract change; EIP-2771 forwarder for full meta-tx is the next step |
 
 Phasing: **F1 → F2/F3 (replication substrate) → F4 → F5 → F6**, with F7 alongside
 F2 and F8 as the independent big network-effect bet.

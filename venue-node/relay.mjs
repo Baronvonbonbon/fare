@@ -1,0 +1,150 @@
+#!/usr/bin/env node
+// FARE venue relay — gasless transactions, run by a venue node.
+//
+// The first component of the venue appliance (see docs/NETWORK-ARCHITECTURE.md).
+// Goal: zero gas friction for users in the venue's region, with NO contract
+// changes, by doing the two things that are safe to relay:
+//
+//   POST /fund   — sponsor gas: top up a user's burner so it can transact
+//                  (a region-local, decentralized version of /api/drip).
+//   POST /submit — relay a settlement call. confirmPickup / confirmDropoffZK are
+//                  the ONLY allowlisted methods: they carry their own signatures
+//                  / ZK proof and don't check msg.sender, so the relay can submit
+//                  them paying gas → those steps become fully gasless.
+//
+// Deliberately NOT relayed: createOrder / acceptBid / placeBid / rate / register.
+// Those check msg.sender and/or move the user's own value; full gasless for them
+// needs an EIP-2771 forwarder (a contract change) — see the README.
+//
+// Trust: the relay holds a funded venue account and pays gas only. It can never
+// move a user's funds — /submit forwards pre-signed settlement payloads, and
+// /fund only tops up below a floor. Worst case an abuser drains the relay's gas
+// budget; it's balance-gated + rate-limited, and the operator refills.
+//
+// Run:  node --env-file=.env relay.mjs   (Node 22+)
+
+import http from "node:http";
+import { readFileSync } from "node:fs";
+import { JsonRpcProvider, Wallet, Contract, parseEther, formatEther, isAddress } from "ethers";
+
+const PORT = Number(process.env.RELAY_PORT || 8788);
+const RPC = process.env.RELAY_RPC_URL || "https://eth-rpc-testnet.polkadot.io/";
+const KEY = process.env.RELAY_PRIVATE_KEY;
+const FUND_AMOUNT = parseEther(process.env.FUND_AMOUNT_PAS || "5");
+const FUND_MIN = parseEther(process.env.FUND_MIN_PAS || "2");
+const ADDRESS_BOOK = process.env.ADDRESS_BOOK || "../deployed-addresses.json";
+const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || "*").split(",").map((s) => s.trim());
+const GAS_SETTLE = 500_000_000n; // Paseo weight-scale limit for a settlement call
+const GAS_FUND = 100_000n; // a plain transfer; keeps the fee reservation small
+const RATE_WINDOW_MS = 60_000;
+const RATE_MAX = Number(process.env.RATE_MAX || 20); // requests / IP / window
+
+if (!KEY) {
+  console.error("[relay] RELAY_PRIVATE_KEY not set. Exiting.");
+  process.exit(1);
+}
+
+const provider = new JsonRpcProvider(RPC, undefined, { staticNetwork: true });
+const relay = new Wallet(KEY, provider);
+const settlementAddr = JSON.parse(readFileSync(new URL(ADDRESS_BOOK, import.meta.url), "utf8")).settlement
+  ?? JSON.parse(readFileSync(new URL(ADDRESS_BOOK, import.meta.url), "utf8")).addresses?.settlement;
+
+const SETTLEMENT_ABI = [
+  "function confirmPickup((uint256 orderId, uint8 phase, address actor, int32 lat, int32 lon, uint64 timestamp) driverAtt, bytes driverSig, (uint256 orderId, uint8 phase, address actor, int32 lat, int32 lon, uint64 timestamp) venueAtt, bytes venueSig)",
+  "function confirmDropoffZK((uint256 orderId, uint8 phase, address actor, bytes32 posCommit, uint64 timestamp) driverAtt, bytes driverSig, bytes proof, uint256[5] pubSignals)",
+];
+const RELAYABLE = new Set(["confirmPickup", "confirmDropoffZK"]);
+const settlement = new Contract(settlementAddr, SETTLEMENT_ABI, relay);
+
+// ── tx serialization: chain all sends so concurrent requests don't collide on
+//    the relay account's nonce ──────────────────────────────────────────────
+let chain = Promise.resolve();
+const serialize = (fn) => (chain = chain.then(fn, fn));
+
+// ── crude per-IP rate limit ──────────────────────────────────────────────────
+const hits = new Map();
+function rateLimited(ip) {
+  const now = Date.now();
+  const rec = hits.get(ip) ?? { n: 0, t: now };
+  if (now - rec.t > RATE_WINDOW_MS) { rec.n = 0; rec.t = now; }
+  rec.n += 1;
+  hits.set(ip, rec);
+  return rec.n > RATE_MAX;
+}
+
+function send(res, status, body, origin) {
+  const allow = ALLOWED_ORIGINS.includes("*") ? "*" : (ALLOWED_ORIGINS.includes(origin) ? origin : ALLOWED_ORIGINS[0]);
+  res.writeHead(status, {
+    "content-type": "application/json",
+    "access-control-allow-origin": allow ?? "*",
+    "access-control-allow-methods": "GET, POST, OPTIONS",
+    "access-control-allow-headers": "content-type",
+    vary: "Origin",
+  });
+  res.end(JSON.stringify(body));
+}
+
+async function readJson(req) {
+  const chunks = [];
+  let size = 0;
+  for await (const c of req) {
+    size += c.length;
+    if (size > 256 * 1024) throw new Error("body too large");
+    chunks.push(c);
+  }
+  return JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
+}
+
+const server = http.createServer(async (req, res) => {
+  const origin = req.headers.origin;
+  if (req.method === "OPTIONS") return send(res, 204, {}, origin);
+  const ip = (req.headers["x-forwarded-for"]?.split(",")[0] ?? req.socket.remoteAddress ?? "").trim();
+  const url = new URL(req.url, `http://localhost`);
+
+  try {
+    if (req.method === "GET" && url.pathname === "/health") {
+      const bal = await provider.getBalance(relay.address);
+      return send(res, 200, { ok: true, relay: relay.address, balance: formatEther(bal), settlement: settlementAddr }, origin);
+    }
+
+    if (rateLimited(ip)) return send(res, 429, { error: "rate limited" }, origin);
+
+    // ── Sponsor gas ──────────────────────────────────────────────────────────
+    if (req.method === "POST" && url.pathname === "/fund") {
+      const { address } = await readJson(req);
+      if (!isAddress(address)) return send(res, 400, { error: "invalid address" }, origin);
+      const bal = await provider.getBalance(address);
+      if (bal >= FUND_MIN) return send(res, 200, { funded: false, reason: "sufficient", balance: formatEther(bal) }, origin);
+      const relayBal = await provider.getBalance(relay.address);
+      if (relayBal < FUND_AMOUNT) return send(res, 503, { error: "relay out of gas budget — operator refill" }, origin);
+      const tx = await serialize(async () => {
+        const nonce = await provider.getTransactionCount(relay.address);
+        return relay.sendTransaction({ to: address, value: FUND_AMOUNT, nonce, gasLimit: GAS_FUND });
+      });
+      return send(res, 200, { funded: true, txHash: tx.hash, amount: formatEther(FUND_AMOUNT) }, origin);
+    }
+
+    // ── Relay a settlement call (gasless for the user) ───────────────────────
+    if (req.method === "POST" && url.pathname === "/submit") {
+      const { method, args } = await readJson(req);
+      if (!RELAYABLE.has(method)) return send(res, 400, { error: `method not relayable: ${method}` }, origin);
+      if (!Array.isArray(args)) return send(res, 400, { error: "args must be an array" }, origin);
+      const tx = await serialize(async () => {
+        const nonce = await provider.getTransactionCount(relay.address);
+        return settlement[method](...args, { gasLimit: GAS_SETTLE, nonce });
+      });
+      return send(res, 200, { submitted: true, txHash: tx.hash, method }, origin);
+    }
+
+    return send(res, 404, { error: "not found" }, origin);
+  } catch (e) {
+    return send(res, 500, { error: e?.shortMessage ?? e?.message ?? String(e) }, origin);
+  }
+});
+
+server.listen(PORT, () => {
+  console.log(`[relay] FARE venue relay on :${PORT}`);
+  console.log(`[relay] relay account: ${relay.address}`);
+  console.log(`[relay] settlement:    ${settlementAddr}`);
+  console.log(`[relay] relayable:     ${[...RELAYABLE].join(", ")}`);
+});

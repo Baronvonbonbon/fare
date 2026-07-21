@@ -17,3 +17,6 @@ IPFS_API_KEY=
 # VITE_IPFS_GATEWAY  — read gateway with trailing /ipfs/, e.g.
 #   https://ipfs.datum.javcon.io/ipfs/
 # Menu reads try this first, then public gateways (ipfs.io, dweb.link).
+# VITE_RELAY_URL     — venue gasless relay (venue-node/relay.mjs), e.g.
+#   https://relay.<venue-host>. Set → the app prefers it for gas sponsorship +
+#   settlement submission (gasless); unset → central faucet + direct submit.

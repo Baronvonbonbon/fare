@@ -19,7 +19,6 @@ import {
   fmt,
   nativeBalance,
   parse,
-  requestDrip,
   NodeMode,
   embeddedAvailable,
   getNodeMode,
@@ -47,6 +46,7 @@ import {
   emptyMenu, newItemId, publishMenu, hasMenuURI,
 } from "./menu";
 import { proveProximity, positionCommit } from "./zk";
+import { sponsorGas, relaySettle } from "./relay";
 import { MicroDeg, distanceMeters, fmtCoord, fmtDist, getPosition, snapToGrid } from "./geo";
 import { QRScan, QRShow } from "./qr";
 import { VenuePin } from "./map";
@@ -167,7 +167,7 @@ async function placeOrder(opts: {
   return act("Create order", async () => {
     const w = newOrderWallet();
     say("New private wallet — funding from faucet…");
-    await requestDrip(w.address);
+    await sponsorGas(w.address);
     await waitForFunding(w.address, escrow + parse("0.2"));
     return contracts(w).orders.createOrder(
       venueId, commit, orderValueWei, tipWei, maxFareWei, 0, 0, { value: escrow }
@@ -442,7 +442,7 @@ export default function App() {
         const before = await nativeBalance(address);
         if (!manual && before >= DRIP_MIN) return;
         say("Funding demo wallet…");
-        const r = await requestDrip(address);
+        const r = await sponsorGas(address);
         if (r.funded) {
           // The faucet returns as soon as the tx is submitted; the chain needs
           // a few seconds to include it. Poll until the balance actually rises
@@ -1190,7 +1190,7 @@ function CustomerOrder({ o, venues, act, busy, session, say }: any) {
   async function topUp() {
     try {
       say("Topping up this order's wallet from the faucet…");
-      const r = await requestDrip(o.customer);
+      const r = await sponsorGas(o.customer);
       say(r.funded ? "Topped up ✓" : r.reason === "sufficient" ? "Already funded" : "Faucet unavailable", !r.funded && r.reason !== "sufficient");
     } catch (e: any) {
       say(e?.message ?? String(e), true);
@@ -1225,7 +1225,7 @@ function CustomerOrder({ o, venues, act, busy, session, say }: any) {
       }
       if (!os) throw new Error("This order's wallet isn't on this device");
       await act("Confirm delivery", () =>
-        os.settlement.confirmDropoffZK(att, sig, proof, pubSignals)
+        relaySettle(os, "confirmDropoffZK", [att, sig, proof, pubSignals])
       );
       say("Delivery confirmed — fare released 🎉");
     } catch (e: any) {
@@ -1554,7 +1554,7 @@ function DriverJob({ o, venues, act, busy, signed, session, say }: any) {
       const other = decodePayload(counterpartyPayload);
       if (other.kind !== "pickup-venue") throw new Error("That's not a venue pickup code");
       await act("Confirm pickup", () =>
-        signed.settlement.confirmPickup(myAtt, mySig, other.att, other.sig)
+        relaySettle(signed, "confirmPickup", [myAtt, mySig, other.att, other.sig])
       );
       setCounterpartyPayload("");
     } catch (e: any) {
