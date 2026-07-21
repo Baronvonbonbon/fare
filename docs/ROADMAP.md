@@ -17,7 +17,9 @@ discipline.
 - [x] Paseo deployment — live addresses in `web/src/deployed-addresses.json`
 - [ ] A filmed end-to-end field test (two phones, one real handoff) — the
       single most persuasive artifact for the project
-- [ ] Fuzz + invariant tests (escrow conservation: Σcredits = Σescrow deltas)
+- [x] Fuzz + invariant tests (escrow conservation: Σcredits = Σescrow deltas)
+      — `test/invariant.test.ts`: seeded randomized campaign asserting escrow
+      conservation + vault solvency after every op
 - [ ] Slither/Mythril pass (DATUM audit-hedge #6 equivalent)
 
 **App**
