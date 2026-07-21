@@ -10,12 +10,16 @@
     "deploy:local": "hardhat run scripts/deploy.ts --network localhost",
     "deploy:paseo": "hardhat run scripts/deploy.ts --network polkadotTestnet",
     "seed:local": "hardhat run scripts/seed.ts --network localhost",
+    "zk:setup": "node scripts/setup-zk.mjs",
     "size": "hardhat size-contracts"
   },
   "devDependencies": {
     "@nomicfoundation/hardhat-toolbox": "^5.0.0",
+    "circomlib": "^2.0.5",
+    "circomlibjs": "^0.1.7",
     "dotenv": "^16.4.5",
     "hardhat": "^2.22.0",
+    "snarkjs": "^0.7.5",
     "typescript": "^5.4.0"
   },
   "dependencies": {

@@ -8,6 +8,21 @@ interface IFareVault {
     function credit(address to) external payable;
 }
 
+/// @notice Groth16 verifier for the drop-proximity circuit (circuits/proximity.circom).
+///         Public signals, in circuit order:
+///           [0] orderId       — binds the proof to one order
+///           [1] dropCommit     — Poseidon(latEnc, lonEnc, salt) == orders.dropCommitOf
+///           [2] driverCommit   — Poseidon(drvLatEnc, drvLonEnc, drvSalt), == the
+///                                driver's signed position commitment
+///           [3] radiusMeters   — the geofence radius the proof enforces
+///           [4] nullifier      — Poseidon(salt, orderId); single-use replay guard
+interface IFareLocationVerifier {
+    function verifyProximity(bytes calldata proof, uint256[5] calldata pubSignals)
+        external
+        view
+        returns (bool);
+}
+
 interface IFarePauseRegistry {
     function isPaused(uint8 category) external view returns (bool);
 }

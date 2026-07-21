@@ -36,19 +36,22 @@ CUSTOMER                    DRIVERS                    VENUE
   migration, then adopt full escrow later.
 - **Customer picks the winning bid** — any bid, not forced-lowest, so driver
   reputation and stake can outweigh a marginally cheaper bid.
-- **Drop location privacy:** only `keccak256(lat, lon, salt)` goes on-chain at
-  creation. Coordinates are revealed at the dropoff moment (see
-  [docs/GPS.md](docs/GPS.md) for the trust model and the ZK upgrade path).
+- **Drop location privacy (zero-knowledge):** only `Poseidon(lat, lon, salt)`
+  goes on-chain at creation, and at dropoff a Groth16 proof shows the driver is
+  within radius of that committed location — **no coordinate ever hits calldata,
+  storage, or an event.** Both parties' positions are private circuit witnesses
+  (see [docs/GPS.md](docs/GPS.md) and `circuits/proximity.circom`).
 - **All payouts are pull-payments** through `FareVault` — no push-payment
   griefing, one auditable money-out path.
 
-## Contracts (8)
+## Contracts (9)
 
 | Contract | Role |
 |---|---|
 | `FareGovernanceRouter` | Upgrade authority + on-chain address registry (clients auto-follow upgrades) |
 | `FareOrders` | Order book: escrow, reverse auction, lifecycle, cancellation economics |
-| `FareSettlement` | EIP-712 dual-sig GPS attestation verification (pickup + dropoff) |
+| `FareSettlement` | EIP-712 dual-sig GPS attestation (pickup) + ZK proximity proof (dropoff) |
+| `FareLocationVerifier` | Groth16 / BN254 verifier for the drop-proximity circuit (Asset Hub precompiles) |
 | `FareVault` | Pull-payment vault for every payout (venue, driver, refunds, fees) |
 | `FareDrivers` | Driver registry, optional stake, reputation, slash hook |
 | `FareVenues` | Venue registry: public location pin, hot signer key, payout address |
@@ -64,11 +67,16 @@ exits always drain; see docs/ARCHITECTURE.md "Upgradability").
 
 ```bash
 npm install
-npm test                                   # 29 tests
+npm test                                   # 48 tests (incl. the on-chain Groth16 verifier)
+
+# ZK trusted setup — compiles circuits/proximity.circom, runs groth16 setup,
+# and writes the verifier VK + the browser prover artifacts. Needs `circom` on
+# PATH; re-run to regenerate. (A real ceremony is a mainnet prerequisite.)
+npm run zk:setup
 
 # local end-to-end
 npx hardhat node                           # terminal 1
-npm run deploy:local && npm run seed:local # terminal 2
+npm run deploy:local && npm run seed:local # terminal 2  (deploy sets the VK + wires the verifier)
 cd web && npm install && npm run dev       # terminal 3 → http://localhost:5180
 
 # Paseo

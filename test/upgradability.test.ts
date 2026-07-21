@@ -30,9 +30,11 @@ describe("Upgradability", () => {
     const orders = await (await ethers.getContractFactory("FareOrders")).deploy(pause.target);
     const settlement = await (await ethers.getContractFactory("FareSettlement")).deploy(pause.target);
     const disputes = await (await ethers.getContractFactory("FareDisputes")).deploy(pause.target);
+    const verifier = await (await ethers.getContractFactory("MockLocationVerifier")).deploy();
 
     await orders.configure(vault.target, drivers.target, venues.target, settlement.target, disputes.target, treasury.address);
     await settlement.configure(orders.target, venues.target);
+    await settlement.setLocationVerifier(verifier.target);
     await disputes.configure(orders.target, vault.target, drivers.target, treasury.address);
     await vault.setAuthorized(orders.target, true);
     await vault.setAuthorized(disputes.target, true);
@@ -66,16 +68,24 @@ describe("Upgradability", () => {
       { name: "lon", type: "int32" }, { name: "timestamp", type: "uint64" },
     ],
   };
-  const REVEAL_TYPES = {
-    DropoffReveal: [
-      { name: "orderId", type: "uint256" }, { name: "lat", type: "int32" },
-      { name: "lon", type: "int32" }, { name: "salt", type: "uint256" },
+  const DRIVER_COMMIT_TYPES = {
+    DriverCommitAttestation: [
+      { name: "orderId", type: "uint256" }, { name: "phase", type: "uint8" },
+      { name: "actor", type: "address" }, { name: "posCommit", type: "bytes32" },
       { name: "timestamp", type: "uint64" },
     ],
   };
 
+  // Opaque commitment stand-ins (Poseidon in production; the mock verifier here
+  // does not check preimages — see fare.test.ts note).
   function dropCommit() {
     return ethers.keccak256(abi.encode(["int32", "int32", "uint256"], [DROP_LAT, DROP_LON, SALT]));
+  }
+  function driverCommit(orderId: bigint) {
+    return ethers.keccak256(abi.encode(["string", "uint256"], ["driver-pos", orderId]));
+  }
+  function nullifierOf(orderId: bigint) {
+    return ethers.keccak256(abi.encode(["uint256", "uint256"], [SALT, orderId]));
   }
 
   async function createAssignedOrder(f: Awaited<ReturnType<typeof deployAll>>) {
@@ -134,11 +144,13 @@ describe("Upgradability", () => {
       vPick, await f.venueOp.signTypedData(f.domain, LOCATION_TYPES, vPick)
     );
     const now2 = await time.latest();
-    const dDrop = { orderId, phase: 2, actor: f.driver1.address, lat: DROP_LAT + 300, lon: DROP_LON, timestamp: now2 };
-    const reveal = { orderId, lat: DROP_LAT, lon: DROP_LON, salt: SALT, timestamp: now2 };
-    await f.settlement.confirmDropoff(
-      dDrop, await f.driver1.signTypedData(f.domain, LOCATION_TYPES, dDrop),
-      reveal, await f.customer.signTypedData(f.domain, REVEAL_TYPES, reveal)
+    const posCommit = driverCommit(orderId);
+    const dDrop = { orderId, phase: 2, actor: f.driver1.address, posCommit, timestamp: now2 };
+    const radius = await f.settlement.dropoffRadiusMeters();
+    const pubSignals = [orderId, BigInt(dropCommit()), BigInt(posCommit), radius, BigInt(nullifierOf(orderId))];
+    await f.settlement.confirmDropoffZK(
+      dDrop, await f.driver1.signTypedData(f.domain, DRIVER_COMMIT_TYPES, dDrop),
+      "0x" + "00".repeat(256), pubSignals
     );
     expect(await f.orders.statusOf(orderId)).to.equal(4n); // Delivered
     const fee = (fare * 250n) / 10_000n;

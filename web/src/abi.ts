@@ -42,7 +42,11 @@ export const DRIVERS_ABI = [
 
 export const SETTLEMENT_ABI = [
   "function confirmPickup((uint256 orderId, uint8 phase, address actor, int32 lat, int32 lon, uint64 timestamp) driverAtt, bytes driverSig, (uint256 orderId, uint8 phase, address actor, int32 lat, int32 lon, uint64 timestamp) venueAtt, bytes venueSig)",
-  "function confirmDropoff((uint256 orderId, uint8 phase, address actor, int32 lat, int32 lon, uint64 timestamp) driverAtt, bytes driverSig, (uint256 orderId, int32 lat, int32 lon, uint256 salt, uint64 timestamp) reveal, bytes customerSig)",
+  // ZK dropoff: no coordinates on-chain. Driver signs a Poseidon commitment to
+  // their position; the customer submits a Groth16 proximity proof.
+  // pubSignals = [orderId, dropCommit, driverCommit, radiusMeters, nullifier].
+  "function confirmDropoffZK((uint256 orderId, uint8 phase, address actor, bytes32 posCommit, uint64 timestamp) driverAtt, bytes driverSig, bytes proof, uint256[5] pubSignals)",
+  "function usedNullifiers(bytes32) view returns (bool)",
   "function pickupRadiusMeters() view returns (uint32)",
   "function dropoffRadiusMeters() view returns (uint32)",
 ];

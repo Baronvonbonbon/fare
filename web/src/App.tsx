@@ -30,9 +30,10 @@ import {
   setNode,
   short,
   signLocation,
-  signReveal,
+  signDriverCommit,
   syncAddressesFromRouter,
 } from "./chain";
+import { proveProximity, positionCommit } from "./zk";
 import { MicroDeg, distanceMeters, fmtCoord, fmtDist, getPosition } from "./geo";
 import { QRScan, QRShow } from "./qr";
 import { VenuePin } from "./map";
@@ -746,6 +747,43 @@ function CreateOrder({ session, venues, act, busy, signed, say, myLoc, locateMe 
 
 function CustomerOrder({ o, venues, act, busy, signed, session, say }: any) {
   const [payload, setPayload] = useState("");
+  const [scanning, setScanning] = useState(false);
+
+  // ZK dropoff: scan the driver's signed position code, then prove — entirely
+  // on this device — that the driver is within the drop radius of our committed
+  // location, WITHOUT either coordinate ever going on-chain.
+  async function confirmDelivery(driverPayload: string) {
+    try {
+      const stored = localStorage.getItem(dropStoreKey(o.dropCommit));
+      if (!stored) throw new Error("Drop-location secret not on this device");
+      const drop = JSON.parse(stored); // { lat, lon, salt }
+      const other = decodePayload(driverPayload);
+      if (other.kind !== "dropoff-driver") throw new Error("That's not a driver handoff code");
+      const { att, sig } = other; // DriverCommitAttestation + signature
+      const dp = other.pos; // { lat, lon, salt } shared by the driver at the door
+      if (!dp) throw new Error("Driver code is missing the position data");
+
+      const radiusMeters = Number(await contracts().settlement.dropoffRadiusMeters());
+      say("Building delivery proof… (a few seconds)");
+      const { proof, pubSignals } = await proveProximity({
+        orderId: o.id.toString(),
+        radiusMeters,
+        cust: { lat: drop.lat, lon: drop.lon, salt: drop.salt },
+        driver: { lat: dp.lat, lon: dp.lon, salt: dp.salt },
+      });
+      // Sanity: the driver's signed commitment must equal what we proved against.
+      if (BigInt(att.posCommit) !== pubSignals[2]) {
+        throw new Error("Driver's signed position doesn't match the shared coordinates");
+      }
+      await act("Confirm delivery", () =>
+        signed.settlement.confirmDropoffZK(att, sig, proof, pubSignals)
+      );
+      say("Delivery confirmed — fare released 🎉");
+    } catch (e: any) {
+      say(e?.message ?? String(e), true);
+    }
+  }
+
   return (
     <div className="order">
       <div className="order-head">
@@ -792,40 +830,31 @@ function CustomerOrder({ o, venues, act, busy, signed, session, say }: any) {
       {o.status === 3 && (
         <>
           <p className="hint">
-            Driver is at your door? Sign the handoff — it reveals your committed drop location and
-            releases the fare once the driver submits it with their own GPS attestation.
+            Driver at your door? Scan their handoff code. Your device proves — in zero knowledge —
+            that they're at your door and releases the fare. Your address never touches the chain.
           </p>
+          {scanning && (
+            <QRScan
+              expectKind="dropoff-driver"
+              onResult={(v) => { setScanning(false); setPayload(v); confirmDelivery(v); }}
+              onCancel={() => setScanning(false)}
+            />
+          )}
+          <label className="field">
+            <span>driver handoff code</span>
+            <button className="btn ghost small" type="button" disabled={busy}
+              onClick={() => setScanning(true)}>⧉ Scan driver QR</button>
+            <textarea value={payload} onChange={(e) => setPayload(e.target.value)}
+              placeholder="…or paste code" />
+          </label>
           <div className="btn-row">
-            <button className="btn" disabled={busy || !session}
-              onClick={async () => {
-                try {
-                  const stored = localStorage.getItem(dropStoreKey(o.dropCommit));
-                  if (!stored) throw new Error("Drop-location secret not on this device");
-                  const { lat, lon, salt } = JSON.parse(stored);
-                  const reveal = {
-                    orderId: o.id.toString(), lat, lon, salt,
-                    timestamp: Math.floor(Date.now() / 1000),
-                  };
-                  const sig = await signReveal(session, reveal);
-                  setPayload(encodePayload("dropoff-customer", reveal, sig));
-                  say("Handoff signed — give the code to your driver");
-                } catch (e: any) { say(e.message, true); }
-              }}>
-              Sign dropoff handoff
+            <button className="btn" disabled={busy || !payload || !session}
+              onClick={() => confirmDelivery(payload)}>
+              Confirm delivery
             </button>
             <button className="btn ghost small" disabled={busy}
               onClick={() => act("Open dispute", () => signed.disputes.openDispute(o.id, ""))}>Dispute</button>
           </div>
-          {payload && (
-            <>
-              <p className="hint">Let your driver scan this (or paste the code below):</p>
-              <QRShow value={payload} />
-              <details className="payload-details">
-                <summary>show code text</summary>
-                <div className="payload-box">{payload}</div>
-              </details>
-            </>
-          )}
         </>
       )}
     </div>
@@ -980,39 +1009,53 @@ function DriverBid({ o, venues, act, busy, signed, session, dist }: any) {
 function DriverJob({ o, venues, act, busy, signed, session, say }: any) {
   const [counterpartyPayload, setCounterpartyPayload] = useState("");
   const [scanning, setScanning] = useState(false);
+  const [payload, setPayload] = useState(""); // dropoff: driver's handoff code
   const venue = venues.find((v: VenueRow) => v.id === o.venueId);
   const isPickup = o.status === 2;
-  const expectKind = isPickup ? "pickup-venue" : "dropoff-customer";
 
-  async function submitConfirmation() {
+  // Pickup: driver signs GPS, scans the venue code, and submits (unchanged —
+  // the venue pin is public, so there's nothing to hide at pickup).
+  async function submitPickup() {
     try {
       const pos = await getPosition();
-      if (isPickup && venue) {
+      if (venue) {
         const d = distanceMeters(pos, { lat: venue.lat, lon: venue.lon });
         if (d > 400) say(`Heads up: you look ~${Math.round(d)} m from the venue pin`, true);
       }
       const myAtt = {
-        orderId: o.id.toString(),
-        phase: isPickup ? 1 : 2,
-        actor: session.address,
-        lat: pos.lat,
-        lon: pos.lon,
-        timestamp: Math.floor(Date.now() / 1000),
+        orderId: o.id.toString(), phase: 1, actor: session.address,
+        lat: pos.lat, lon: pos.lon, timestamp: Math.floor(Date.now() / 1000),
       };
       const mySig = await signLocation(session, myAtt);
       const other = decodePayload(counterpartyPayload);
-      if (isPickup) {
-        if (other.kind !== "pickup-venue") throw new Error("That's not a venue pickup code");
-        await act("Confirm pickup", () =>
-          signed.settlement.confirmPickup(myAtt, mySig, other.att, other.sig)
-        );
-      } else {
-        if (other.kind !== "dropoff-customer") throw new Error("That's not a customer handoff code");
-        await act("Confirm dropoff", () =>
-          signed.settlement.confirmDropoff(myAtt, mySig, other.att, other.sig)
-        );
-      }
+      if (other.kind !== "pickup-venue") throw new Error("That's not a venue pickup code");
+      await act("Confirm pickup", () =>
+        signed.settlement.confirmPickup(myAtt, mySig, other.att, other.sig)
+      );
       setCounterpartyPayload("");
+    } catch (e: any) {
+      say(e?.message ?? String(e), true);
+    }
+  }
+
+  // Dropoff (ZK): the driver commits to their OWN position and shares it with
+  // the customer, who builds the proof and submits. The driver never reveals a
+  // coordinate on-chain and never submits — they hand off a signed commitment
+  // plus the position data the customer needs to prove proximity.
+  async function signDropoffHandoff() {
+    try {
+      const pos = await getPosition();
+      const salt = randomSalt();
+      const posCommit = positionCommit(pos.lat, pos.lon, salt);
+      const att = {
+        orderId: o.id.toString(), phase: 2, actor: session.address,
+        posCommit, timestamp: Math.floor(Date.now() / 1000),
+      };
+      const sig = await signDriverCommit(session, att);
+      // The customer needs the plaintext position (they'll prove locally and it
+      // never leaves their device in the clear). QR is exchanged face-to-face.
+      setPayload(encodePayload("dropoff-driver", att, sig, { lat: pos.lat, lon: pos.lon, salt }));
+      say("Handoff signed — show the code to your customer");
     } catch (e: any) {
       say(e?.message ?? String(e), true);
     }
@@ -1030,41 +1073,63 @@ function DriverJob({ o, venues, act, busy, signed, session, say }: any) {
         <div className="kv"><span className="k">pickup pin</span>
           <span className="v">{fmtCoord({ lat: venue.lat, lon: venue.lon })}</span></div>
       )}
-      <p className="hint">
-        {isPickup
-          ? "At the counter: ask the venue for their signed pickup code, paste it, and confirm. Your GPS position is signed and checked on-chain against the venue pin."
-          : "At the door: ask the customer for their signed handoff code, paste it, and confirm. Your GPS position must be within the dropoff radius of their revealed location."}
-      </p>
-      {scanning && (
-        <QRScan
-          expectKind={expectKind}
-          onResult={(v) => {
-            setCounterpartyPayload(v);
-            setScanning(false);
-            say(isPickup ? "Pickup code scanned ✓" : "Handoff code scanned ✓");
-          }}
-          onCancel={() => setScanning(false)}
-        />
+
+      {isPickup ? (
+        <>
+          <p className="hint">
+            At the counter: ask the venue for their signed pickup code, paste it, and confirm. Your
+            GPS position is signed and checked on-chain against the venue pin.
+          </p>
+          {scanning && (
+            <QRScan
+              expectKind="pickup-venue"
+              onResult={(v) => { setCounterpartyPayload(v); setScanning(false); say("Pickup code scanned ✓"); }}
+              onCancel={() => setScanning(false)}
+            />
+          )}
+          <label className="field">
+            <span>venue pickup code</span>
+            <button className="btn ghost small" type="button" disabled={busy} onClick={() => setScanning(true)}>
+              ⧉ Scan venue QR
+            </button>
+            <textarea value={counterpartyPayload} onChange={(e) => setCounterpartyPayload(e.target.value)}
+              placeholder="…or paste code" />
+          </label>
+          <div className="btn-row">
+            <button className="btn" disabled={busy || !counterpartyPayload} onClick={submitPickup}>
+              Confirm pickup
+            </button>
+            <button className="btn danger small" disabled={busy}
+              onClick={() => act("Abandon", () => signed.orders.abandonOrder(o.id))}>Abandon</button>
+            <button className="btn ghost small" disabled={busy}
+              onClick={() => act("Open dispute", () => signed.disputes.openDispute(o.id, ""))}>Dispute</button>
+          </div>
+        </>
+      ) : (
+        <>
+          <p className="hint">
+            At the door: sign your handoff and show the code to the customer. They prove you're here
+            in zero knowledge and release the fare — no coordinates go on-chain.
+          </p>
+          <div className="btn-row">
+            <button className="btn" disabled={busy || !session} onClick={signDropoffHandoff}>
+              Sign dropoff handoff
+            </button>
+            <button className="btn ghost small" disabled={busy}
+              onClick={() => act("Open dispute", () => signed.disputes.openDispute(o.id, ""))}>Dispute</button>
+          </div>
+          {payload && (
+            <>
+              <p className="hint">Let your customer scan this (or paste the code below):</p>
+              <QRShow value={payload} />
+              <details className="payload-details">
+                <summary>show code text</summary>
+                <div className="payload-box">{payload}</div>
+              </details>
+            </>
+          )}
+        </>
       )}
-      <label className="field">
-        <span>{isPickup ? "venue pickup code" : "customer handoff code"}</span>
-        <button className="btn ghost small" type="button" disabled={busy} onClick={() => setScanning(true)}>
-          ⧉ Scan {isPickup ? "venue" : "customer"} QR
-        </button>
-        <textarea value={counterpartyPayload} onChange={(e) => setCounterpartyPayload(e.target.value)}
-          placeholder="…or paste code" />
-      </label>
-      <div className="btn-row">
-        <button className="btn" disabled={busy || !counterpartyPayload} onClick={submitConfirmation}>
-          {isPickup ? "Confirm pickup" : "Confirm dropoff"}
-        </button>
-        {isPickup && (
-          <button className="btn danger small" disabled={busy}
-            onClick={() => act("Abandon", () => signed.orders.abandonOrder(o.id))}>Abandon</button>
-        )}
-        <button className="btn ghost small" disabled={busy}
-          onClick={() => act("Open dispute", () => signed.disputes.openDispute(o.id, ""))}>Dispute</button>
-      </div>
     </div>
   );
 }

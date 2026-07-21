@@ -37,25 +37,42 @@ posture DATUM takes for "attention isn't provable" (its F-1).
 Venue pins are public information — that's fine. Customer drop locations are
 **home addresses** and must not sit in a public ledger.
 
-Current MVP posture:
+Current posture — **ZK proximity proof (implemented):**
 
-1. At order creation only `keccak256(abi.encode(lat, lon, salt))` goes
-   on-chain. Browsing the chain reveals nothing about the destination.
-2. At dropoff the customer's signed reveal (lat, lon, salt) appears in
-   **calldata** — public, permanent. This is the MVP's known privacy gap.
+1. At order creation the drop commitment is `Poseidon(latEnc, lonEnc, salt)`
+   (offset-encoded microdegrees; see `circuits/proximity.circom`). Browsing the
+   chain reveals nothing about the destination.
+2. At dropoff **no coordinates go on-chain at all** — not calldata, not
+   storage, not events. `FareSettlement.confirmDropoffZK` takes a Groth16 proof
+   that, against the on-chain commitment, the driver's committed position is
+   within `dropoffRadiusMeters` of the customer's committed drop location:
 
-Production upgrade path (in priority order):
+   > `dist(driverPos, customerPos) < R  ∧  Poseidon(customerPos, salt) = dropCommit  ∧  Poseidon(driverPos, drvSalt) = driverCommit`
 
-- **ZK proximity proof** (the real fix): a Groth16 circuit proving
-  `dist(driverPos, customerPos) < R ∧ H(customerPos, salt) = commit` with
-  only `(orderId, commit, nullifier)` public. The DATUM circom/snarkjs
-  pipeline (Poseidon commitments, BN254 verifier, trusted-setup scripts) is
-  directly reusable. Note the driver's coordinates are also private inputs,
-  so *neither* party's position ever hits calldata.
-- Interim mitigation: geohash-truncate the reveal (e.g. ~±600 m cell) and
-  push exact-coordinate verification into the driver/customer signature
-  exchange off-chain. Weakens the on-chain distance check; acceptable only
-  as a stopgap.
+   Public signals are only `(orderId, dropCommit, driverCommit, radiusMeters,
+   nullifier)`. Both parties' coordinates are private circuit witnesses.
+
+   The adverse-interest model survives (see the table above): the driver
+   ECDSA-signs a commitment to their **own** position — they won't sign a false
+   one, because the proximity proof would then fail — and only the customer can
+   produce the proof (it needs the drop salt, which only they hold), so the
+   proof *is* the customer's consent. The driver hands their position + salt to
+   the customer face-to-face; the customer proves locally and submits.
+
+The pipeline reuses DATUM's circom/snarkjs approach: Poseidon commitments, a
+hand-rolled BN254 Groth16 verifier over the `0x06/0x07/0x08` precompiles that
+pallet-revive exposes on Asset Hub (`FareLocationVerifier.sol`), and a
+single-file trusted setup (`scripts/setup-zk.mjs`; a real ceremony is a mainnet
+prerequisite — `setVerifyingKey` is lock-once). The circuit's distance check
+mirrors GeoLib's equirectangular + Bhaskara-cosine math, made division-free by
+cross-multiplying `dx²+dy² ≤ R²`.
+
+**Still plaintext (follow-up):** driver + venue coordinates at **pickup** remain
+in calldata, and the driver's pickup coordinates are still emitted in
+`PickupConfirmed`. The venue pin is public by design, so the sensitivity is far
+lower than the customer's home — but the mainnet gate (docs/PRIVACY.md) also
+wants driver coordinates out of pickup events. A pickup-side circuit or simply
+dropping the coordinates from the event is the remaining step.
 
 ## Radii and freshness
 
@@ -93,6 +110,7 @@ avoid an on-chain square root.
 3. **Device attestation** (Play Integrity / App Attest) as an L2-style
    assurance tier for high-value orders — mirrors DATUM's AssuranceLevel
    gradient rather than a single global rule.
-4. **ZK proximity circuit** for location privacy (above).
+4. ~~**ZK proximity circuit** for location privacy~~ — **done** for dropoff
+   (`confirmDropoffZK`); pickup-side is the remaining follow-up (above).
 5. **Witness diversity**: for very high-value orders, require an extra
    attestor (a second staked driver nearby, or a venue-adjacent beacon).
