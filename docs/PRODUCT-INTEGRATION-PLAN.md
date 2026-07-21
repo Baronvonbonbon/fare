@@ -277,6 +277,7 @@ Full design in [NETWORK-ARCHITECTURE.md](NETWORK-ARCHITECTURE.md).*
 - [ ] F8 Venue-operated gasless relay (region meta-tx)
 
 ## See also
+- [REMAINING-ACTIONS.md](REMAINING-ACTIONS.md) — consolidated what's-left list (ops · follow-ons · not-started · mainnet gates)
 - [NETWORK-ARCHITECTURE.md](NETWORK-ARCHITECTURE.md) — venues-as-infrastructure design
 - [ROADMAP.md](ROADMAP.md) — R1/R2/R3 release framing (this doc is the app-integration cut of it)
 - [ARCHITECTURE.md](ARCHITECTURE.md) — contract topology + EIP-712 surface
