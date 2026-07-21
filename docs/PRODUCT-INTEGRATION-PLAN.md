@@ -262,7 +262,7 @@ Ordered roughly by leverage. Check off as landed.
 | F5 | DA scoring (challenge-response) | F | Off-chain | ☐ todo |
 | F6 | On-chain DA rewards | F | Contracts | ☐ todo |
 | F7 | Hosted super-node mode | F | Infra | ☐ todo |
-| F8 | Venue-operated gasless relay | F | Infra + views | ☐ todo |
+| F8 | Venue-operated gasless relay | F | Infra + views | 🟡 partial |
 
 ### Group F — Network / infra (venues as infrastructure)
 *Turn venues into network nodes — geo-replicated menus, chain access, gas relay.
