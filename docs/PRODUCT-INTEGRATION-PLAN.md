@@ -193,7 +193,10 @@ Ordered roughly by leverage. Check off as landed.
 - [ ] **Notifications**: web-push for status changes, new offers, new bids
 - [ ] **Ratings**: post-delivery stars for driver + venue (on-chain attestation or off-chain aggregate)
 - [ ] Proof-of-delivery photo + "leave at door" option
-- [ ] Order history / receipts / reorder (survive device loss — see identity note)
+- [x] Order history / receipts / reorder — `OrderReceipt` (local cart snapshot +
+      on-chain amounts), active/past split with a collapsible history section,
+      one-tap `HistoryCard` reorder (fresh wallet, same venue/cart/drop). Receipts
+      are device-local (survive-device-loss needs a backup/export — see identity note).
 
 ### Group C — Payments & economics (mainnet blockers)
 - [ ] **Gasless** meta-tx relay (DATUM `DatumRelay` pattern) — createOrder/placeBid/confirms
@@ -233,7 +236,7 @@ Ordered roughly by leverage. Check off as landed.
 | B4 | Push notifications | B | Cross-cutting | ☐ todo |
 | B5 | Ratings (stars) | B | Post-delivery | ☐ todo |
 | B6 | Proof-of-delivery photo | B | Driver view | ☐ todo |
-| B7 | History / receipts / reorder | B | Customer view | ☐ todo |
+| B7 | History / receipts / reorder | B | Customer view | ✅ done |
 | C1 | Gasless meta-tx relay | C | Infra + all views | ☐ todo |
 | C2 | Fiat pricing (oracle) | C | Checkout | ☐ todo |
 | C3 | Stablecoin escrow | C | Vault + checkout | ☐ todo |

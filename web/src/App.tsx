@@ -120,6 +120,59 @@ const INITIAL_LOOKBACK = 2_000_000;
 // Drop-location secrets the customer holds until dropoff.
 const dropStoreKey = (commit: string) => `fare.drop.${commit.toLowerCase()}`;
 
+// B7 — order receipts. Cart line items are off-chain (privacy), so we stash a
+// receipt locally at checkout keyed by the order's dropCommit; the receipt view
+// and reorder read it back. Falls back to on-chain amounts when absent (legacy).
+const receiptKey = (commit: string) => `fare.receipt.${commit.toLowerCase()}`;
+interface ReceiptData {
+  venueId: string;
+  venueName: string;
+  items: { name: string; price: string; qty: number }[];
+  orderValue: string; // PAS decimal
+  tip: string;
+  maxFare: string;
+  placedAt?: number;
+}
+function loadReceipt(commit: string): ReceiptData | null {
+  try {
+    const r = localStorage.getItem(receiptKey(commit));
+    return r ? (JSON.parse(r) as ReceiptData) : null;
+  } catch {
+    return null;
+  }
+}
+
+/// Shared order-placement: fresh per-order wallet, faucet-funded, escrows the
+/// order. Used by both first-time checkout and reorder. Persists the drop secret
+/// + the receipt keyed by the (fresh) commit.
+async function placeOrder(opts: {
+  venueId: bigint;
+  orderValueWei: bigint;
+  tipWei: bigint;
+  maxFareWei: bigint;
+  lat: number;
+  lon: number;
+  receipt: ReceiptData;
+  act: (label: string, fn: () => Promise<any>) => Promise<any>;
+  say: (m: string, err?: boolean) => void;
+}) {
+  const { venueId, orderValueWei, tipWei, maxFareWei, lat, lon, receipt, act, say } = opts;
+  const salt = randomSalt();
+  const commit = computeDropCommit(lat, lon, salt);
+  localStorage.setItem(dropStoreKey(commit), JSON.stringify({ lat, lon, salt }));
+  localStorage.setItem(receiptKey(commit), JSON.stringify({ ...receipt, placedAt: Date.now() }));
+  const escrow = orderValueWei + tipWei;
+  return act("Create order", async () => {
+    const w = newOrderWallet();
+    say("New private wallet — funding from faucet…");
+    await requestDrip(w.address);
+    await waitForFunding(w.address, escrow + parse("0.2"));
+    return contracts(w).orders.createOrder(
+      venueId, commit, orderValueWei, tipWei, maxFareWei, 0, 0, { value: escrow }
+    );
+  });
+}
+
 export default function App() {
   const [session, setSession] = useState<Session | null>(null);
   const [role, setRole] = useState<Role>(() => (localStorage.getItem("fare.role") as Role) || "customer");
@@ -759,6 +812,11 @@ function CustomerView({ session, orders, venues, act, busy, signed, say, myLoc, 
     }
   }
 
+  const active = mine.filter((o: OrderRow) => o.status <= 3 || o.status === 6);
+  const past = mine
+    .filter((o: OrderRow) => o.status === 4 || o.status === 5 || o.status === 7)
+    .sort((a: OrderRow, b: OrderRow) => Number(b.id - a.id)); // newest first
+
   return (
     <>
       <CreateOrder {...{ session, venues, act, busy, say, myLoc, locateMe }} />
@@ -768,12 +826,22 @@ function CustomerView({ session, orders, venues, act, busy, signed, say, myLoc, 
           Each order uses a fresh, faucet-funded wallet — consecutive orders can't be linked on-chain.
         </span>
       </div>
-      {mine.length === 0 && (
-        <div className="empty"><span className="dots">· · ·</span>No orders yet — place one above.</div>
+      {active.length === 0 && (
+        <div className="empty"><span className="dots">· · ·</span>No active orders — place one above.</div>
       )}
-      {mine.map((o: OrderRow) => (
+      {active.map((o: OrderRow) => (
         <CustomerOrder key={String(o.id)} {...{ o, venues, act, busy, session, say }} />
       ))}
+
+      {past.length > 0 && (
+        <details className="history">
+          <summary className="section-note">order history · {past.length}</summary>
+          {past.map((o: OrderRow) => (
+            <HistoryCard key={String(o.id)} {...{ o, venues, act, busy, session, say }} />
+          ))}
+        </details>
+      )}
+
       {mine.length > 0 && (
         <div className="btn-row" style={{ marginTop: 12 }}>
           <button className="btn ghost small" disabled={busy || sweeping} onClick={sweep}>
@@ -915,22 +983,21 @@ function CreateOrder({ session, venues, act, busy, say, myLoc, locateMe }: any) 
       <div className="btn-row">
         <button className="btn" disabled={busy || !session || !venueId || !pos}
           onClick={() => {
-            const salt = randomSalt();
-            const commit = computeDropCommit(pos!.lat, pos!.lon, salt);
-            localStorage.setItem(dropStoreKey(commit), JSON.stringify({ lat: pos!.lat, lon: pos!.lon, salt }));
-            const escrow = orderValueWei + parse(tip);
-            act("Create order", async () => {
-              // Fresh per-order identity, funded from the faucet so it links to
-              // nothing (docs/PRIVACY.md risk #3). Wait for the drip to land
-              // before escrowing the order value from it.
-              const w = newOrderWallet();
-              say("New private wallet — funding from faucet…");
-              await requestDrip(w.address);
-              await waitForFunding(w.address, escrow + parse("0.2"));
-              return contracts(w).orders.createOrder(
-                BigInt(venueId), commit, orderValueWei, parse(tip), parse(maxFare), 0, 0,
-                { value: escrow }
-              );
+            const v = venues.find((x: VenueRow) => String(x.id) === venueId);
+            const items = menuDriven
+              ? menu!.items
+                  .filter((it) => (cart[it.id] ?? 0) > 0)
+                  .map((it) => ({ name: it.name, price: it.price, qty: cart[it.id] }))
+              : [];
+            const receipt: ReceiptData = {
+              venueId, venueName: menu?.name || `Venue #${venueId}`, items,
+              orderValue: fmt(orderValueWei), tip, maxFare,
+            };
+            // Fresh per-order identity, funded from the faucet so it links to
+            // nothing (docs/PRIVACY.md risk #3); persists a local receipt (B7).
+            placeOrder({
+              venueId: BigInt(venueId), orderValueWei, tipWei: parse(tip), maxFareWei: parse(maxFare),
+              lat: pos!.lat, lon: pos!.lon, receipt, act, say,
             });
           }}>
           Open for bids
@@ -994,6 +1061,66 @@ function OrderTracker({ o }: { o: OrderRow }) {
         })}
       </div>
       <div className="track-eta">{eta}</div>
+    </div>
+  );
+}
+
+// B7 — itemized receipt (local cart snapshot + on-chain amounts).
+function OrderReceipt({ o }: { o: OrderRow }) {
+  const r = loadReceipt(o.dropCommit);
+  return (
+    <details className="payload-details">
+      <summary>receipt</summary>
+      {r && (
+        <>
+          <div className="kv"><span className="k">{r.venueName}</span>
+            <span className="v hint">{r.placedAt ? new Date(r.placedAt).toLocaleDateString() : ""}</span></div>
+          {r.items.map((it, i) => (
+            <div className="kv" key={i}>
+              <span className="k">{it.qty}× {it.name}</span>
+              <span className="v mono">{it.price} PAS</span>
+            </div>
+          ))}
+        </>
+      )}
+      <div className="kv"><span className="k">order value</span><span className="v mono">{fmt(o.orderValue)} PAS</span></div>
+      <div className="kv"><span className="k">tip</span><span className="v mono">{fmt(o.tip)} PAS</span></div>
+      {o.fare > 0n && <div className="kv"><span className="k">delivery fare</span><span className="v mono">{fmt(o.fare)} PAS</span></div>}
+      <div className="kv"><span className="k">total</span><span className="v amount">{fmt(o.orderValue + o.tip + o.fare)} PAS</span></div>
+      {!r && <p className="hint">No itemized breakdown on this device.</p>}
+    </details>
+  );
+}
+
+function HistoryCard({ o, venues, act, busy, session, say }: any) {
+  const canReorder = !!localStorage.getItem(dropStoreKey(o.dropCommit));
+  async function reorder() {
+    const stored = localStorage.getItem(dropStoreKey(o.dropCommit));
+    if (!stored) return say("Can't reorder — drop location isn't on this device", true);
+    const { lat, lon } = JSON.parse(stored);
+    const r = loadReceipt(o.dropCommit) ?? {
+      venueId: String(o.venueId), venueName: `Venue #${o.venueId}`, items: [],
+      orderValue: fmt(o.orderValue), tip: fmt(o.tip), maxFare: fmt(o.maxFare),
+    };
+    await placeOrder({
+      venueId: o.venueId, orderValueWei: o.orderValue, tipWei: o.tip, maxFareWei: o.maxFare,
+      lat, lon, receipt: r, act, say,
+    });
+  }
+  return (
+    <div className="order" style={{ opacity: 0.9 }}>
+      <div className="order-head">
+        <span className="order-id">Order #{String(o.id)}</span>
+        <span className={`badge ${badgeClass(o.status)}`}>{STATUS[o.status]}</span>
+      </div>
+      <OrderMeta o={o} venues={venues} />
+      <OrderReceipt o={o} />
+      <div className="btn-row">
+        <button className="btn ghost small" disabled={busy || !session || !canReorder}
+          onClick={reorder} title={canReorder ? "" : "Drop location not on this device"}>
+          Reorder
+        </button>
+      </div>
     </div>
   );
 }
@@ -1073,6 +1200,7 @@ function CustomerOrder({ o, venues, act, busy, session, say }: any) {
       {orphaned && (
         <p className="hint">⚠ This order was placed from another device — its wallet isn't here, so you can't act on it.</p>
       )}
+      <OrderReceipt o={o} />
 
       {o.status === 1 && (
         <>
