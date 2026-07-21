@@ -117,6 +117,7 @@ session-scoped to transactions submitted through Pine.
 
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — contract-by-contract design, flows, wiring
 - [docs/GPS.md](docs/GPS.md) — what "GPS proof" really proves; threat model; ZK path
+- [docs/PRIVACY.md](docs/PRIVACY.md) — on-chain location privacy: what's exposed, the risks, mitigations, the mainnet gate
 - [docs/ROADMAP.md](docs/ROADMAP.md) — path from MVP to a formal, complete product
 - [docs/DEMO-LAUNCH.md](docs/DEMO-LAUNCH.md) — demo-launch plan: pilot next steps, mobile client path, merchant readiness, Parity/W3F infra
 
