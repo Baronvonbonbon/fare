@@ -186,7 +186,9 @@ Ordered roughly by leverage. Check off as landed.
       `MenuEditor` (venue publishes), `MenuCart` + cart-driven `CreateOrder`
       (customer). Needs the DATUM IPFS node stood up + `IPFS_ADD_URL`/`IPFS_API_KEY`
       set; untested in-browser.
-- [ ] **Live order tracking**: status timeline + driver location relay + ETA (map trace)
+- 🟡 **Live order tracking**: status stepper + live ETA countdown done (`OrderTracker`,
+      derived from on-chain status + deadlines). Remaining: driver-location relay +
+      map trace (needs the off-chain location channel — see NETWORK-ARCHITECTURE.md)
 - [ ] **Messaging**: order-scoped driver↔customer (XMTP/libp2p), keyed to the order
 - [ ] **Notifications**: web-push for status changes, new offers, new bids
 - [ ] **Ratings**: post-delivery stars for driver + venue (on-chain attestation or off-chain aggregate)
@@ -226,7 +228,7 @@ Ordered roughly by leverage. Check off as landed.
 | A6 | Reputation in bid cards | A | Customer view | ✅ done |
 | A7 | Dispute evidence + status view | A | Customer/Driver | ✅ done |
 | B1 | Catalog / menu / cart | B | New service + all views | ✅ done |
-| B2 | Live tracking + ETA | B | Customer/Driver | ☐ todo |
+| B2 | Live tracking + ETA | B | Customer/Driver | 🟡 partial |
 | B3 | Order-scoped messaging | B | Customer/Driver | ☐ todo |
 | B4 | Push notifications | B | Cross-cutting | ☐ todo |
 | B5 | Ratings (stars) | B | Post-delivery | ☐ todo |

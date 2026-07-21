@@ -940,6 +940,64 @@ function CreateOrder({ session, venues, act, busy, say, myLoc, locateMe }: any) 
   );
 }
 
+const TRACK_STEPS = [
+  { s: 1, label: "Placed" },
+  { s: 2, label: "Driver assigned" },
+  { s: 3, label: "Picked up" },
+  { s: 4, label: "Delivered" },
+];
+
+function fmtLeft(sec: number): string {
+  if (sec <= 0) return "now";
+  const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60;
+  if (h > 0) return `${h}h ${m}m`;
+  if (m > 0) return `${m}m ${s}s`;
+  return `${s}s`;
+}
+
+// B2 — live order tracking. The status stepper + ETA are derived entirely from
+// on-chain data (order status + deadlines); a live driver-location dot needs the
+// off-chain location relay (Group B follow-on / see NETWORK-ARCHITECTURE.md).
+function OrderTracker({ o }: { o: OrderRow }) {
+  const [now, setNow] = useState(Math.floor(Date.now() / 1000));
+  useEffect(() => {
+    const t = setInterval(() => setNow(Math.floor(Date.now() / 1000)), 1000);
+    return () => clearInterval(t);
+  }, []);
+
+  if (o.status >= 5) {
+    return <div className="track-eta">{STATUS[o.status]}</div>; // Cancelled/Disputed/Resolved
+  }
+
+  let eta = "";
+  if (o.status === 1) eta = "Waiting for driver bids…";
+  else if (o.status === 2) {
+    const left = Number(o.pickupDeadline) - now;
+    eta = left > 0 ? `Driver heading to venue · pickup in ~${fmtLeft(left)}` : "Pickup overdue";
+  } else if (o.status === 3) {
+    const left = Number(o.deliveryDeadline) - now;
+    eta = left > 0 ? `On the way · ETA ~${fmtLeft(left)}` : "Delivery overdue";
+  } else if (o.status === 4) eta = "Delivered 🎉";
+
+  return (
+    <div className="tracker">
+      <div className="track-steps">
+        {TRACK_STEPS.map((st) => {
+          const done = o.status > st.s || o.status === 4;
+          const active = o.status === st.s && o.status !== 4;
+          return (
+            <div key={st.s} className={`track-step ${done ? "done" : active ? "active" : ""}`}>
+              <span className="dot">{done ? "✓" : st.s}</span>
+              <span className="lbl">{st.label}</span>
+            </div>
+          );
+        })}
+      </div>
+      <div className="track-eta">{eta}</div>
+    </div>
+  );
+}
+
 function CustomerOrder({ o, venues, act, busy, session, say }: any) {
   const [payload, setPayload] = useState("");
   const [scanning, setScanning] = useState(false);
@@ -1001,6 +1059,7 @@ function CustomerOrder({ o, venues, act, busy, session, say }: any) {
         <ExpiryBadge o={o} />
         <span className={`badge ${badgeClass(o.status)}`}>{STATUS[o.status]}</span>
       </div>
+      <OrderTracker o={o} />
       <OrderMeta o={o} venues={venues} />
       <div className="kv">
         <span className="k">private wallet</span>
