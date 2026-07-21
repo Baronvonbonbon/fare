@@ -10,6 +10,7 @@
     "deploy:local": "hardhat run scripts/deploy.ts --network localhost",
     "deploy:paseo": "hardhat run scripts/deploy.ts --network polkadotTestnet",
     "seed:local": "hardhat run scripts/seed.ts --network localhost",
+    "seed:paseo": "hardhat run scripts/seed-paseo.ts --network polkadotTestnet",
     "zk:setup": "node scripts/setup-zk.mjs",
     "size": "hardhat size-contracts"
   },
