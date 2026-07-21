@@ -119,7 +119,7 @@ role views. The mapping below is the target shape.
 | Order confirmation | `OrderCreated` event | ✅ | — |
 | **Live tracking** (status, driver on map, ETA) | order `status` + `OrderAssigned` | 🟡 | Status shown; no live driver location, no ETA, no map trace |
 | Pick a Dasher (FARE-specific: reverse auction) | `biddersOf` / `acceptBid` | ✅ | Bid cards — but **no driver rating shown** (⛔ `reputationOf`) |
-| Chat with Dasher / support | — | 🆕 | No messaging |
+| Chat with Dasher / support | E2E crypto (`msg.ts`) | 🟡 | Crypto done; relay deferred (MESSAGING.md) |
 | Handoff / proof of delivery | `confirmDropoffZK` (ZK) | ✅ | No delivery photo / "leave at door" option |
 | Rate order + driver + restaurant | `FareRatings` (verified-delivery) | ✅ | On-chain stars, gated to a Delivered order's customer; shown in bid cards |
 | Reorder, history, receipts | per-order wallet registry (local) | 🟡 | History is device-local; no receipts/reorder |
@@ -189,7 +189,8 @@ Ordered roughly by leverage. Check off as landed.
 - 🟡 **Live order tracking**: status stepper + live ETA countdown done (`OrderTracker`,
       derived from on-chain status + deadlines). Remaining: driver-location relay +
       map trace (needs the off-chain location channel — see NETWORK-ARCHITECTURE.md)
-- [ ] **Messaging**: order-scoped driver↔customer (XMTP/libp2p), keyed to the order
+- 🟡 **Messaging**: E2E crypto layer done (`web/src/msg.ts` — secp256k1 ECDH → AES-GCM,
+      per-order scoped, 5 tests). Relay/transport deferred — see [MESSAGING.md](MESSAGING.md)
 - [ ] **Notifications**: web-push for status changes, new offers, new bids
 - [x] **Ratings**: on-chain verified-delivery stars (`FareRatings`) — gated to the Delivered order's customer, one per order; rate widget in history + driver rating in bid cards
 - [ ] Proof-of-delivery photo + "leave at door" option
@@ -232,7 +233,7 @@ Ordered roughly by leverage. Check off as landed.
 | A7 | Dispute evidence + status view | A | Customer/Driver | ✅ done |
 | B1 | Catalog / menu / cart | B | New service + all views | ✅ done |
 | B2 | Live tracking + ETA | B | Customer/Driver | 🟡 partial |
-| B3 | Order-scoped messaging | B | Customer/Driver | ☐ todo |
+| B3 | Order-scoped messaging | B | Customer/Driver | 🟡 partial |
 | B4 | Push notifications | B | Cross-cutting | ☐ todo |
 | B5 | Ratings (stars) | B | Post-delivery | ✅ done |
 | B6 | Proof-of-delivery photo | B | Driver view | ☐ todo |
