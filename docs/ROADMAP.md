@@ -14,15 +14,16 @@ discipline.
 - [x] Upgradable layer: `FareGovernanceRouter` registry + freeze-and-drain
       `FareUpgradable` base, paginated record imports, router-following web
       client (DATUM ladder, slim port)
-- [ ] Paseo deployment + a filmed end-to-end field test (two phones, one
-      real handoff) — the single most persuasive artifact for the project
+- [x] Paseo deployment — live addresses in `web/src/deployed-addresses.json`
+- [ ] A filmed end-to-end field test (two phones, one real handoff) — the
+      single most persuasive artifact for the project
 - [ ] Fuzz + invariant tests (escrow conservation: Σcredits = Σescrow deltas)
 - [ ] Slither/Mythril pass (DATUM audit-hedge #6 equivalent)
 
 **App**
 - [x] PWA with Customer / Driver / Venue roles, GPS-signed attestations
-- [ ] QR codes for the attestation handoff (copy-paste is the demo
-      mechanic; QR is the field mechanic — driver scans customer's screen)
+- [x] QR codes for the attestation handoff (`qr.tsx` — `QRShow`/`QRScan`;
+      pickup driver↔venue, dropoff driver↔customer)
 - [ ] Event-driven refresh (currently polling)
 
 ## R2 — Product hardening
@@ -67,8 +68,17 @@ discipline.
 ## R3 — Scale & decentralization
 
 - ~~**ZK proximity settlement** (docs/GPS.md) — location privacy end-state~~
-  **shipped for dropoff** (`confirmDropoffZK`); remaining: pickup-side privacy
-  + the trusted-setup ceremony above
+  **shipped.** The full location-privacy line is done:
+  - Dropoff is **zero-knowledge** — `confirmDropoffZK` + `circuits/proximity.circom`
+    + `FareLocationVerifier` (Groth16/BN254 over Asset Hub precompiles); no
+    coordinate touches calldata, storage, or events.
+  - Driver coordinates **scrubbed from pickup** — not emitted, ~33 m coarsened
+    in calldata (the venue pin is public, so no circuit was warranted).
+  - **Per-order customer burner wallets** (`web/src/wallets.ts`) — orders no
+    longer chain to one identity.
+  - Remaining mainnet gates: a real **MPC trusted-setup ceremony** (see
+    R2/Security) and a **shielded funding path** for the per-order wallets
+    (testnet relies on the shared faucet). Full status in docs/PRIVACY.md.
 - **Batch settlement**: high-volume venues confirm N pickups in one tx
   (DATUM `settleClaimsMulti` shape)
 - **Driver discovery/matching off-chain, settlement on-chain** — the
