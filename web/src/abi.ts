@@ -70,6 +70,13 @@ export const ROUTER_ABI = [
   "function versionOf(bytes32) view returns (uint64)",
 ];
 
+export const RATINGS_ABI = [
+  "function rate(uint256 orderId, uint8 driverStars, uint8 venueStars)",
+  "function rated(uint256) view returns (bool)",
+  "function driverRating(address) view returns (uint256 avgX100, uint256 count)",
+  "function venueRating(uint64) view returns (uint256 avgX100, uint256 count)",
+];
+
 export const DISPUTES_ABI = [
   "function disputeBond() view returns (uint96)",
   "function openDispute(uint256 orderId, string evidenceURI) payable returns (uint256)",

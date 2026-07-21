@@ -44,7 +44,7 @@ CUSTOMER                    DRIVERS                    VENUE
 - **All payouts are pull-payments** through `FareVault` — no push-payment
   griefing, one auditable money-out path.
 
-## Contracts (9)
+## Contracts (10)
 
 | Contract | Role |
 |---|---|
@@ -52,6 +52,7 @@ CUSTOMER                    DRIVERS                    VENUE
 | `FareOrders` | Order book: escrow, reverse auction, lifecycle, cancellation economics |
 | `FareSettlement` | EIP-712 dual-sig GPS attestation (pickup) + ZK proximity proof (dropoff) |
 | `FareLocationVerifier` | Groth16 / BN254 verifier for the drop-proximity circuit (Asset Hub precompiles) |
+| `FareRatings` | Verified-delivery ratings — gated to the customer of a Delivered order |
 | `FareVault` | Pull-payment vault for every payout (venue, driver, refunds, fees) |
 | `FareDrivers` | Driver registry, optional stake, reputation, slash hook |
 | `FareVenues` | Venue registry: public location pin, hot signer key, payout address |

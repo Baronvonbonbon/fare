@@ -121,6 +121,7 @@ async function main() {
   const settlement = await deployOrReuse("settlement", "FareSettlement", [pause]);
   const disputes = await deployOrReuse("disputes", "FareDisputes", [pause]);
   const locationVerifier = await deployOrReuse("locationVerifier", "FareLocationVerifier");
+  const ratings = await deployOrReuse("ratings", "FareRatings");
 
   // ── 2. Wiring ──────────────────────────────────────────────────────────
   console.log("\n2. Wiring");
@@ -174,6 +175,11 @@ async function main() {
     );
   } else console.log("  = disputes already configured");
 
+  const ratingsC = await ethers.getContractAt("FareRatings", ratings, deployer);
+  if ((await ratingsC.orders()) !== orders) {
+    await send("ratings.configure", () => ratingsC.configure(orders, { gasLimit: GAS_LIMIT }));
+  } else console.log("  = ratings already configured");
+
   for (const [who, addr] of [
     ["orders", orders],
     ["disputes", disputes],
@@ -206,6 +212,7 @@ async function main() {
     ["orders", orders],
     ["settlement", settlement],
     ["disputes", disputes],
+    ["ratings", ratings],
   ];
   for (const [name, addr] of registryEntries) {
     const key = ethers.encodeBytes32String(name);
@@ -235,6 +242,7 @@ async function main() {
     ["settlement.verifier", (await settlementC.locationVerifier()) === locationVerifier],
     ["verifier VK set", await verifierC.vkSet()],
     ["disputes.orders", (await disputesC.orders()) === orders],
+    ["ratings.orders", (await ratingsC.orders()) === orders],
     ["vault auth orders", await vaultC.authorized(orders)],
     ["vault auth disputes", await vaultC.authorized(disputes)],
     ["drivers auth orders", await driversC.authorized(orders)],

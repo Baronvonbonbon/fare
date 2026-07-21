@@ -121,7 +121,7 @@ role views. The mapping below is the target shape.
 | Pick a Dasher (FARE-specific: reverse auction) | `biddersOf` / `acceptBid` | ✅ | Bid cards — but **no driver rating shown** (⛔ `reputationOf`) |
 | Chat with Dasher / support | — | 🆕 | No messaging |
 | Handoff / proof of delivery | `confirmDropoffZK` (ZK) | ✅ | No delivery photo / "leave at door" option |
-| Rate order + driver + restaurant | reputation counts only | 🆕 | No star ratings; only delivered/failed on-chain |
+| Rate order + driver + restaurant | `FareRatings` (verified-delivery) | ✅ | On-chain stars, gated to a Delivered order's customer; shown in bid cards |
 | Reorder, history, receipts | per-order wallet registry (local) | 🟡 | History is device-local; no receipts/reorder |
 | Refunds / problems | `openDispute` | 🟡 | Opens with empty evidence; no status/outcome view |
 
@@ -191,7 +191,7 @@ Ordered roughly by leverage. Check off as landed.
       map trace (needs the off-chain location channel — see NETWORK-ARCHITECTURE.md)
 - [ ] **Messaging**: order-scoped driver↔customer (XMTP/libp2p), keyed to the order
 - [ ] **Notifications**: web-push for status changes, new offers, new bids
-- [ ] **Ratings**: post-delivery stars for driver + venue (on-chain attestation or off-chain aggregate)
+- [x] **Ratings**: on-chain verified-delivery stars (`FareRatings`) — gated to the Delivered order's customer, one per order; rate widget in history + driver rating in bid cards
 - [ ] Proof-of-delivery photo + "leave at door" option
 - [x] Order history / receipts / reorder — `OrderReceipt` (local cart snapshot +
       on-chain amounts), active/past split with a collapsible history section,
@@ -234,7 +234,7 @@ Ordered roughly by leverage. Check off as landed.
 | B2 | Live tracking + ETA | B | Customer/Driver | 🟡 partial |
 | B3 | Order-scoped messaging | B | Customer/Driver | ☐ todo |
 | B4 | Push notifications | B | Cross-cutting | ☐ todo |
-| B5 | Ratings (stars) | B | Post-delivery | ☐ todo |
+| B5 | Ratings (stars) | B | Post-delivery | ✅ done |
 | B6 | Proof-of-delivery photo | B | Driver view | ☐ todo |
 | B7 | History / receipts / reorder | B | Customer view | ✅ done |
 | C1 | Gasless meta-tx relay | C | Infra + all views | ☐ todo |

@@ -52,6 +52,8 @@ describe("FARE protocol", () => {
     const settlement = await (await ethers.getContractFactory("FareSettlement")).deploy(pause.target);
     const disputes = await (await ethers.getContractFactory("FareDisputes")).deploy(pause.target);
     const verifier = await (await ethers.getContractFactory("MockLocationVerifier")).deploy();
+    const ratings = await (await ethers.getContractFactory("FareRatings")).deploy();
+    await ratings.configure(orders.target);
 
     // wiring
     await orders.configure(
@@ -89,7 +91,7 @@ describe("FARE protocol", () => {
 
     return {
       deployer, treasury, customer, driver1, driver2, venueOp, venueSigner, stranger,
-      pause, vault, drivers, venues, orders, settlement, disputes, verifier,
+      pause, vault, drivers, venues, orders, settlement, disputes, verifier, ratings,
       venueId, domain,
     };
   }
@@ -556,6 +558,85 @@ describe("FARE protocol", () => {
       const { orderId } = await createAndAssign(f);
       await confirmPickupOk(f, orderId, f.driver2);
       await expect(confirmPickupOk(f, orderId, f.driver2)).to.be.revertedWith("bad-status");
+    });
+  });
+
+  describe("verified ratings", () => {
+    // Drive an order all the way to Delivered so it can be rated.
+    async function deliver(f: Awaited<ReturnType<typeof deployAll>>) {
+      const { orderId } = await createAndAssign(f);
+      await confirmPickupOk(f, orderId, f.driver2);
+      await confirmDropoffOk(f, orderId, f.driver2);
+      expect(await f.orders.statusOf(orderId)).to.equal(4n); // Delivered
+      return orderId;
+    }
+
+    it("customer rates driver + venue after delivery; aggregates update", async () => {
+      const f = await loadFixture(deployAll);
+      const orderId = await deliver(f);
+
+      await expect(f.ratings.connect(f.customer).rate(orderId, 5, 4))
+        .to.emit(f.ratings, "Rated")
+        .withArgs(orderId, f.driver2.address, f.venueId, 5, 4, f.customer.address);
+
+      const [dAvg, dN] = await f.ratings.driverRating(f.driver2.address);
+      expect(dAvg).to.equal(500n); // 5.00★ ×100
+      expect(dN).to.equal(1n);
+      const [vAvg, vN] = await f.ratings.venueRating(f.venueId);
+      expect(vAvg).to.equal(400n);
+      expect(vN).to.equal(1n);
+    });
+
+    it("gate: cannot rate before delivery", async () => {
+      const f = await loadFixture(deployAll);
+      const { orderId } = await createAndAssign(f); // Assigned, not Delivered
+      await expect(f.ratings.connect(f.customer).rate(orderId, 5, 5)).to.be.revertedWith("not-delivered");
+    });
+
+    it("gate: only the order's customer can rate", async () => {
+      const f = await loadFixture(deployAll);
+      const orderId = await deliver(f);
+      await expect(f.ratings.connect(f.stranger).rate(orderId, 5, 5)).to.be.revertedWith("not-customer");
+      await expect(f.ratings.connect(f.driver2).rate(orderId, 5, 5)).to.be.revertedWith("not-customer");
+    });
+
+    it("gate: one rating per order", async () => {
+      const f = await loadFixture(deployAll);
+      const orderId = await deliver(f);
+      await f.ratings.connect(f.customer).rate(orderId, 5, 5);
+      await expect(f.ratings.connect(f.customer).rate(orderId, 1, 1)).to.be.revertedWith("already-rated");
+    });
+
+    it("validates stars: >5 rejected, 0/0 rejected, skip-one allowed", async () => {
+      const f = await loadFixture(deployAll);
+      const orderId = await deliver(f);
+      await expect(f.ratings.connect(f.customer).rate(orderId, 6, 3)).to.be.revertedWith("bad-stars");
+      await expect(f.ratings.connect(f.customer).rate(orderId, 0, 0)).to.be.revertedWith("nothing-to-rate");
+      // rate only the driver (skip venue)
+      await f.ratings.connect(f.customer).rate(orderId, 3, 0);
+      const [, dN] = await f.ratings.driverRating(f.driver2.address);
+      const [, vN] = await f.ratings.venueRating(f.venueId);
+      expect(dN).to.equal(1n);
+      expect(vN).to.equal(0n); // venue skipped
+    });
+
+    it("averages across multiple delivered orders", async () => {
+      const f = await loadFixture(deployAll);
+      const o1 = await deliver(f);
+      await f.ratings.connect(f.customer).rate(o1, 5, 0);
+      // second order to the same driver, different rating. Reuse the same
+      // (opaque) drop commit so confirmDropoffOk's mock pubSignals still match.
+      const commit = dropCommit(DROP_LAT, DROP_LON, DROP_SALT);
+      await f.orders.connect(f.customer).createOrder(f.venueId, commit, ORDER_VALUE, TIP, MAX_FARE, 0, 0, { value: ORDER_VALUE + TIP });
+      const o2 = 2n;
+      await f.orders.connect(f.driver2).placeBid(o2, ethers.parseEther("0.4"));
+      await f.orders.connect(f.customer).acceptBid(o2, f.driver2.address, { value: ethers.parseEther("0.4") });
+      await confirmPickupOk(f, o2, f.driver2);
+      await confirmDropoffOk(f, o2, f.driver2);
+      await f.ratings.connect(f.customer).rate(o2, 2, 0);
+      const [dAvg, dN] = await f.ratings.driverRating(f.driver2.address);
+      expect(dN).to.equal(2n);
+      expect(dAvg).to.equal(350n); // (5+2)/2 = 3.50★
     });
   });
 

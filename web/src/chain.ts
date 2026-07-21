@@ -13,6 +13,7 @@ import {
   DISPUTES_ABI,
   DRIVERS_ABI,
   ORDERS_ABI,
+  RATINGS_ABI,
   ROUTER_ABI,
   SETTLEMENT_ABI,
   VAULT_ABI,
@@ -193,8 +194,13 @@ export async function connect(mode: SignerMode, privateKey?: string): Promise<Se
   return { mode, address: w.address, signer: w };
 }
 
+/// True once FareRatings has been deployed + written into the address book.
+export function ratingsEnabled(): boolean {
+  return !!ADDRESSES.ratings;
+}
+
 export function contracts(runner: ethers.ContractRunner = readProvider) {
-  return {
+  const c: any = {
     orders: new Contract(ADDRESSES.orders, ORDERS_ABI, runner),
     venues: new Contract(ADDRESSES.venues, VENUES_ABI, runner),
     drivers: new Contract(ADDRESSES.drivers, DRIVERS_ABI, runner),
@@ -202,6 +208,9 @@ export function contracts(runner: ethers.ContractRunner = readProvider) {
     vault: new Contract(ADDRESSES.vault, VAULT_ABI, runner),
     disputes: new Contract(ADDRESSES.disputes, DISPUTES_ABI, runner),
   };
+  // Additive contract — may not exist in an older deployment's address book.
+  if (ADDRESSES.ratings) c.ratings = new Contract(ADDRESSES.ratings, RATINGS_ABI, runner);
+  return c;
 }
 
 // ---- event-based order discovery ----

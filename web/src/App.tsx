@@ -8,6 +8,7 @@ import {
   contracts,
   computeDropCommit,
   currentBlock,
+  ratingsEnabled,
   decodePayload,
   discoverAssignments,
   discoverOrders,
@@ -68,7 +69,7 @@ interface OrderRow {
   pickupWindowSecs: bigint;
   pickupDeadline: bigint;
   deliveryDeadline: bigint;
-  bidders: { addr: string; amount: bigint; delivered: number; failed: number }[];
+  bidders: { addr: string; amount: bigint; delivered: number; failed: number; ratingX100: number; ratingN: number }[];
 }
 
 interface VenueRow {
@@ -346,13 +347,20 @@ export default function App() {
             const rows = await Promise.all(
               addrs.map(async (addr) => {
                 const amount: bigint = await c.orders.bidOf(id, addr);
-                let delivered = 0, failed = 0;
+                let delivered = 0, failed = 0, ratingX100 = 0, ratingN = 0;
                 try {
                   const d = await c.drivers.drivers(addr);
                   delivered = Number(d.delivered);
                   failed = Number(d.failed);
                 } catch {}
-                return { addr, amount, delivered, failed };
+                if (c.ratings) {
+                  try {
+                    const [avg, n] = await c.ratings.driverRating(addr);
+                    ratingX100 = Number(avg);
+                    ratingN = Number(n);
+                  } catch {}
+                }
+                return { addr, amount, delivered, failed, ratingX100, ratingN };
               })
             );
             bidders = rows.filter((b) => b.amount > 0n).sort((a, b) => (a.amount < b.amount ? -1 : 1));
@@ -1092,6 +1100,49 @@ function OrderReceipt({ o }: { o: OrderRow }) {
   );
 }
 
+function StarRow({ label, value, onChange }: { label: string; value: number; onChange: (n: number) => void }) {
+  return (
+    <div className="kv">
+      <span className="k">{label}</span>
+      <span className="v">
+        {[1, 2, 3, 4, 5].map((n) => (
+          <button key={n} type="button" className="star-btn" onClick={() => onChange(n)}>
+            {n <= value ? "★" : "☆"}
+          </button>
+        ))}
+      </span>
+    </div>
+  );
+}
+
+// B5 — verified-delivery rating. Signed by the order's per-order wallet (the
+// contract gates: only the Delivered order's customer can rate, once).
+function RateWidget({ o, busy, act, say }: any) {
+  const [dStars, setDStars] = useState(0);
+  const [vStars, setVStars] = useState(0);
+  const [done, setDone] = useState(false);
+  useEffect(() => {
+    contracts().ratings?.rated(o.id).then((r: boolean) => setDone(r)).catch(() => {});
+  }, [String(o.id)]);
+  const os = contractsForOrder(o.customer);
+  if (!ratingsEnabled()) return null;
+  if (done) return <p className="hint">★ You rated this order — thanks!</p>;
+  return (
+    <div className="rate-widget">
+      <StarRow label="rate driver" value={dStars} onChange={setDStars} />
+      <StarRow label="rate venue" value={vStars} onChange={setVStars} />
+      <div className="btn-row">
+        <button className="btn small" disabled={busy || !os || (dStars === 0 && vStars === 0)}
+          onClick={() =>
+            act("Rate", () => os!.ratings.rate(o.id, dStars, vStars)).then(() => setDone(true))
+          }>
+          Submit rating
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function HistoryCard({ o, venues, act, busy, session, say }: any) {
   const canReorder = !!localStorage.getItem(dropStoreKey(o.dropCommit));
   async function reorder() {
@@ -1115,6 +1166,7 @@ function HistoryCard({ o, venues, act, busy, session, say }: any) {
       </div>
       <OrderMeta o={o} venues={venues} />
       <OrderReceipt o={o} />
+      {o.status === 4 && <RateWidget o={o} busy={busy} act={act} say={say} />}
       <div className="btn-row">
         <button className="btn ghost small" disabled={busy || !session || !canReorder}
           onClick={reorder} title={canReorder ? "" : "Drop location not on this device"}>
@@ -1210,7 +1262,8 @@ function CustomerOrder({ o, venues, act, busy, session, say }: any) {
             <div className="kv" key={b.addr}>
               <span className="k mono">
                 {short(b.addr)}
-                <span className="hint" title="delivered / failed on-chain">
+                <span className="hint" title="rating · delivered / failed on-chain">
+                  {b.ratingN > 0 ? ` · ★${(b.ratingX100 / 100).toFixed(1)} (${b.ratingN})` : ""}
                   {" "}· ✓{b.delivered} ✗{b.failed}
                   {b.delivered + b.failed > 0
                     ? ` · ${Math.round((b.delivered / (b.delivered + b.failed)) * 100)}%`
