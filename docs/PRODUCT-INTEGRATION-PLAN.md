@@ -180,7 +180,12 @@ Ordered roughly by leverage. Check off as landed.
 
 ### Group B — Off-chain product services (net-new)
 *Menu/cart, tracking, comms — the DoorDash "app" layer over the settlement rail.*
-- [ ] **Catalog / menu / cart** behind venue `metadataURI` (IPFS); resolve `orderValue` from a real cart
+- [x] **Catalog / menu / cart** behind venue `metadataURI` (IPFS); `orderValue`
+      from a real cart — `web/src/menu.ts` (model + publish/fetch, graceful local
+      fallback), `web/functions/api/menu.ts` (server-side IPFS proxy key),
+      `MenuEditor` (venue publishes), `MenuCart` + cart-driven `CreateOrder`
+      (customer). Needs the DATUM IPFS node stood up + `IPFS_ADD_URL`/`IPFS_API_KEY`
+      set; untested in-browser.
 - [ ] **Live order tracking**: status timeline + driver location relay + ETA (map trace)
 - [ ] **Messaging**: order-scoped driver↔customer (XMTP/libp2p), keyed to the order
 - [ ] **Notifications**: web-push for status changes, new offers, new bids
@@ -220,7 +225,7 @@ Ordered roughly by leverage. Check off as landed.
 | A5 | Vault: withdrawTo + dust claim | A | Wallet chip | ✅ done |
 | A6 | Reputation in bid cards | A | Customer view | ✅ done |
 | A7 | Dispute evidence + status view | A | Customer/Driver | ✅ done |
-| B1 | Catalog / menu / cart | B | New service + all views | ☐ todo |
+| B1 | Catalog / menu / cart | B | New service + all views | ✅ done |
 | B2 | Live tracking + ETA | B | Customer/Driver | ☐ todo |
 | B3 | Order-scoped messaging | B | Customer/Driver | ☐ todo |
 | B4 | Push notifications | B | Cross-cutting | ☐ todo |

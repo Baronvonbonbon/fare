@@ -41,6 +41,10 @@ import {
   sweepToMain,
 } from "./wallets";
 import { isAddress } from "ethers";
+import {
+  Menu, MenuItem, Cart, fetchMenu, cartTotal, cartCount,
+  emptyMenu, newItemId, publishMenu, hasMenuURI,
+} from "./menu";
 import { proveProximity, positionCommit } from "./zk";
 import { MicroDeg, distanceMeters, fmtCoord, fmtDist, getPosition, snapToGrid } from "./geo";
 import { QRScan, QRShow } from "./qr";
@@ -782,13 +786,65 @@ function CustomerView({ session, orders, venues, act, busy, signed, say, myLoc, 
   );
 }
 
+function MenuCart({ menu, cart, setCart }: { menu: Menu; cart: Cart; setCart: (c: Cart) => void }) {
+  const add = (id: string, d: number) => {
+    const q = Math.max(0, (cart[id] ?? 0) + d);
+    const next = { ...cart };
+    if (q === 0) delete next[id];
+    else next[id] = q;
+    setCart(next);
+  };
+  const avail = menu.items.filter((i) => i.available !== false);
+  return (
+    <div className="field">
+      <span>menu — {menu.name || "items"} {cartCount(cart) > 0 ? `· ${cartCount(cart)} in cart` : ""}</span>
+      {avail.length === 0 && <p className="hint">This venue hasn't published items yet.</p>}
+      {avail.map((item) => (
+        <div className="kv" key={item.id}>
+          <span className="k">
+            {item.name}
+            {item.desc ? <span className="hint"> · {item.desc}</span> : null}
+          </span>
+          <span className="v">
+            <span className="amount">{item.price} PAS </span>
+            {(cart[item.id] ?? 0) > 0 && (
+              <>
+                <button className="btn ghost small" type="button" onClick={() => add(item.id, -1)}>−</button>
+                <span className="mono"> {cart[item.id]} </span>
+              </>
+            )}
+            <button className="btn small" type="button" onClick={() => add(item.id, 1)}>+</button>
+          </span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function CreateOrder({ session, venues, act, busy, say, myLoc, locateMe }: any) {
   const [venueId, setVenueId] = useState("");
   const [pos, setPos] = useState<MicroDeg | null>(null);
   const [mapOpen, setMapOpen] = useState(false);
-  const [orderValue, setOrderValue] = useState("0");
+  const [orderValue, setOrderValue] = useState("0"); // manual fallback (no menu)
   const [tip, setTip] = useState("0");
   const [maxFare, setMaxFare] = useState("0.5");
+  const [menu, setMenu] = useState<Menu | null>(null);
+  const [cart, setCart] = useState<Cart>({});
+  const [menuLoading, setMenuLoading] = useState(false);
+
+  // Fetch the selected venue's off-chain menu (IPFS via metadataURI).
+  useEffect(() => {
+    setMenu(null);
+    setCart({});
+    const v = venues.find((x: VenueRow) => String(x.id) === venueId);
+    if (!v || !hasMenuURI(v.metadataURI)) return;
+    setMenuLoading(true);
+    fetchMenu(v.metadataURI).then(setMenu).catch(() => {}).finally(() => setMenuLoading(false));
+  }, [venueId]);
+
+  const menuDriven = !!menu && menu.items.length > 0;
+  const orderValueWei = menuDriven ? cartTotal(menu, cart) : parse(orderValue);
+
   // Nearest venues first when we know where the customer is.
   const active = venues
     .filter((v: VenueRow) => v.active)
@@ -809,7 +865,7 @@ function CreateOrder({ session, venues, act, busy, say, myLoc, locateMe }: any) 
           <option value="">— select —</option>
           {active.map(({ v, dist }: any) => (
             <option key={String(v.id)} value={String(v.id)}>
-              #{String(v.id)} · {v.metadataURI.replace(/^\w+:\/\//, "")}
+              #{String(v.id)} · {hasMenuURI(v.metadataURI) ? `Venue #${v.id}` : v.metadataURI.replace(/^\w+:\/\//, "")}
               {dist != null ? ` · ${fmtDist(dist)} away` : ` · ${fmtCoord({ lat: v.lat, lon: v.lon })}`}
             </option>
           ))}
@@ -835,16 +891,26 @@ function CreateOrder({ session, venues, act, busy, say, myLoc, locateMe }: any) 
           onCancel={() => setMapOpen(false)}
         />
       )}
-      <div className="row3">
-        <label className="field"><span>order value (PAS)</span>
-          <input value={orderValue} onChange={(e) => setOrderValue(e.target.value)} inputMode="decimal" /></label>
+      {menuLoading && <p className="hint">Loading menu…</p>}
+      {menuDriven && <MenuCart menu={menu!} cart={cart} setCart={setCart} />}
+
+      <div className={menuDriven ? "row3" : "row3"}>
+        {menuDriven ? (
+          <label className="field"><span>cart total</span>
+            <input value={`${fmt(orderValueWei)} PAS`} readOnly /></label>
+        ) : (
+          <label className="field"><span>order value (PAS)</span>
+            <input value={orderValue} onChange={(e) => setOrderValue(e.target.value)} inputMode="decimal" /></label>
+        )}
         <label className="field"><span>tip (PAS)</span>
           <input value={tip} onChange={(e) => setTip(e.target.value)} inputMode="decimal" /></label>
         <label className="field"><span>max fare (PAS)</span>
           <input value={maxFare} onChange={(e) => setMaxFare(e.target.value)} inputMode="decimal" /></label>
       </div>
       <p className="hint">
-        Order value 0 = pay the venue off-chain; the protocol then only escrows the delivery fare.
+        {menuDriven
+          ? "Cart total is escrowed for the venue; add a tip and set your delivery-fare ceiling."
+          : "Order value 0 = pay the venue off-chain; the protocol then only escrows the delivery fare."}
       </p>
       <div className="btn-row">
         <button className="btn" disabled={busy || !session || !venueId || !pos}
@@ -852,7 +918,7 @@ function CreateOrder({ session, venues, act, busy, say, myLoc, locateMe }: any) 
             const salt = randomSalt();
             const commit = computeDropCommit(pos!.lat, pos!.lon, salt);
             localStorage.setItem(dropStoreKey(commit), JSON.stringify({ lat: pos!.lat, lon: pos!.lon, salt }));
-            const escrow = parse(orderValue) + parse(tip);
+            const escrow = orderValueWei + parse(tip);
             act("Create order", async () => {
               // Fresh per-order identity, funded from the faucet so it links to
               // nothing (docs/PRIVACY.md risk #3). Wait for the drip to land
@@ -862,7 +928,7 @@ function CreateOrder({ session, venues, act, busy, say, myLoc, locateMe }: any) 
               await requestDrip(w.address);
               await waitForFunding(w.address, escrow + parse("0.2"));
               return contracts(w).orders.createOrder(
-                BigInt(venueId), commit, parse(orderValue), parse(tip), parse(maxFare), 0, 0,
+                BigInt(venueId), commit, orderValueWei, parse(tip), parse(maxFare), 0, 0,
                 { value: escrow }
               );
             });
@@ -1438,7 +1504,60 @@ function VenueManage({ v, act, busy, signed, say }: any) {
             onConfirm={(m) => { setPos(m); setMapOpen(false); }} onCancel={() => setMapOpen(false)} />
         )}
       </details>
+      <MenuEditor {...{ v, act, busy, signed, say }} />
     </div>
+  );
+}
+
+function MenuEditor({ v, act, busy, signed, say }: any) {
+  const [menu, setMenu] = useState<Menu | null>(null);
+  const [name, setName] = useState("");
+  const [price, setPrice] = useState("");
+  const [desc, setDesc] = useState("");
+  useEffect(() => {
+    fetchMenu(v.metadataURI)
+      .then((m) => setMenu(m ?? emptyMenu(v.metadataURI?.replace(/^\w+:\/\//, "") ?? "")))
+      .catch(() => setMenu(emptyMenu()));
+  }, [v.metadataURI]);
+  if (!menu) return null;
+
+  const addItem = () => {
+    if (!name || !price) return say("Item needs a name and price", true);
+    setMenu({ ...menu, items: [...menu.items, { id: newItemId(), name, price, desc: desc || undefined, available: true }] });
+    setName(""); setPrice(""); setDesc("");
+  };
+  const removeItem = (id: string) => setMenu({ ...menu, items: menu.items.filter((i: MenuItem) => i.id !== id) });
+  const publish = async () => {
+    try {
+      const { uri, shared } = await publishMenu(menu);
+      await act("Publish menu", () => signed.venues.setMetadata(v.id, uri));
+      say(shared ? "Menu published to IPFS ✓" : "Menu saved locally (IPFS not configured — single device only)", !shared);
+    } catch (e: any) {
+      say(e?.message ?? String(e), true);
+    }
+  };
+
+  return (
+    <details className="payload-details">
+      <summary>menu · {menu.items.length} items</summary>
+      <label className="field"><span>menu name</span>
+        <input value={menu.name} onChange={(e) => setMenu({ ...menu, name: e.target.value })} /></label>
+      {menu.items.map((it: MenuItem) => (
+        <div className="kv" key={it.id}>
+          <span className="k">{it.name} <span className="hint">· {it.price} PAS{it.desc ? ` · ${it.desc}` : ""}</span></span>
+          <span className="v"><button className="btn ghost small" type="button" onClick={() => removeItem(it.id)}>remove</button></span>
+        </div>
+      ))}
+      <div className="btn-row" style={{ flexWrap: "wrap" }}>
+        <input style={{ flex: 2, minWidth: 110 }} placeholder="item name" value={name} onChange={(e) => setName(e.target.value)} />
+        <input style={{ flex: 1, minWidth: 60 }} placeholder="PAS" value={price} onChange={(e) => setPrice(e.target.value)} inputMode="decimal" />
+        <button className="btn small" type="button" onClick={addItem}>Add</button>
+      </div>
+      <input style={{ width: "100%", marginTop: 6 }} placeholder="description (optional)" value={desc} onChange={(e) => setDesc(e.target.value)} />
+      <div className="btn-row" style={{ marginTop: 6 }}>
+        <button className="btn" disabled={busy} onClick={publish}>Publish menu</button>
+      </div>
+    </details>
   );
 }
 

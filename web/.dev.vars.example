@@ -1,0 +1,19 @@
+# Cloudflare Pages Functions local secrets — copy to web/.dev.vars (gitignored).
+# In production these live in Cloudflare Pages → Settings → Environment variables.
+
+# --- Burner gas faucet (/api/drip) ---
+DRIP_PRIVATE_KEY=
+# DRIP_AMOUNT_PAS=5
+# DRIP_MIN_PAS=2
+
+# --- Menu publishing to IPFS (/api/menu) ---
+# The DATUM IPFS upload proxy /add endpoint + its Bearer token. Until both are
+# set, /api/menu returns { configured:false } and the app falls back to
+# device-local menu storage (single device only).
+IPFS_ADD_URL=https://ipfs.datum.javcon.io/add
+IPFS_API_KEY=
+
+# --- Build-time (Vite) env, set in the build environment, NOT here ---
+# VITE_IPFS_GATEWAY  — read gateway with trailing /ipfs/, e.g.
+#   https://ipfs.datum.javcon.io/ipfs/
+# Menu reads try this first, then public gateways (ipfs.io, dweb.link).
