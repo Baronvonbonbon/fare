@@ -193,7 +193,9 @@ Ordered roughly by leverage. Check off as landed.
       per-order scoped, 5 tests). Relay/transport deferred — see [MESSAGING.md](MESSAGING.md)
 - [ ] **Notifications**: web-push for status changes, new offers, new bids
 - [x] **Ratings**: on-chain verified-delivery stars (`FareRatings`) — gated to the Delivered order's customer, one per order; rate widget in history + driver rating in bid cards
-- [ ] Proof-of-delivery photo + "leave at door" option
+- 🟡 Proof-of-delivery photo — ephemeral sealing layer done (`web/src/photo.ts` —
+      crypto-shred: random-key AES-GCM, key wrapped over msg.ts; 4 tests). Storage
+      (Bulletin Chain ~2wk TTL / IPFS) + capture UI + submitter deferred — see [PHOTOS.md](PHOTOS.md)
 - [x] Order history / receipts / reorder — `OrderReceipt` (local cart snapshot +
       on-chain amounts), active/past split with a collapsible history section,
       one-tap `HistoryCard` reorder (fresh wallet, same venue/cart/drop). Receipts
@@ -236,7 +238,7 @@ Ordered roughly by leverage. Check off as landed.
 | B3 | Order-scoped messaging | B | Customer/Driver | 🟡 partial |
 | B4 | Push notifications | B | Cross-cutting | ☐ todo |
 | B5 | Ratings (stars) | B | Post-delivery | ✅ done |
-| B6 | Proof-of-delivery photo | B | Driver view | ☐ todo |
+| B6 | Proof-of-delivery photo | B | Driver view | 🟡 partial |
 | B7 | History / receipts / reorder | B | Customer view | ✅ done |
 | C1 | Gasless meta-tx relay | C | Infra + all views | ☐ todo |
 | C2 | Fiat pricing (oracle) | C | Checkout | ☐ todo |
