@@ -32,7 +32,14 @@ import {
   signLocation,
   signDriverCommit,
   syncAddressesFromRouter,
+  waitForFunding,
 } from "./chain";
+import {
+  newOrderWallet,
+  orderWalletAddresses,
+  contractsForOrder,
+  sweepToMain,
+} from "./wallets";
 import { proveProximity, positionCommit } from "./zk";
 import { MicroDeg, distanceMeters, fmtCoord, fmtDist, getPosition, snapToGrid } from "./geo";
 import { QRScan, QRShow } from "./qr";
@@ -229,8 +236,11 @@ export default function App() {
       const getCreated = async () => (created ??= await discoverOrders(from, latest));
 
       try {
-        if (role === "customer" && me) {
-          add((await getCreated()).filter((d) => d.customer.toLowerCase() === me).map((d) => d.id));
+        if (role === "customer") {
+          // A customer's orders now span many per-order wallets, not one
+          // address — match against the local wallet registry.
+          const mineAddrs = orderWalletAddresses();
+          add((await getCreated()).filter((d) => mineAddrs.has(d.customer.toLowerCase())).map((d) => d.id));
         } else if (role === "venue" && me) {
           add((await getCreated()).filter((d) => myVenueIds.has(String(d.venueId))).map((d) => d.id));
         } else if (role === "driver") {
@@ -646,22 +656,56 @@ function GeoPill({ pos }: { pos: MicroDeg | null }) {
 // ---------- customer ----------
 
 function CustomerView({ session, orders, venues, act, busy, signed, say, myLoc, locateMe }: any) {
-  const mine = orders.filter((o: OrderRow) => session && o.customer.toLowerCase() === session.address.toLowerCase());
+  // Orders span many per-order wallets (privacy). Match on the local registry
+  // rather than a single session address.
+  const mineAddrs = orderWalletAddresses();
+  const mine = orders.filter((o: OrderRow) => mineAddrs.has(o.customer.toLowerCase()));
+  const [sweeping, setSweeping] = useState(false);
+
+  async function sweep() {
+    if (!session) return say("Connect a wallet first", true);
+    if (!confirm("Sweep refunds to your main wallet? This links your per-order wallets together on-chain.")) return;
+    setSweeping(true);
+    try {
+      const steps = await sweepToMain(session.address);
+      const swept = steps.reduce((n, s) => n + (s.swept ?? 0n), 0n);
+      const errs = steps.filter((s) => s.error).length;
+      say(`Swept ${fmt(swept)} PAS to ${short(session.address)}${errs ? ` (${errs} wallet(s) failed)` : ""}`);
+    } catch (e: any) {
+      say(e?.message ?? String(e), true);
+    } finally {
+      setSweeping(false);
+    }
+  }
+
   return (
     <>
-      <CreateOrder {...{ session, venues, act, busy, signed, say, myLoc, locateMe }} />
-      <div className="section-note">my orders</div>
+      <CreateOrder {...{ session, venues, act, busy, say, myLoc, locateMe }} />
+      <div className="section-note">
+        my orders
+        <span className="hint" style={{ display: "block", fontWeight: 400 }}>
+          Each order uses a fresh, faucet-funded wallet — consecutive orders can't be linked on-chain.
+        </span>
+      </div>
       {mine.length === 0 && (
         <div className="empty"><span className="dots">· · ·</span>No orders yet — place one above.</div>
       )}
       {mine.map((o: OrderRow) => (
-        <CustomerOrder key={String(o.id)} {...{ o, venues, act, busy, signed, session, say }} />
+        <CustomerOrder key={String(o.id)} {...{ o, venues, act, busy, session, say }} />
       ))}
+      {mine.length > 0 && (
+        <div className="btn-row" style={{ marginTop: 12 }}>
+          <button className="btn ghost small" disabled={busy || sweeping} onClick={sweep}>
+            {sweeping ? "Sweeping…" : "Sweep refunds → main wallet"}
+          </button>
+          <span className="hint">⚠ links your per-order wallets together</span>
+        </div>
+      )}
     </>
   );
 }
 
-function CreateOrder({ session, venues, act, busy, signed, say, myLoc, locateMe }: any) {
+function CreateOrder({ session, venues, act, busy, say, myLoc, locateMe }: any) {
   const [venueId, setVenueId] = useState("");
   const [pos, setPos] = useState<MicroDeg | null>(null);
   const [mapOpen, setMapOpen] = useState(false);
@@ -731,12 +775,20 @@ function CreateOrder({ session, venues, act, busy, signed, say, myLoc, locateMe 
             const salt = randomSalt();
             const commit = computeDropCommit(pos!.lat, pos!.lon, salt);
             localStorage.setItem(dropStoreKey(commit), JSON.stringify({ lat: pos!.lat, lon: pos!.lon, salt }));
-            act("Create order", () =>
-              signed.orders.createOrder(
+            const escrow = parse(orderValue) + parse(tip);
+            act("Create order", async () => {
+              // Fresh per-order identity, funded from the faucet so it links to
+              // nothing (docs/PRIVACY.md risk #3). Wait for the drip to land
+              // before escrowing the order value from it.
+              const w = newOrderWallet();
+              say("New private wallet — funding from faucet…");
+              await requestDrip(w.address);
+              await waitForFunding(w.address, escrow + parse("0.2"));
+              return contracts(w).orders.createOrder(
                 BigInt(venueId), commit, parse(orderValue), parse(tip), parse(maxFare), 0, 0,
-                { value: parse(orderValue) + parse(tip) }
-              )
-            );
+                { value: escrow }
+              );
+            });
           }}>
           Open for bids
         </button>
@@ -745,9 +797,23 @@ function CreateOrder({ session, venues, act, busy, signed, say, myLoc, locateMe 
   );
 }
 
-function CustomerOrder({ o, venues, act, busy, signed, session, say }: any) {
+function CustomerOrder({ o, venues, act, busy, session, say }: any) {
   const [payload, setPayload] = useState("");
   const [scanning, setScanning] = useState(false);
+  // Every action on this order (cancel, tip, accept, confirm) must come from the
+  // per-order wallet that created it — the contract checks msg.sender == customer.
+  const os = contractsForOrder(o.customer);
+  const orphaned = !os; // wallet not on this device (e.g. different browser)
+
+  async function topUp() {
+    try {
+      say("Topping up this order's wallet from the faucet…");
+      const r = await requestDrip(o.customer);
+      say(r.funded ? "Topped up ✓" : r.reason === "sufficient" ? "Already funded" : "Faucet unavailable", !r.funded && r.reason !== "sufficient");
+    } catch (e: any) {
+      say(e?.message ?? String(e), true);
+    }
+  }
 
   // ZK dropoff: scan the driver's signed position code, then prove — entirely
   // on this device — that the driver is within the drop radius of our committed
@@ -775,8 +841,9 @@ function CustomerOrder({ o, venues, act, busy, signed, session, say }: any) {
       if (BigInt(att.posCommit) !== pubSignals[2]) {
         throw new Error("Driver's signed position doesn't match the shared coordinates");
       }
+      if (!os) throw new Error("This order's wallet isn't on this device");
       await act("Confirm delivery", () =>
-        signed.settlement.confirmDropoffZK(att, sig, proof, pubSignals)
+        os.settlement.confirmDropoffZK(att, sig, proof, pubSignals)
       );
       say("Delivery confirmed — fare released 🎉");
     } catch (e: any) {
@@ -792,6 +859,18 @@ function CustomerOrder({ o, venues, act, busy, signed, session, say }: any) {
         <span className={`badge ${badgeClass(o.status)}`}>{STATUS[o.status]}</span>
       </div>
       <OrderMeta o={o} venues={venues} />
+      <div className="kv">
+        <span className="k">private wallet</span>
+        <span className="v mono" title={o.customer}>
+          {short(o.customer)}
+          {!orphaned && o.status !== 4 && o.status !== 5 && (
+            <button className="link-btn" type="button" disabled={busy} onClick={topUp}> · ⛽ top up</button>
+          )}
+        </span>
+      </div>
+      {orphaned && (
+        <p className="hint">⚠ This order was placed from another device — its wallet isn't here, so you can't act on it.</p>
+      )}
 
       {o.status === 1 && (
         <>
@@ -802,28 +881,28 @@ function CustomerOrder({ o, venues, act, busy, signed, session, say }: any) {
               <span className="k mono">{short(b.addr)}</span>
               <span className="v">
                 <span className="amount">{fmt(b.amount)} PAS </span>
-                <button className="btn small" disabled={busy}
-                  onClick={() => act("Accept bid", () => signed.orders.acceptBid(o.id, b.addr, { value: b.amount }))}>
+                <button className="btn small" disabled={busy || orphaned}
+                  onClick={() => act("Accept bid", () => os!.orders.acceptBid(o.id, b.addr, { value: b.amount }))}>
                   Accept
                 </button>
               </span>
             </div>
           ))}
           <div className="btn-row">
-            <button className="btn danger small" disabled={busy}
-              onClick={() => act("Cancel order", () => signed.orders.cancelOpen(o.id))}>Cancel</button>
+            <button className="btn danger small" disabled={busy || orphaned}
+              onClick={() => act("Cancel order", () => os!.orders.cancelOpen(o.id))}>Cancel</button>
           </div>
         </>
       )}
 
       {o.status === 2 && (
         <div className="btn-row">
-          <button className="btn danger small" disabled={busy}
-            onClick={() => act("Cancel", () => signed.orders.cancelAssigned(o.id))}>
+          <button className="btn danger small" disabled={busy || orphaned}
+            onClick={() => act("Cancel", () => os!.orders.cancelAssigned(o.id))}>
             Cancel (driver keeps a cut pre-deadline)
           </button>
-          <button className="btn ghost small" disabled={busy}
-            onClick={() => act("Open dispute", () => signed.disputes.openDispute(o.id, ""))}>Dispute</button>
+          <button className="btn ghost small" disabled={busy || orphaned}
+            onClick={() => act("Open dispute", () => os!.disputes.openDispute(o.id, ""))}>Dispute</button>
         </div>
       )}
 
@@ -848,12 +927,12 @@ function CustomerOrder({ o, venues, act, busy, signed, session, say }: any) {
               placeholder="…or paste code" />
           </label>
           <div className="btn-row">
-            <button className="btn" disabled={busy || !payload || !session}
+            <button className="btn" disabled={busy || !payload || !session || orphaned}
               onClick={() => confirmDelivery(payload)}>
               Confirm delivery
             </button>
-            <button className="btn ghost small" disabled={busy}
-              onClick={() => act("Open dispute", () => signed.disputes.openDispute(o.id, ""))}>Dispute</button>
+            <button className="btn ghost small" disabled={busy || orphaned}
+              onClick={() => act("Open dispute", () => os!.disputes.openDispute(o.id, ""))}>Dispute</button>
           </div>
         </>
       )}
