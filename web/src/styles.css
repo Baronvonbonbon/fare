@@ -93,36 +93,9 @@ body::before {
   user-select: none;
 }
 
+/* Wordmark: FARE with a pink dot at the end. */
 .logo .dot {
   color: var(--pink);
-}
-
-/* The R reads as a dotted "i": a pink bar over its left vertical stem plus a
-   pink dot above — FARE, stylised FAiRE. Values are em-relative to the glyph;
-   nudge left/width/height if the bar drifts off the stem in your font. */
-.logo-r {
-  position: relative;
-  display: inline-block;
-}
-.logo-r .i-mark {
-  position: absolute;
-  left: 0.13em;
-  bottom: 0.20em;
-  width: 0.30em;
-  height: 0.54em;
-  background: var(--pink);
-  border-radius: 1px;
-}
-.logo-r .i-mark::before {
-  content: "";
-  position: absolute;
-  left: 50%;
-  top: -0.34em;
-  transform: translateX(-50%);
-  width: 0.26em;
-  height: 0.26em;
-  border-radius: 50%;
-  background: var(--pink);
 }
 
 .logo small {
