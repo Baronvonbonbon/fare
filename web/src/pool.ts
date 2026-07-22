@@ -21,6 +21,7 @@
 export interface ServiceEndpoints {
   ipfsGateway?: string;
   rpcUrl?: string;
+  relayUrl?: string; // a region's gasless relay (venue-node/relay.mjs) — F8 discovery
 }
 
 /// Anything that may advertise services: a menu JSON or a region manifest.
@@ -30,6 +31,7 @@ export interface WithServices {
 
 const GW_KEY = "fare.pool.gateways";
 const RPC_KEY = "fare.pool.rpcs";
+const RELAY_KEY = "fare.pool.relays";
 const MAX = 20; // cap the pool so a hostile manifest can't grow it unbounded
 
 /// Only https endpoints — an http URL would fail as mixed content on the PWA,
@@ -83,6 +85,7 @@ export function learnFromManifest(m: WithServices | null | undefined): boolean {
   let grew = false;
   if (isSafeUrl(s.ipfsGateway)) grew = merge(GW_KEY, [normGateway(s.ipfsGateway)]) || grew;
   if (isSafeUrl(s.rpcUrl)) grew = merge(RPC_KEY, [s.rpcUrl]) || grew;
+  if (isSafeUrl(s.relayUrl)) grew = merge(RELAY_KEY, [s.relayUrl.replace(/\/$/, "")]) || grew;
   return grew;
 }
 
@@ -97,8 +100,16 @@ export function rpcPool(): string[] {
   return load(RPC_KEY);
 }
 
+/// Discovered region gasless relays (trailing-slash trimmed). Safe to prefer: a
+/// relay can only pay gas / forward a user-signed request — the forwarder verifies
+/// the signature, so a bad relay can't act as the user or move funds (F8).
+export function relayPool(): string[] {
+  return load(RELAY_KEY);
+}
+
 /// Test/utility: forget every discovered endpoint.
 export function clearPool(): void {
   localStorage.removeItem(GW_KEY);
   localStorage.removeItem(RPC_KEY);
+  localStorage.removeItem(RELAY_KEY);
 }

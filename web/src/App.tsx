@@ -46,7 +46,7 @@ import {
   emptyMenu, newItemId, publishMenu, hasMenuURI,
 } from "./menu";
 import { proveProximity, positionCommit } from "./zk";
-import { sponsorGas, relaySettle, relayForward, ensureGas } from "./relay";
+import { sponsorGas, relaySettle, relayForward, relayWithdraw, ensureGas } from "./relay";
 import { MicroDeg, distanceMeters, fmtCoord, fmtDist, getPosition, snapToGrid } from "./geo";
 import { QRScan, QRShow } from "./qr";
 import { VenuePin } from "./map";
@@ -780,12 +780,12 @@ function VaultStrip({ vaultBal, pendingDust, busy, act, signed, say }: any) {
       </div>
       <div className="btn-row" style={{ flexWrap: "wrap" }}>
         <button className="btn small" disabled={busy || vaultBal === 0n}
-          onClick={() => act("Withdraw", () => signed!.vault.withdraw())}>Withdraw</button>
+          onClick={() => act("Withdraw", () => relayWithdraw(signed!.vault))}>Withdraw</button>
         <button className="btn ghost small" disabled={busy || vaultBal === 0n}
           onClick={() => {
             const to = cold.trim();
             if (!isAddress(to)) return say("Enter a valid cold-wallet address", true);
-            act("Withdraw to cold wallet", () => signed!.vault.withdrawTo(to));
+            act("Withdraw to cold wallet", () => relayWithdraw(signed!.vault, to));
           }}>→ cold wallet</button>
         {pendingDust > 0n && (
           <button className="btn ghost small" disabled={busy}

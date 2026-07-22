@@ -72,6 +72,15 @@ const FORWARDER_ABI = [
 const forwarder = forwarderAddr ? new Contract(forwarderAddr, FORWARDER_ABI, relay) : null;
 const GAS_FORWARD = 700_000n; // outer gas for execute(); request.gas caps the inner call
 
+// ── Gasless withdraw (F8): relay submits a driver-signed FareVault.withdrawFor ─
+// The relay is msg.sender, so a configured withdrawFeeBps reimburses its gas.
+const vaultAddr = process.env.VAULT_ADDRESS || addr.vault;
+const VAULT_ABI = [
+  "function withdrawFor(address account, address recipient, uint256 deadline, bytes signature)",
+];
+const vault = vaultAddr ? new Contract(vaultAddr, VAULT_ABI, relay) : null;
+const GAS_WITHDRAW = 200_000n;
+
 // ── tx serialization: chain all sends so concurrent requests don't collide on
 //    the relay account's nonce ──────────────────────────────────────────────
 let chain = Promise.resolve();
@@ -167,6 +176,19 @@ const server = http.createServer(async (req, res) => {
       return send(res, 200, { forwarded: true, txHash: tx.hash, from: request.from }, origin);
     }
 
+    // ── Relay a gasless withdrawal (F8) ──────────────────────────────────────
+    if (req.method === "POST" && url.pathname === "/withdraw") {
+      if (!vault) return send(res, 503, { error: "vault not configured" }, origin);
+      const { account, recipient, deadline, signature } = await readJson(req);
+      if (!isAddress(account) || !isAddress(recipient)) return send(res, 400, { error: "bad address" }, origin);
+      if (typeof signature !== "string") return send(res, 400, { error: "missing signature" }, origin);
+      const tx = await serialize(async () => {
+        const nonce = await provider.getTransactionCount(relay.address);
+        return vault.withdrawFor(account, recipient, deadline, signature, { gasLimit: GAS_WITHDRAW, nonce });
+      });
+      return send(res, 200, { withdrawn: true, txHash: tx.hash, account }, origin);
+    }
+
     return send(res, 404, { error: "not found" }, origin);
   } catch (e) {
     return send(res, 500, { error: e?.shortMessage ?? e?.message ?? String(e) }, origin);
@@ -179,4 +201,5 @@ server.listen(PORT, () => {
   console.log(`[relay] settlement:    ${settlementAddr}`);
   console.log(`[relay] relayable:     ${[...RELAYABLE].join(", ")}`);
   console.log(`[relay] forwarder:     ${forwarderAddr ?? "(none — /forward disabled)"}`);
+  console.log(`[relay] vault:         ${vaultAddr ?? "(none — /withdraw disabled)"}`);
 });

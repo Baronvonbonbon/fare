@@ -50,6 +50,31 @@ async function signForwardRequest(
   return { from: req.from, to: req.to, value: req.value, gas: req.gas, deadline: req.deadline, data, signature };
 }
 
+// Sign a FareVault EIP-712 Withdraw authorization so a relay can submit
+// withdrawFor on the account's behalf (gasless earnings, F8).
+async function signWithdraw(
+  vault: any,
+  signer: HardhatEthersSigner,
+  account: string,
+  recipient: string,
+  nonce: bigint,
+  deadline: bigint
+) {
+  const chainId = (await ethers.provider.getNetwork()).chainId;
+  return signer.signTypedData(
+    { name: "FareVault", version: "1", chainId, verifyingContract: vault.target as string },
+    {
+      Withdraw: [
+        { name: "account", type: "address" },
+        { name: "recipient", type: "address" },
+        { name: "nonce", type: "uint256" },
+        { name: "deadline", type: "uint256" },
+      ],
+    },
+    { account, recipient, nonce, deadline }
+  );
+}
+
 const abi = ethers.AbiCoder.defaultAbiCoder();
 
 // Opaque drop commitment for the lifecycle tests. The real protocol commit is
@@ -481,6 +506,75 @@ describe("FARE protocol", () => {
       req.from = f.driver1.address;
       await expect(f.forwarder.connect(f.deployer).execute(req)).to.be.reverted;
       expect(await f.orders.bidOf(1n, f.driver1.address)).to.equal(0n);
+    });
+  });
+
+  describe("gasless withdraw (F8)", () => {
+    async function deliverToDriver(f: Awaited<ReturnType<typeof deployAll>>) {
+      const { orderId, fare } = await createAndAssign(f);
+      await confirmPickupOk(f, orderId, f.driver2);
+      await confirmDropoffOk(f, orderId, f.driver2);
+      const fee = (fare * 250n) / 10_000n;
+      return fare - fee + TIP; // driver2's resulting vault balance
+    }
+
+    it("withdrawFor: relay pays gas, driver gets balance minus fee, relay keeps the fee", async () => {
+      const f = await loadFixture(deployAll);
+      const bal = await deliverToDriver(f);
+      expect(await f.vault.balanceOf(f.driver2.address)).to.equal(bal);
+
+      await expect(f.vault.setWithdrawFeeBps(100)).to.emit(f.vault, "WithdrawFeeSet").withArgs(100); // 1%
+      const relayFee = (bal * 100n) / 10_000n;
+      const toDriver = bal - relayFee;
+
+      const nonce = await f.vault.withdrawNonce(f.driver2.address);
+      const deadline = BigInt(await time.latest()) + 3600n;
+      const sig = await signWithdraw(f.vault, f.driver2, f.driver2.address, f.driver2.address, nonce, deadline);
+
+      // `stranger` is the relay (msg.sender) — it pays gas; driver2 holds none.
+      const tx = f.vault.connect(f.stranger).withdrawFor(f.driver2.address, f.driver2.address, deadline, sig);
+      await expect(tx)
+        .to.emit(f.vault, "Withdrawn").withArgs(f.driver2.address, f.driver2.address, toDriver);
+      await expect(tx).to.changeEtherBalance(f.driver2, toDriver);
+
+      expect(await f.vault.balanceOf(f.driver2.address)).to.equal(0n);
+      expect(await f.vault.balanceOf(f.stranger.address)).to.equal(relayFee); // relay's accrued fee
+      expect(await f.vault.withdrawNonce(f.driver2.address)).to.equal(nonce + 1n);
+    });
+
+    it("withdrawFor is free by default (0 fee) and the fee is capped + owner-gated", async () => {
+      const f = await loadFixture(deployAll);
+      expect(await f.vault.withdrawFeeBps()).to.equal(0);
+      await expect(f.vault.setWithdrawFeeBps(1001)).to.be.revertedWith("fee-too-high");
+      await expect(f.vault.connect(f.stranger).setWithdrawFeeBps(100))
+        .to.be.revertedWithCustomError(f.vault, "OwnableUnauthorizedAccount");
+    });
+
+    it("withdrawFor rejects a wrong signer, an expired deadline, and a replay", async () => {
+      const f = await loadFixture(deployAll);
+      await deliverToDriver(f);
+      const nonce = await f.vault.withdrawNonce(f.driver2.address);
+      const deadline = BigInt(await time.latest()) + 3600n;
+
+      // someone else signs but claims driver2's balance → bad-sig
+      const forged = await signWithdraw(f.vault, f.stranger, f.driver2.address, f.driver2.address, nonce, deadline);
+      await expect(
+        f.vault.connect(f.stranger).withdrawFor(f.driver2.address, f.driver2.address, deadline, forged)
+      ).to.be.revertedWith("bad-sig");
+
+      // expired deadline
+      const past = BigInt(await time.latest()) - 1n;
+      const expiredSig = await signWithdraw(f.vault, f.driver2, f.driver2.address, f.driver2.address, nonce, past);
+      await expect(
+        f.vault.connect(f.stranger).withdrawFor(f.driver2.address, f.driver2.address, past, expiredSig)
+      ).to.be.revertedWith("expired");
+
+      // valid once, then a replay of the same signature fails (nonce consumed)
+      const sig = await signWithdraw(f.vault, f.driver2, f.driver2.address, f.driver2.address, nonce, deadline);
+      await f.vault.connect(f.stranger).withdrawFor(f.driver2.address, f.driver2.address, deadline, sig);
+      await expect(
+        f.vault.connect(f.stranger).withdrawFor(f.driver2.address, f.driver2.address, deadline, sig)
+      ).to.be.revertedWith("bad-sig");
     });
   });
 

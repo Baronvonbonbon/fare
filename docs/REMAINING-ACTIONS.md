@@ -49,9 +49,16 @@ infra/UI, spec'd in the linked design note.
   (createOrder / acceptBid / increaseTip) stay on the gas-sponsored funded-burner
   path so the relay never fronts escrow. **PWA wired** (`web/src/relay.ts`
   `relayForward` — the app signs a `ForwardRequest` and posts it to `/forward`
-  when a forwarder is deployed + `VITE_RELAY_URL` is set, else falls back to
-  direct calls). Remaining: **run it** against a live deploy that includes
-  `FareForwarder`. See [NETWORK-ARCHITECTURE.md](NETWORK-ARCHITECTURE.md).
+  when a forwarder is deployed + a relay is available, else falls back to direct
+  calls). **Relay discovery:** the agent advertises `services.relayUrl` in its
+  region manifest (`PUBLIC_RELAY`); the client learns a relay pool and prefers the
+  discovered region relay over the build-time `VITE_RELAY_URL` (DATUM `relayUrl`
+  pattern). **Gasless earnings:** `FareVault.withdrawFor` (driver-signed, relay-
+  submitted, `withdrawFeeBps` reimburses the relay) lets a driver cash out with
+  zero gas — `relayWithdraw` in the app + `/withdraw` on the relay. Remaining:
+  **run it** against a live deploy that includes `FareForwarder` **and** the new
+  `FareVault` (see the vault-migration note below).
+  See [NETWORK-ARCHITECTURE.md](NETWORK-ARCHITECTURE.md).
 
 ---
 

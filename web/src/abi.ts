@@ -63,6 +63,9 @@ export const VAULT_ABI = [
   "function balanceOf(address) view returns (uint256)",
   "function withdraw()",
   "function withdrawTo(address recipient)",
+  // gasless withdraw (F8): driver signs, relay submits withdrawFor
+  "function withdrawNonce(address) view returns (uint256)",
+  "function withdrawFor(address account, address recipient, uint256 deadline, bytes signature)",
   "function pendingPaseoDust(address) view returns (uint256)",
   "function claimPaseoDust()",
 ];

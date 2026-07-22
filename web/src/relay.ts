@@ -7,23 +7,33 @@
 
 import { ethers } from "ethers";
 import { requestDrip, sendProvider, readProvider, nativeBalance, CHAIN_ID, ADDRESSES, type DripResult } from "./chain";
+import { relayPool } from "./pool";
 
-const RELAY_URL = ((import.meta as any).env?.VITE_RELAY_URL as string | undefined)?.replace(/\/$/, "");
+const ENV_RELAY_URL = ((import.meta as any).env?.VITE_RELAY_URL as string | undefined)?.replace(/\/$/, "");
 
-export function relayConfigured(): boolean {
-  return !!RELAY_URL;
+/// The relay to use: a region relay discovered from a venue manifest (the DATUM
+/// `manifest.relayUrl` pattern) takes precedence, with the build-time
+/// VITE_RELAY_URL as the anchor/fallback. So relay location is discoverable and
+/// region-scoped, not hardcoded — a venue advertising `services.relayUrl` serves
+/// its region's customers automatically.
+export function activeRelayUrl(): string | undefined {
+  return relayPool()[0] ?? ENV_RELAY_URL;
 }
 
-/// Gasless meta-txs (F8) are possible only when a relay is configured AND the
+export function relayConfigured(): boolean {
+  return !!activeRelayUrl();
+}
+
+/// Gasless meta-txs (F8) are possible only when a relay is available AND the
 /// deployment has an EIP-2771 forwarder in the address book. Pre-forwarder
 /// deployments (or no relay) simply fall back to direct, gas-paying calls.
 export function forwarderAvailable(): boolean {
-  return !!RELAY_URL && !!ADDRESSES.forwarder;
+  return !!activeRelayUrl() && !!ADDRESSES.forwarder;
 }
 
 /// Ask the venue relay to sponsor gas for `address`.
 async function relayFund(address: string): Promise<DripResult> {
-  const res = await fetch(`${RELAY_URL}/fund`, {
+  const res = await fetch(`${activeRelayUrl()}/fund`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ address }),
@@ -51,7 +61,7 @@ export async function ensureGas(address: string, minWei: bigint): Promise<boolea
 /// Sponsor gas for `address`: venue relay first, central faucet as fallback.
 /// Returns the same shape as requestDrip so existing call sites are unchanged.
 export async function sponsorGas(address: string): Promise<DripResult> {
-  if (RELAY_URL) {
+  if (activeRelayUrl()) {
     try {
       const r = await relayFund(address);
       // A definitive answer (funded / already-sufficient) short-circuits the faucet.
@@ -66,7 +76,7 @@ export async function sponsorGas(address: string): Promise<DripResult> {
 /// Submit a relayable settlement call. Only confirmPickup / confirmDropoffZK are
 /// relayable (the relay enforces this too). Returns the tx hash.
 async function relaySubmit(method: "confirmPickup" | "confirmDropoffZK", args: any[]): Promise<string> {
-  const res = await fetch(`${RELAY_URL}/submit`, {
+  const res = await fetch(`${activeRelayUrl()}/submit`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     // BigInt (e.g. ZK pubSignals) isn't JSON-serializable — stringify them.
@@ -129,7 +139,7 @@ async function buildForwardRequest(signer: any, to: string, data: string) {
 }
 
 async function relayForwardSubmit(request: any): Promise<string> {
-  const res = await fetch(`${RELAY_URL}/forward`, {
+  const res = await fetch(`${activeRelayUrl()}/forward`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ request }),
@@ -157,4 +167,50 @@ export async function relayForward(
     return { hash, wait: () => sendProvider.waitForTransaction(hash) };
   }
   return contract[method](...args); // direct funded-burner path
+}
+
+// ── gasless withdraw (F8) ────────────────────────────────────────────────────
+// A driver signs a FareVault Withdraw authorization; the relay submits
+// withdrawFor() and keeps withdrawFeeBps as gas reimbursement — earnings out
+// with zero gas held (DATUM settleClaimsFor shape). Gated on forwarderAvailable()
+// as the F8-deployment signal (the withdrawFor vault ships with the forwarder);
+// pre-F8 deployments fall back to a direct, gas-paying withdraw.
+
+const WITHDRAW_TYPES = {
+  Withdraw: [
+    { name: "account", type: "address" },
+    { name: "recipient", type: "address" },
+    { name: "nonce", type: "uint256" },
+    { name: "deadline", type: "uint256" },
+  ],
+};
+
+/// Withdraw the caller's full vault balance to `recipient` (defaults to self).
+/// `vaultContract` is the signer-bound FareVault handle (its runner signs +
+/// reads the nonce, and is the direct-call fallback).
+export async function relayWithdraw(
+  vaultContract: any,
+  recipient?: string
+): Promise<{ hash?: string; wait: () => Promise<any> }> {
+  const signer = vaultContract.runner;
+  const account: string = await signer.getAddress();
+  const to = recipient ?? account;
+  if (forwarderAvailable()) {
+    const nonce: bigint = await vaultContract.withdrawNonce(account);
+    const deadline = Math.floor(Date.now() / 1000) + 3600;
+    const signature = await signer.signTypedData(
+      { name: "FareVault", version: "1", chainId: CHAIN_ID, verifyingContract: ADDRESSES.vault },
+      WITHDRAW_TYPES,
+      { account, recipient: to, nonce, deadline }
+    );
+    const res = await fetch(`${activeRelayUrl()}/withdraw`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ account, recipient: to, deadline, signature }),
+    });
+    const j = (await res.json().catch(() => ({}))) as { txHash?: string; error?: string };
+    if (!res.ok || !j.txHash) throw new Error(j.error ?? "relay withdraw failed");
+    return { hash: j.txHash, wait: () => sendProvider.waitForTransaction(j.txHash!) };
+  }
+  return recipient ? vaultContract.withdrawTo(recipient) : vaultContract.withdraw();
 }

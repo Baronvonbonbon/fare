@@ -39,7 +39,17 @@ by doing the two things that are safe to relay:
 | `POST /fund { address }` | **Sponsor gas** — top up a burner below `FUND_MIN_PAS` up to `FUND_AMOUNT_PAS` (a region-local, decentralized `/api/drip`). |
 | `POST /submit { method, args }` | **Relay a settlement call.** Only `confirmPickup` / `confirmDropoffZK` are allowlisted — they carry their own signatures / ZK proof and don't check `msg.sender`, so the relay submits them paying gas → those steps are fully gasless. |
 | `POST /forward { request }` | **Relay a gasless user action (F8).** Submits a user-signed EIP-2771 `ForwardRequest` through `FareForwarder`. Guarded: `value` must be 0 and `to` must be `FareOrders`/`FareRatings`, so the relay pays gas but never fronts a customer's escrow. |
-| `GET /health` | Relay address + gas balance + wired settlement + forwarder address. |
+| `POST /withdraw { account, recipient, deadline, signature }` | **Relay a gasless withdrawal (F8).** Submits a driver-signed `FareVault.withdrawFor`; the relay is `msg.sender`, so a configured `withdrawFeeBps` reimburses its gas. Lets a driver pull earnings with zero gas held. |
+| `GET /health` | Relay address + gas balance + wired settlement + forwarder + vault. |
+
+### Relay discovery (DATUM `relayUrl` pattern)
+
+A relay doesn't have to be hardcoded in the app at build time. Set `PUBLIC_RELAY`
+on the replication agent (`agent.mjs`) and it advertises `services.relayUrl` in
+the region manifest; clients learn it into a relay pool (`web/src/pool.ts`) and
+prefer the discovered region relay over the build-time `VITE_RELAY_URL`. So relay
+location is discoverable and region-scoped — a venue that runs a relay serves its
+region's customers automatically, mirroring DATUM's `manifest.relayUrl`.
 
 **Gasless user actions via the forwarder (F8).** `FareOrders`/`FareRatings` are
 EIP-2771-aware, so the **non-value** actions — `placeBid`, `withdrawBid`,

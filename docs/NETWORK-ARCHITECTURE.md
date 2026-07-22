@@ -174,7 +174,13 @@ Ranked by leverage:
 1. **Venue-operated gasless relays** (strongest) — region-scoped meta-tx
    (roadmap's DatumRelay pattern). Venues *subsidize gas to win orders* — perfect
    incentive alignment, and it removes the #1 UX blocker (nobody buys PAS to buy
-   pad thai).
+   pad thai). **Shipped (F8):** the relay is discoverable — an agent that sets
+   `PUBLIC_RELAY` advertises `services.relayUrl` in its region manifest, and the
+   client prefers that discovered relay over the build-time `VITE_RELAY_URL`
+   (DATUM's `manifest.relayUrl` pattern). Gasless spans placeBid/withdrawBid/
+   cancels/rate (via the EIP-2771 forwarder) **and** withdrawing earnings (a
+   driver-signed `FareVault.withdrawFor`; a small `withdrawFeeBps` reimburses the
+   relay's gas) — so a driver can earn and cash out having never held gas.
 2. **Regional indexer / cache** — venue nodes serve region order+menu discovery
    (chain stays source of truth; this is caching). Faster discovery, less
    public-RPC load.

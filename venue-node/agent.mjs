@@ -34,9 +34,10 @@ const GLOBAL_SAMPLE = Number(process.env.GLOBAL_SAMPLE || 50); // extra global v
 const START_BLOCK = Number(process.env.START_BLOCK || 0);
 const POLL_MS = Number(process.env.POLL_MS || 15_000);
 const LOG_RANGE = Number(process.env.LOG_RANGE || 5_000); // getLogs page size
-// This node's public service endpoints, echoed into the manifest for F4.
+// This node's public service endpoints, echoed into the manifest for F4/F8.
 const PUBLIC_GATEWAY = process.env.PUBLIC_GATEWAY || ""; // e.g. https://venue.example/ipfs/
 const PUBLIC_RPC = process.env.PUBLIC_RPC || ""; // e.g. https://venue.example/rpc
+const PUBLIC_RELAY = process.env.PUBLIC_RELAY || ""; // e.g. https://venue.example/relay (gasless relay)
 
 // Home centers (microdegrees). A single self-hosted venue sets HOME_LAT/HOME_LON;
 // a HOSTED SUPER-NODE (F7) serving many venues sets HOME_COORDS to a
@@ -178,6 +179,7 @@ async function publishManifest() {
         services: {
           ...(PUBLIC_GATEWAY ? { ipfsGateway: PUBLIC_GATEWAY } : {}),
           ...(PUBLIC_RPC ? { rpcUrl: PUBLIC_RPC } : {}),
+          ...(PUBLIC_RELAY ? { relayUrl: PUBLIC_RELAY } : {}),
         },
         servedCids: [...pinned],
         updatedAt: new Date().toISOString(),

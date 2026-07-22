@@ -11,7 +11,7 @@ class MemStorage {
 }
 (globalThis as any).localStorage = new MemStorage();
 
-const { learnFromManifest, gatewayPool, rpcPool, clearPool } = await import("./pool");
+const { learnFromManifest, gatewayPool, rpcPool, relayPool, clearPool } = await import("./pool");
 
 // F4 fallback pool: the client learns venue/region service endpoints from menu
 // and region manifests, building a gateway/RPC pool for free. Proves: discovery,
@@ -19,13 +19,24 @@ const { learnFromManifest, gatewayPool, rpcPool, clearPool } = await import("./p
 describe("manifest-driven endpoint pool (F4)", () => {
   beforeEach(() => clearPool());
 
-  it("learns gateway + rpc from a manifest's services", () => {
+  it("learns gateway + rpc + relay from a manifest's services", () => {
     const grew = learnFromManifest({
-      services: { ipfsGateway: "https://venue.example/ipfs/", rpcUrl: "https://venue.example/rpc" },
+      services: {
+        ipfsGateway: "https://venue.example/ipfs/",
+        rpcUrl: "https://venue.example/rpc",
+        relayUrl: "https://venue.example/relay/",
+      },
     });
     expect(grew).toBe(true);
     expect(gatewayPool()).toEqual(["https://venue.example/ipfs/"]);
     expect(rpcPool()).toEqual(["https://venue.example/rpc"]);
+    // relay is trailing-slash trimmed (the client appends /forward, /fund, …)
+    expect(relayPool()).toEqual(["https://venue.example/relay"]);
+  });
+
+  it("rejects a non-https relay endpoint", () => {
+    expect(learnFromManifest({ services: { relayUrl: "http://insecure.example/relay" } })).toBe(false);
+    expect(relayPool()).toEqual([]);
   });
 
   it("normalizes a gateway to a trailing slash (gateways resolve `${gw}${cid}`)", () => {
