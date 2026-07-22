@@ -8,6 +8,7 @@
 // device-local storage and returns a `local://` URI so the demo still works on a
 // single device (menus just aren't shared cross-device until IPFS is wired).
 import { parseEther } from "ethers";
+import { learnFromManifest, gatewayPool, type WithServices } from "./pool";
 
 export interface MenuItem {
   id: string;
@@ -18,21 +19,30 @@ export interface MenuItem {
   available?: boolean; // default true
 }
 
-export interface Menu {
+export interface Menu extends WithServices {
   name: string;
   items: MenuItem[];
   hours?: string;
   version: number;
   updatedAt: number;
+  // `services` (ipfsGateway / rpcUrl) is inherited from WithServices — a venue
+  // may advertise its region's endpoints here, which we fold into the pool (F4).
 }
 
 export type Cart = Record<string, number>; // itemId -> qty
 
-const GATEWAYS: string[] = [
-  (import.meta as any).env?.VITE_IPFS_GATEWAY, // configured (e.g. DATUM) gateway, trailing /ipfs/
-  "https://ipfs.io/ipfs/",
-  "https://dweb.link/ipfs/",
-].filter(Boolean);
+/// Gateways to try, in order: the configured (e.g. DATUM) gateway, then venue/
+/// region gateways discovered from manifests (F4 pool), then public fallbacks.
+/// Deduped so a discovered gateway that equals the configured one isn't retried.
+function gateways(): string[] {
+  const ordered = [
+    (import.meta as any).env?.VITE_IPFS_GATEWAY, // configured, trailing /ipfs/
+    ...gatewayPool(), // discovered from manifests (region appliances, venues)
+    "https://ipfs.io/ipfs/",
+    "https://dweb.link/ipfs/",
+  ].filter(Boolean) as string[];
+  return [...new Set(ordered)];
+}
 
 const cacheKey = (uri: string) => `fare.menu.${uri}`;
 
@@ -84,12 +94,13 @@ export async function fetchMenu(uri?: string): Promise<Menu | null> {
   if (uri!.startsWith("local://")) return cached ? (JSON.parse(cached) as Menu) : null;
 
   const cid = uri!.slice("ipfs://".length);
-  for (const gw of GATEWAYS) {
+  for (const gw of gateways()) {
     try {
       const res = await fetch(`${gw}${cid}`, { signal: AbortSignal.timeout(8000) });
       if (res.ok) {
         const m = (await res.json()) as Menu;
         localStorage.setItem(cacheKey(uri!), JSON.stringify(m));
+        learnFromManifest(m); // grow the pool from any services this menu advertises
         return m;
       }
     } catch {

@@ -258,7 +258,7 @@ Ordered roughly by leverage. Check off as landed.
 | F1 | VenueMetadataUpdated event | F | Contracts | ✅ done |
 | F2 | Venue appliance (Kubo+RPC+agent) | F | venue-node/ | ✅ done |
 | F3 | Replication agent (region pinning + manifest) | F | venue-node/ | ✅ done |
-| F4 | Client gateway/RPC fallback pool | F | Infra | ☐ todo |
+| F4 | Client gateway/RPC fallback pool | F | web/src/pool.ts | 🟡 partial |
 | F5 | DA scoring (challenge-response) | F | Off-chain | ☐ todo |
 | F6 | On-chain DA rewards | F | Contracts | ☐ todo |
 | F7 | Hosted super-node mode | F | Infra | ☐ todo |
@@ -270,7 +270,7 @@ Full design in [NETWORK-ARCHITECTURE.md](NETWORK-ARCHITECTURE.md).*
 - [x] F1 `VenueMetadataUpdated` event (event-driven menu-update replication)
 - [x] F2 Venue appliance — Docker Compose (Kubo + agent + relay + Caddy; pine-rpc container deferred to F4)
 - [x] F3 Replication agent — chain-indexed region pinning + manifest publish
-- [ ] F4 Client gateway/RPC fallback pool from venue manifests (light-client-first)
+- [~] F4 Client gateway/RPC fallback pool from venue manifests (light-client-first) — gateway pool shipped (`web/src/pool.ts`); RPC-provider pool remaining
 - [ ] F5 Data-availability scoring (challenge-response + client reports)
 - [ ] F6 On-chain DA rewards (fee discount / token, protocol-incentivized)
 - [ ] F7 Hosted super-node mode (for non-technical venues)
