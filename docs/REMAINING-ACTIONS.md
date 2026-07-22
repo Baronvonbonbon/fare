@@ -6,25 +6,44 @@ docs and the [integration-plan board](PRODUCT-INTEGRATION-PLAN.md). Grouped by
 
 Legend: ☐ not started · 🟡 partial (verifiable core built, rest deferred) · 🔒 mainnet gate.
 
+> **Live status (Paseo, 2026-07-22).** Full protocol deployed + seeded, now
+> including **F6 (relay gas-rebate)** and **F8 (EIP-2771 forwarder + gasless
+> withdraw)**. Migrated via `scripts/upgrade-f6-f8.ts` (freeze-and-drain).
+> Current addresses: forwarder `0x57C7…97FCe`, vault `0x9f03…C0Ea` (old vault
+> kept live for drain), orders `0x7e73…B32e`, settlement `0xC560…25a8E`, ratings
+> `0xa854…73D6` — see `deployed-addresses.json`. Fees on-chain:
+> `relayRebateBps=2000`, `withdrawFeeBps=100`. **Gasless UX is deployed but
+> dormant** — it activates only once a relay is actually running + reachable
+> (see §1). Everything else falls back to direct, gas-paying calls, so nothing
+> is broken in the meantime.
+
 ---
 
 ## 1. Operational — make the live demo fully work (no new code)
 
-The contracts are deployed + seeded on Paseo. These are config/ops steps:
+The full protocol (incl. F6/F8) is deployed + seeded on Paseo. Remaining ops:
 
-- ☐ **Cloudflare Pages rebuild** — bake in the fresh `deployed-addresses.json`.
-  If Pages is Git-connected it auto-builds on push to `main` (already triggered);
-  otherwise trigger from the dashboard. *(No CLI/creds in-repo to do it here.)*
+- ☐ **Run a venue relay (this is what turns gasless ON)** — run `venue-node/`
+  with a funded `RELAY_PRIVATE_KEY`, then either build the app with
+  `VITE_RELAY_URL=…` or advertise `PUBLIC_RELAY` from the agent's manifest (the
+  client discovers it). The forwarder + gasless-withdraw vault are already live,
+  so a running relay immediately makes placeBid / cancels / rate / withdraw
+  gasless. **Note the profitability guard:** with real (tiny) testnet fares the
+  relay will *decline* settlement (rebate ≪ gas) and the app prompts "pay your
+  own gas?"; set `RELAY_PROFIT_GUARD=off` for a fully-gasless demo, or raise
+  `relayRebateBps`/`feeBps`. See [venue-node/README](../venue-node/README.md).
 - ☐ **Faucet secret** — set `DRIP_PRIVATE_KEY` (funded) in Cloudflare Pages env so
-  `/api/drip` auto-funds burners (the "one manual secret step"). Without it, gas
-  UX degrades to the public faucet.
-- ☐ **Venue relay (optional, gasless)** — run `venue-node/` with a funded
-  `RELAY_PRIVATE_KEY` and build the app with `VITE_RELAY_URL=…`. See
-  [venue-node/README](../venue-node/README.md).
+  `/api/drip` funds burners on demand (the "one manual secret step"). Without it,
+  gas top-ups fall back to the public faucet. (Auto-drip on connect was removed;
+  value actions ensure gas on demand, non-value actions go gasless via the relay.)
 - ☐ **IPFS (optional, shared menus)** — stand up the DATUM node + set
   `IPFS_ADD_URL` / `IPFS_API_KEY` / `VITE_IPFS_GATEWAY`. Without it, published
   menus are device-local (`local://`), single-device only.
-- ✅ Deployment + seed done (10 contracts live; venues #1–2 + open order #1).
+- ✅ **Cloudflare Pages rebuild** auto-triggers on push to `main` (address books
+  committed); the client also re-resolves upgraded contracts from the router at
+  runtime.
+- ✅ Deployment + seed + **F6/F8 migration** done (15 contracts live; venues #1–2;
+  demo order re-seeded on the new orders).
 
 ---
 
@@ -55,9 +74,13 @@ infra/UI, spec'd in the linked design note.
   discovered region relay over the build-time `VITE_RELAY_URL` (DATUM `relayUrl`
   pattern). **Gasless earnings:** `FareVault.withdrawFor` (driver-signed, relay-
   submitted, `withdrawFeeBps` reimburses the relay) lets a driver cash out with
-  zero gas — `relayWithdraw` in the app + `/withdraw` on the relay. Remaining:
-  **run it** against a live deploy that includes `FareForwarder` **and** the new
-  `FareVault` (see the vault-migration note below).
+  zero gas — `relayWithdraw` in the app + `/withdraw` on the relay.
+  **Profitability guard:** the relay estimates gas and only sponsors a
+  reward-bearing action when the fee reward covers the fare's cumulative relayed
+  cost × margin (`venue-node/economics.mjs`); no-reward actions run under a gas
+  budget; declines return 402 → the app prompts "pay your own gas?"
+  (`RELAY_PROFIT_GUARD=off` to disable). **Deployed live on Paseo** (forwarder +
+  migrated vault). Remaining: only **run a relay** to activate it (§1).
   See [NETWORK-ARCHITECTURE.md](NETWORK-ARCHITECTURE.md).
 
 ---
@@ -93,7 +116,7 @@ infra/UI, spec'd in the linked design note.
 - ✅ **F3 Replication agent** — `venue-node/agent.mjs`: chain-indexed region pinning + region-manifest publish, re-pins on `VenueMetadataUpdated`.
 - ✅ **F4 Client gateway/RPC fallback pool** — gateway pool (`web/src/pool.ts`): the client learns venue/region IPFS gateways from manifests as it loads menus. RPC-provider pool (`web/src/rpcpool.ts`, wired in `chain.ts`): venue RPCs augment reads only in hosted mode as lower-priority fallbacks behind the hosted anchor, and broadcasts fan out to several endpoints — the in-app light client stays the trustless primary, venue RPC never a sole read path (§4/§5). Both tested.
 - ✅ **F5 Data-availability scoring** — `venue-node/scorer.mjs`: challenge-response (random byte-range vs. CID-canonical content) + decayed client reports → per-node score + leaderboard. Feeds F6.
-- 🟡 **F6 On-chain rewards** — Tier 1 shipped: **trustless relay gas-rebate** (`relayRebateBps` in `FareOrders`, + test). A governed share of the protocol fee is carved to the account that submits the dropoff tx (the relay that fronted gas), self-identified via `msg.sender` — no oracle, no new cost to orders, escrow math exact. Defaults to 0 (dormant) until governance enables it. Remaining: **Tier 2 DA-score reward** (`FareDataAvailability` + a trusted attester to bring F5 scores on-chain); token emission intentionally out of MVP. **Live-deploy note:** shipping this to Paseo needs a `FareOrders` router upgrade (`scripts/upgrade-orders.ts` procedure) + a `setRelayRebateBps` governance call.
+- 🟡 **F6 On-chain rewards** — Tier 1 **LIVE on Paseo**: **trustless relay gas-rebate** (`relayRebateBps` in `FareOrders`, + test). A governed share of the protocol fee is carved to the account that submits the dropoff tx (the relay that fronted gas), self-identified via `msg.sender` — no oracle, no new cost to orders, escrow math exact. Deployed with `relayRebateBps=2000` (20% of the fee). Remaining: **Tier 2 DA-score reward** (`FareDataAvailability` + a trusted attester to bring F5 scores on-chain) — **deferred, no oracles for now**; token emission intentionally out of MVP.
 - ✅ **F7 Hosted super-node mode** — one appliance serves many venues by setting `HOME_COORDS` to a list of centers; the agent pins the union of their regions (+ tests). The relay is already region-agnostic, and the hosted `/api/menu` publish path exists, so non-technical venues need no box of their own.
 
 ---

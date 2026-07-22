@@ -260,9 +260,9 @@ Ordered roughly by leverage. Check off as landed.
 | F3 | Replication agent (region pinning + manifest) | F | venue-node/ | ✅ done |
 | F4 | Client gateway/RPC fallback pool | F | web/src/pool.ts,rpcpool.ts | ✅ done |
 | F5 | DA scoring (challenge-response) | F | venue-node/scorer.mjs | ✅ done |
-| F6 | On-chain rewards | F | FareOrders (rebate) | 🟡 partial |
+| F6 | On-chain rewards | F | FareOrders (rebate) | ✅ Tier 1 live; Tier 2 deferred |
 | F7 | Hosted super-node mode | F | venue-node/agent.mjs | ✅ done |
-| F8 | Venue-operated gasless relay | F | venue-node/ + FareForwarder | ✅ done |
+| F8 | Venue-operated gasless relay | F | venue-node/ + FareForwarder | ✅ done + live on Paseo (+ profitability guard) |
 
 ### Group F — Network / infra (venues as infrastructure)
 *Turn venues into network nodes — geo-replicated menus, chain access, gas relay.

@@ -181,6 +181,11 @@ Ranked by leverage:
    cancels/rate (via the EIP-2771 forwarder) **and** withdrawing earnings (a
    driver-signed `FareVault.withdrawFor`; a small `withdrawFeeBps` reimburses the
    relay's gas) — so a driver can earn and cash out having never held gas.
+   **Deployed live on Paseo (2026-07-22).** The relay runs a **profitability
+   guard** (`venue-node/economics.mjs`): it sponsors a reward-bearing action only
+   when the fee reward covers the fare's cumulative relayed gas × margin, and
+   subsidizes no-reward actions under a rolling budget — declining (402 → "pay
+   your own gas?") when a fare wouldn't pay for itself.
 2. **Regional indexer / cache** — venue nodes serve region order+menu discovery
    (chain stays source of truth; this is caching). Faster discovery, less
    public-RPC load.
