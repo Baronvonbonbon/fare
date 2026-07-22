@@ -21,6 +21,15 @@ export const ORDERS_ABI = [
   "event OrderAssigned(uint256 indexed orderId, address indexed driver, uint96 fare, uint64 pickupDeadline)",
   // region indexed FIRST → server-side filterable on Paseo (localized discovery)
   "event OrderRegion(bytes32 indexed region, uint256 indexed orderId)",
+  // Governance params (D2): economics + default order windows.
+  "function feeBps() view returns (uint16)",
+  "function assignedCancelBps() view returns (uint16)",
+  "function defaultPickupWindow() view returns (uint64)",
+  "function defaultDeliveryWindow() view returns (uint64)",
+  "function relayRebateBps() view returns (uint16)",
+  "function setParams(uint16 _feeBps, uint16 _assignedCancelBps, uint64 _defaultPickupWindow, uint64 _defaultDeliveryWindow)",
+  "function setRelayRebateBps(uint16 _bps)",
+  "function owner() view returns (address)",
 ];
 
 export const VENUES_ABI = [
@@ -46,6 +55,10 @@ export const DRIVERS_ABI = [
   "function setMetadata(string metadataURI)",
   "function minStake() view returns (uint96)",
   "function unbondingSeconds() view returns (uint64)",
+  // Governance params (D2).
+  "function setMinStake(uint96 _minStake)",
+  "function setUnbondingSeconds(uint64 secs)",
+  "function owner() view returns (address)",
 ];
 
 export const SETTLEMENT_ABI = [
@@ -57,6 +70,11 @@ export const SETTLEMENT_ABI = [
   "function usedNullifiers(bytes32) view returns (bool)",
   "function pickupRadiusMeters() view returns (uint32)",
   "function dropoffRadiusMeters() view returns (uint32)",
+  // Governance params (D2): geofence radii + attestation freshness window.
+  "function attestationMaxAgeSecs() view returns (uint64)",
+  "function attestationFutureSkewSecs() view returns (uint64)",
+  "function setGeoParams(uint32 _pickupRadiusMeters, uint32 _dropoffRadiusMeters, uint64 _maxAgeSecs, uint64 _futureSkewSecs)",
+  "function owner() view returns (address)",
 ];
 
 export const VAULT_ABI = [
@@ -68,6 +86,10 @@ export const VAULT_ABI = [
   "function withdrawFor(address account, address recipient, uint256 deadline, bytes signature)",
   "function pendingPaseoDust(address) view returns (uint256)",
   "function claimPaseoDust()",
+  // Governance params (D2): withdrawal relay fee.
+  "function withdrawFeeBps() view returns (uint16)",
+  "function setWithdrawFeeBps(uint16 bps)",
+  "function owner() view returns (address)",
 ];
 
 export const PAUSE_ABI = [
@@ -104,4 +126,7 @@ export const DISPUTES_ABI = [
   "function treasury() view returns (address)",
   "function resolve(uint256 disputeId, uint16 customerShareBps, bool openerWins, bool driverAtFault, uint256 slashDriverAmount)",
   "event DisputeResolved(uint256 indexed disputeId, uint256 indexed orderId, uint16 customerShareBps, bool openerWins, uint256 driverSlashed)",
+  // Governance params (D2): open-dispute bond.
+  "function setDisputeBond(uint96 bond)",
+  "function owner() view returns (address)",
 ];

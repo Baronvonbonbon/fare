@@ -1,6 +1,7 @@
 import { useCallback, useState } from "react";
 import { Session, SignerMode, connect, short } from "../chain";
 import DisputesConsole from "./DisputesConsole";
+import GovernanceConsole from "./GovernanceConsole";
 import PauseConsole from "./PauseConsole";
 
 // FARE — ops / governance console (integration-plan group D).
@@ -10,9 +11,10 @@ import PauseConsole from "./PauseConsole";
 // one shared wallet session + toast and routes between the per-domain consoles:
 //
 //   • Disputes (D1) — arbiter ruling queue
+//   • Params   (D2) — owner-tunable governance knobs
 //   • Pause    (D3) — guardian emergency stop
 //
-// D2 (governance params) and D4 (upgrade) land here as further tabs.
+// D4 (upgrade) lands here as a further tab.
 
 export type Run = (label: string, fn: () => Promise<any>, after?: () => Promise<any> | void) => Promise<void>;
 
@@ -23,10 +25,11 @@ export interface ConsoleProps {
   say: (msg: string, err?: boolean) => void;
 }
 
-type Tab = "disputes" | "pause";
+type Tab = "disputes" | "params" | "pause";
 
 const TABS: { id: Tab; glyph: string; label: string }[] = [
   { id: "disputes", glyph: "⚖️", label: "disputes" },
+  { id: "params", glyph: "🎛", label: "params" },
   { id: "pause", glyph: "⏸", label: "pause" },
 ];
 
@@ -95,6 +98,7 @@ export default function OpsApp() {
       </nav>
 
       {tab === "disputes" && <DisputesConsole {...props} />}
+      {tab === "params" && <GovernanceConsole {...props} />}
       {tab === "pause" && <PauseConsole {...props} />}
 
       {toast && <div className={`toast${toast.err ? " err" : ""}`}>{toast.msg}</div>}
