@@ -106,7 +106,7 @@ infra/UI, spec'd in the linked design note.
 
 **Group E — trust & release**
 - ☐ **E1 Filmed end-to-end field test** (two phones, one real handoff) — R1's key artifact.
-- ☐ **E2 Slither / Mythril** static-analysis pass (add to CI).
+- 🟡 **E2 Slither / Mythril** static-analysis pass — **Slither done + in CI** (`.github/workflows/slither.yml`, `crytic/slither-action`); full triage in [SECURITY-REVIEW.md](SECURITY-REVIEW.md) (96 results, **zero high-severity**; new F6/F8 surface clean). Mythril documented as an on-demand deep-dive for money-handling contracts (too slow to gate CI).
 - ☐ **E3 External audit** before mainnet value.
 - ☐ **E4 Device-attestation tier** (Play Integrity / App Attest), L0/L1/L2 gradient.
 
@@ -132,7 +132,7 @@ Do NOT ship for real value until all hold. Privacy is largely closed already
   burners are unlinkable *only* on testnet (shared faucet); on mainnet, funding
   from a real wallet re-links them. Needs a mixer / shielded pool / relayer-funded
   meta-txs.
-- 🔒 **External audit** (E3) + fuzz/invariant coverage (✅ started, `test/invariant.test.ts`).
+- 🔒 **External audit** (E3) + fuzz/invariant coverage (✅ started, `test/invariant.test.ts`) + static analysis (✅ Slither in CI, [SECURITY-REVIEW.md](SECURITY-REVIEW.md)).
 - 🔒 **Stablecoin escrow** (C3) — food margins can't absorb DOT volatility.
 
 Full mainnet gate + rationale: [PRIVACY.md](PRIVACY.md) · [ROADMAP.md](ROADMAP.md).

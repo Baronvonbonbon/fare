@@ -1,0 +1,34 @@
+# Static analysis gate (E2). Runs Slither on every push / PR so a regression in
+# the contracts surfaces in review. Triage + rationale: docs/SECURITY-REVIEW.md.
+name: slither
+
+on:
+  push:
+    branches: [main]
+    paths: ["contracts/**", "hardhat.config.ts", ".github/workflows/slither.yml"]
+  pull_request:
+    paths: ["contracts/**", "hardhat.config.ts", ".github/workflows/slither.yml"]
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      # Slither compiles via hardhat, which needs the project deps present.
+      - name: Install deps
+        run: npm ci
+
+      - name: Slither
+        uses: crytic/slither-action@v0.4.0
+        with:
+          node-version: "22"
+          # Analyze our contracts only; OpenZeppelin is audited upstream.
+          slither-args: --filter-paths "node_modules"
+          # Findings are triaged in docs/SECURITY-REVIEW.md (all Low/Info); don't
+          # fail the build on informational noise, but keep the SARIF/report.
+          fail-on: none

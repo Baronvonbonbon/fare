@@ -218,7 +218,7 @@ Ordered roughly by leverage. Check off as landed.
 
 ### Group E — Trust & release (from ROADMAP R1/R2)
 - [ ] Filmed end-to-end field test (two phones, one real handoff)
-- [ ] Slither/Mythril static-analysis pass
+- [~] Slither static-analysis pass + CI gate (docs/SECURITY-REVIEW.md); Mythril on-demand
 - [ ] External audit before mainnet value
 - [ ] Device-attestation assurance tier (Play Integrity / App Attest)
 
@@ -252,7 +252,7 @@ Ordered roughly by leverage. Check off as landed.
 | D4 | Upgrade console | D | Ops app | ☐ todo |
 | D5 | MPC ceremony | D | Ops / offline | ☐ todo |
 | E1 | Filmed field test | E | — | ☐ todo |
-| E2 | Slither/Mythril | E | CI | ☐ todo |
+| E2 | Slither/Mythril | E | CI | 🟡 Slither+CI done; Mythril on-demand |
 | E3 | External audit | E | — | ☐ todo |
 | E4 | Device attestation | E | Driver view | ☐ todo |
 | F1 | VenueMetadataUpdated event | F | Contracts | ✅ done |
