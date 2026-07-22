@@ -110,7 +110,26 @@ split as venue-hosted RPC.
 | Step | Status |
 |---|---|
 | Crypto layer (`msg.ts`) + tests | ✅ done |
-| Handoff pubkey bootstrap wiring (recover from the attestation both sides sign) | ☐ |
-| P1 relay (`/api/msg` + KV) + a chat UI on the order card | ☐ |
-| P2 venue-node relay + client relay pool | ☐ (with the appliance) |
+| Pubkey bootstrap — **authenticated hello handshake** | ✅ done (see below) |
+| P1 relay (`/api/msg` + KV) + a chat UI on the order card | ✅ done |
+| P2 venue-node relay + client relay pool | ✅ done (`relay.mjs` `/msg`, reuses the F8 relay pool) |
 | P3 IPFS/P2P durability + metadata hardening | ☐ |
+
+**Shipped (the relay channel).** `web/src/channel.ts` is the order-scoped
+transport: threads keyed by an opaque `topic = H(orderId)`, envelopes moved over
+the shared KV relay (`/api/msg`, P1) with discovered venue relays as fallback
+(`/msg`, P2). `ChatPanel` in the customer + driver order cards is the first
+consumer — end-to-end, 4-space integration-tested (`channel.test.ts`).
+
+**Pubkey bootstrap — authenticated hello handshake.** Rather than recover the
+peer's key from a handoff attestation (which only exists *after* pickup), each
+side posts a cleartext `hello` carrying its pubkey (public anyway). The receiver
+**authenticates** it by checking `computeAddress(pub)` equals the expected
+on-chain counterparty (`o.driver` / `o.customer`) before deriving the shared key —
+so an impersonator who knows the orderId can't inject a key, and chat works from
+assignment onward, not just post-handoff.
+
+**One channel, three features (`kind`).** The envelope is `kind`-tagged
+(`hello`/`chat`/`loc`/`photo`), so **B2** (driver-location trace → `kind:"loc"`)
+and **B6** (proof-of-delivery photo-key delivery → `kind:"photo"`) ride the same
+transport — their remaining work is UI + payload, not new infra.

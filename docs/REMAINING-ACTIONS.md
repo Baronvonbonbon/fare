@@ -39,6 +39,9 @@ The full protocol (incl. F6/F8) is deployed + seeded on Paseo. Remaining ops:
 - ☐ **IPFS (optional, shared menus)** — stand up the DATUM node + set
   `IPFS_ADD_URL` / `IPFS_API_KEY` / `VITE_IPFS_GATEWAY`. Without it, published
   menus are device-local (`local://`), single-device only.
+- ☐ **Messaging KV (optional, chat/channel)** — bind a `MSG_KV` namespace in
+  Cloudflare Pages (Settings → Functions → KV) so `/api/msg` store-and-forwards
+  order chats. Without it, chat needs a running venue relay (`/msg`) or degrades.
 - ✅ **Cloudflare Pages rebuild** auto-triggers on push to `main` (address books
   committed); the client also re-resolves upgraded contracts from the router at
   runtime.
@@ -52,15 +55,20 @@ The full protocol (incl. F6/F8) is deployed + seeded on Paseo. Remaining ops:
 Each has a verified core already committed; the remaining half is the deferred
 infra/UI, spec'd in the linked design note.
 
-- 🟡 **B2 Live tracking** — status stepper + ETA done. Remaining: **driver-location
-  relay + map trace** (needs the off-chain location channel).
-- 🟡 **B3 Messaging** — E2E crypto done + tested (`web/src/msg.ts`). Remaining:
-  handoff pubkey wiring + a **relay** (P1 `/api/msg`+KV → P2 venue-node) + chat UI.
-  See [MESSAGING.md](MESSAGING.md).
+- ✅ **B3 Messaging** — **shipped.** E2E crypto (`web/src/msg.ts`) + the **relay
+  channel** (`web/src/channel.ts`: per-order `topic=H(orderId)`, KV relay
+  `/api/msg` P1 → venue-node `/msg` P2) + an authenticated hello handshake +
+  `ChatPanel` in the customer & driver order cards. Integration-tested
+  (`channel.test.ts`). **Ops:** bind a `MSG_KV` namespace in Cloudflare Pages (or
+  a venue relay serves it). See [MESSAGING.md](MESSAGING.md).
+- 🟡 **B2 Live tracking** — status stepper + ETA done; the off-chain channel now
+  exists. Remaining: driver publishes coarse location as a `kind:"loc"` envelope
+  on the channel + a **map trace** on the customer card. Small — no new infra.
 - 🟡 **B6 Proof-of-delivery photo** — crypto-shred sealing done + tested
-  (`web/src/photo.ts`). Remaining: capture+compress UI, an **authorized submitter**
-  (Bulletin Chain `store` / IPFS pin), key-wrap over `msg.ts`, and the expiry job.
-  See [PHOTOS.md](PHOTOS.md).
+  (`web/src/photo.ts`); the channel can carry the wrapped key (`kind:"photo"`).
+  Remaining: capture+compress UI, an **authorized submitter** (Bulletin Chain
+  `store` / IPFS pin) for the sealed blob, key-wrap over `msg.ts`, and the expiry
+  job. See [PHOTOS.md](PHOTOS.md).
 - ✅ **C1 / F8 Gasless relay** — `venue-node/` relay (gas sponsorship + settlement
   relay) **and** the EIP-2771 forwarder: `FareForwarder` + `_msgSender()` in
   `FareOrders`/`FareRatings` make the **non-value** user actions (placeBid /

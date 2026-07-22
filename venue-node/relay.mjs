@@ -164,6 +164,23 @@ function forwardOrderId(request) {
 const decline = (res, reason, detail, origin) =>
   send(res, 402, { declined: true, error: reason, ...detail }, origin);
 
+// ── order-scoped message relay (B3/B2/B6 channel, P2) ────────────────────────
+// In-memory store-and-forward for E2E-sealed, order-scoped envelopes — the
+// decentralized alternative to the shared /api/msg (docs/MESSAGING.md). Content
+// is sealed client-side, so this only ever holds ciphertext. Ephemeral: threads
+// live in memory with a TTL (a venue relay is region-local, not a durable store).
+const threads = new Map(); // topic → { msgs: [], exp }
+const MSG_TTL_MS = 86_400_000; // 1 day
+const MSG_THREAD_MAX = 200;
+const okTopic = (t) => typeof t === "string" && /^0x[0-9a-fA-F]{64}$/.test(t);
+function threadOf(topic) {
+  const now = Date.now();
+  let t = threads.get(topic);
+  if (!t || t.exp < now) { t = { msgs: [], exp: now + MSG_TTL_MS }; threads.set(topic, t); }
+  return t;
+}
+setInterval(() => { const now = Date.now(); for (const [k, v] of threads) if (v.exp < now) threads.delete(k); }, 3_600_000).unref?.();
+
 // ── crude per-IP rate limit ──────────────────────────────────────────────────
 const hits = new Map();
 function rateLimited(ip) {
@@ -210,7 +227,32 @@ const server = http.createServer(async (req, res) => {
       return send(res, 200, { ok: true, relay: relay.address, balance: formatEther(bal), settlement: settlementAddr, forwarder: forwarderAddr ?? null }, origin);
     }
 
+    // ── Message channel: fetch a thread (cheap read, not rate-limited) ───────
+    if (req.method === "GET" && url.pathname === "/msg") {
+      const topic = url.searchParams.get("topic");
+      const since = Number(url.searchParams.get("since") ?? 0);
+      if (!okTopic(topic)) return send(res, 400, { error: "bad topic" }, origin);
+      return send(res, 200, { messages: threadOf(topic).msgs.filter((m) => m.ts > since) }, origin);
+    }
+
     if (rateLimited(ip)) return send(res, 429, { error: "rate limited" }, origin);
+
+    // ── Message channel: append an envelope (idempotent by from+seq+kind) ────
+    if (req.method === "POST" && url.pathname === "/msg") {
+      const { topic, msg } = await readJson(req);
+      if (!okTopic(topic)) return send(res, 400, { error: "bad topic" }, origin);
+      if (!msg || typeof msg.from !== "string" || typeof msg.seq !== "number" || typeof msg.kind !== "string") {
+        return send(res, 400, { error: "bad envelope" }, origin);
+      }
+      if (JSON.stringify(msg).length > 16 * 1024) return send(res, 413, { error: "message too large" }, origin);
+      const t = threadOf(topic);
+      const i = t.msgs.findIndex((m) => m.from === msg.from && m.seq === msg.seq && m.kind === msg.kind);
+      if (i >= 0) t.msgs[i] = msg; else t.msgs.push(msg);
+      t.msgs.sort((a, b) => a.ts - b.ts);
+      if (t.msgs.length > MSG_THREAD_MAX) t.msgs = t.msgs.slice(-MSG_THREAD_MAX);
+      t.exp = Date.now() + MSG_TTL_MS;
+      return send(res, 200, { ok: true, seq: msg.seq }, origin);
+    }
 
     // ── Sponsor gas ──────────────────────────────────────────────────────────
     if (req.method === "POST" && url.pathname === "/fund") {

@@ -119,7 +119,7 @@ role views. The mapping below is the target shape.
 | Order confirmation | `OrderCreated` event | ✅ | — |
 | **Live tracking** (status, driver on map, ETA) | order `status` + `OrderAssigned` | 🟡 | Status shown; no live driver location, no ETA, no map trace |
 | Pick a Dasher (FARE-specific: reverse auction) | `biddersOf` / `acceptBid` | ✅ | Bid cards — but **no driver rating shown** (⛔ `reputationOf`) |
-| Chat with Dasher / support | E2E crypto (`msg.ts`) | 🟡 | Crypto done; relay deferred (MESSAGING.md) |
+| Chat with Dasher / support | E2E crypto (`msg.ts`) + relay channel (`channel.ts`) | ✅ | ChatPanel in order cards; per-order topic, KV/venue-node relay (MESSAGING.md) |
 | Handoff / proof of delivery | `confirmDropoffZK` (ZK) | ✅ | No delivery photo / "leave at door" option |
 | Rate order + driver + restaurant | `FareRatings` (verified-delivery) | ✅ | On-chain stars, gated to a Delivered order's customer; shown in bid cards |
 | Reorder, history, receipts | per-order wallet registry (local) | 🟡 | History is device-local; no receipts/reorder |
@@ -237,7 +237,7 @@ Ordered roughly by leverage. Check off as landed.
 | A7 | Dispute evidence + status view | A | Customer/Driver | ✅ done |
 | B1 | Catalog / menu / cart | B | New service + all views | ✅ done |
 | B2 | Live tracking + ETA | B | Customer/Driver | 🟡 partial |
-| B3 | Order-scoped messaging | B | Customer/Driver | 🟡 partial |
+| B3 | Order-scoped messaging | B | Customer/Driver | ✅ done (channel + chat) |
 | B4 | Push notifications | B | Cross-cutting | ☐ todo |
 | B5 | Ratings (stars) | B | Post-delivery | ✅ done |
 | B6 | Proof-of-delivery photo | B | Driver view | 🟡 partial |

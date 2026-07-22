@@ -38,9 +38,11 @@ import {
   newOrderWallet,
   orderWalletAddresses,
   contractsForOrder,
+  walletFor,
   sweepToMain,
 } from "./wallets";
 import { isAddress } from "ethers";
+import { OrderThread, type ChatMsg } from "./channel";
 import {
   Menu, MenuItem, Cart, fetchMenu, cartTotal, cartCount,
   emptyMenu, newItemId, publishMenu, hasMenuURI,
@@ -1180,6 +1182,67 @@ function HistoryCard({ o, venues, act, busy, session, say }: any) {
   );
 }
 
+/// End-to-end encrypted order chat (B3). Content is sealed client-side (msg.ts)
+/// and moved over the relay channel (channel.ts); the relay never sees plaintext.
+/// Needs a local-key wallet for ECDH, so it no-ops for injected wallets.
+function ChatPanel({ orderId, myPriv, myAddr, peerAddr }: { orderId: bigint; myPriv?: string | null; myAddr?: string; peerAddr?: string }) {
+  const [msgs, setMsgs] = useState<ChatMsg[]>([]);
+  const [text, setText] = useState("");
+  const [note, setNote] = useState("");
+  const [open, setOpen] = useState(false);
+  const threadRef = useRef<OrderThread | null>(null);
+
+  useEffect(() => {
+    if (!open || !myPriv || !myAddr || !peerAddr || !isAddress(peerAddr)) return;
+    const t = new OrderThread(orderId, myPriv, myAddr, peerAddr);
+    threadRef.current = t;
+    let alive = true;
+    t.open().catch(() => {});
+    const tick = async () => {
+      try { const nu = await t.poll(); if (alive && nu.length) setMsgs((m) => [...m, ...nu]); } catch { /* transient */ }
+    };
+    tick();
+    const iv = setInterval(tick, 4000);
+    return () => { alive = false; clearInterval(iv); threadRef.current = null; };
+  }, [open, String(orderId), myPriv, myAddr, peerAddr]);
+
+  if (!myPriv || !peerAddr || !isAddress(peerAddr)) return null;
+
+  const send = async () => {
+    const t = threadRef.current;
+    const body = text.trim();
+    if (!t || !body) return;
+    try { const mine = await t.send(body); setMsgs((m) => [...m, mine]); setText(""); setNote(""); }
+    catch (e: any) { setNote(e?.message ?? "couldn't send"); }
+  };
+
+  return (
+    <div style={{ marginTop: 8 }}>
+      <button className="btn ghost small" onClick={() => setOpen((v) => !v)}>
+        💬 {open ? "Hide chat" : "Chat"}{msgs.length ? ` (${msgs.length})` : ""}
+      </button>
+      {open && (
+        <div style={{ border: "1px solid #333", borderRadius: 8, padding: 8, marginTop: 6 }}>
+          <div style={{ maxHeight: 160, overflowY: "auto", display: "flex", flexDirection: "column", gap: 4, fontSize: 13 }}>
+            {msgs.length === 0 && <span className="hint">End-to-end encrypted, per-order. Say hi 👋</span>}
+            {msgs.map((m, i) => (
+              <div key={i} style={{ alignSelf: m.mine ? "flex-end" : "flex-start", background: m.mine ? "#b57bff" : "#222", color: m.mine ? "#000" : "inherit", padding: "3px 8px", borderRadius: 10, maxWidth: "80%", wordBreak: "break-word" }}>
+                {m.text}
+              </div>
+            ))}
+          </div>
+          <div className="btn-row" style={{ marginTop: 6 }}>
+            <input style={{ flex: 1 }} value={text} onChange={(e) => setText(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter") send(); }} placeholder="message… (E2E)" />
+            <button className="btn small" onClick={send} disabled={!text.trim()}>Send</button>
+          </div>
+          {note && <div className="hint" style={{ marginTop: 4 }}>{note}</div>}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function CustomerOrder({ o, venues, act, busy, session, say }: any) {
   const [payload, setPayload] = useState("");
   const [scanning, setScanning] = useState(false);
@@ -1330,6 +1393,9 @@ function CustomerOrder({ o, venues, act, busy, session, say }: any) {
             </button>
           </div>
         </>
+      )}
+      {(o.status === 2 || o.status === 3) && (
+        <ChatPanel orderId={o.id} myPriv={walletFor(o.customer)?.privateKey} myAddr={o.customer} peerAddr={o.driver} />
       )}
       {(o.status === 2 || o.status === 3 || o.status === 6) && (
         <DisputeControl o={o} handle={os} busy={busy} act={act} />
@@ -1657,6 +1723,9 @@ function DriverJob({ o, venues, act, busy, signed, session, say }: any) {
             </>
           )}
         </>
+      )}
+      {(o.status === 2 || o.status === 3) && (
+        <ChatPanel orderId={o.id} myPriv={(session?.signer as any)?.privateKey} myAddr={session?.address} peerAddr={o.customer} />
       )}
       {(o.status === 2 || o.status === 3) && (
         <DisputeControl o={o} handle={signed} busy={busy} act={act} />
