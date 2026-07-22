@@ -6,7 +6,7 @@
 // the central faucet + direct submission, so nothing breaks without a relay.
 
 import { ethers } from "ethers";
-import { requestDrip, sendProvider, readProvider, CHAIN_ID, ADDRESSES, type DripResult } from "./chain";
+import { requestDrip, sendProvider, readProvider, nativeBalance, CHAIN_ID, ADDRESSES, type DripResult } from "./chain";
 
 const RELAY_URL = ((import.meta as any).env?.VITE_RELAY_URL as string | undefined)?.replace(/\/$/, "");
 
@@ -29,6 +29,23 @@ async function relayFund(address: string): Promise<DripResult> {
     body: JSON.stringify({ address }),
   });
   return (await res.json().catch(() => ({}))) as DripResult;
+}
+
+/// Ensure `address` holds gas before a VALUE action (createOrder / acceptBid),
+/// which must be submitted directly (the relay can't front escrow) and so needs
+/// the burner to pay its own gas. Gasless non-value actions never call this, so
+/// bidding/canceling/rating trigger no drip. No-op if already funded; otherwise
+/// sponsors gas and waits (best-effort) for it to land. Returns true if funded.
+export async function ensureGas(address: string, minWei: bigint): Promise<boolean> {
+  const before = await nativeBalance(address).catch(() => 0n);
+  if (before >= minWei) return true;
+  const r = await sponsorGas(address);
+  if (!r.funded) return r.reason === "sufficient";
+  for (let i = 0; i < 12; i++) {
+    await new Promise((res) => setTimeout(res, 1500));
+    if ((await nativeBalance(address).catch(() => before)) > before) return true;
+  }
+  return false; // submitted but not yet observed; caller may still proceed/retry
 }
 
 /// Sponsor gas for `address`: venue relay first, central faucet as fallback.

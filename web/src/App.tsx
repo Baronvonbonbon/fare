@@ -46,7 +46,7 @@ import {
   emptyMenu, newItemId, publishMenu, hasMenuURI,
 } from "./menu";
 import { proveProximity, positionCommit } from "./zk";
-import { sponsorGas, relaySettle, relayForward } from "./relay";
+import { sponsorGas, relaySettle, relayForward, ensureGas } from "./relay";
 import { MicroDeg, distanceMeters, fmtCoord, fmtDist, getPosition, snapToGrid } from "./geo";
 import { QRScan, QRShow } from "./qr";
 import { VenuePin } from "./map";
@@ -1276,7 +1276,12 @@ function CustomerOrder({ o, venues, act, busy, session, say }: any) {
               <span className="v">
                 <span className="amount">{fmt(b.amount)} PAS </span>
                 <button className="btn small" disabled={busy || orphaned}
-                  onClick={() => act("Accept bid", () => os!.orders.acceptBid(o.id, b.addr, { value: b.amount }))}>
+                  onClick={() => act("Accept bid", async () => {
+                    // Value action → must go direct; ensure the order burner has
+                    // gas (+ the fare) first. Gasless actions skip this entirely.
+                    await ensureGas(o.customer, b.amount + parse("0.2"));
+                    return os!.orders.acceptBid(o.id, b.addr, { value: b.amount });
+                  })}>
                   Accept
                 </button>
               </span>
