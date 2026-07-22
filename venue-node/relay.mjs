@@ -56,6 +56,22 @@ const SETTLEMENT_ABI = [
 const RELAYABLE = new Set(["confirmPickup", "confirmDropoffZK"]);
 const settlement = new Contract(settlementAddr, SETTLEMENT_ABI, relay);
 
+// ── EIP-2771 forwarder for gasless user actions (F8) ─────────────────────────
+// The client builds + signs a ForwardRequest for a non-value action (placeBid /
+// withdrawBid / cancels / rate); the relay submits it and pays gas. The user
+// signs, so the relay can't act as them — the forwarder verifies the signature.
+const book = JSON.parse(readFileSync(new URL(ADDRESS_BOOK, import.meta.url), "utf8"));
+const addr = book.addresses ?? book;
+const forwarderAddr = process.env.FORWARDER_ADDRESS || addr.forwarder;
+// Only forward to FARE's own metatx-aware contracts, and only value-free calls —
+// so the relay never fronts a customer's escrow (value actions stay direct).
+const FORWARD_TARGETS = new Set([addr.orders, addr.ratings].filter(Boolean).map((a) => a.toLowerCase()));
+const FORWARDER_ABI = [
+  "function execute((address from, address to, uint256 value, uint256 gas, uint48 deadline, bytes data, bytes signature) request) payable",
+];
+const forwarder = forwarderAddr ? new Contract(forwarderAddr, FORWARDER_ABI, relay) : null;
+const GAS_FORWARD = 700_000n; // outer gas for execute(); request.gas caps the inner call
+
 // ── tx serialization: chain all sends so concurrent requests don't collide on
 //    the relay account's nonce ──────────────────────────────────────────────
 let chain = Promise.resolve();
@@ -104,7 +120,7 @@ const server = http.createServer(async (req, res) => {
   try {
     if (req.method === "GET" && url.pathname === "/health") {
       const bal = await provider.getBalance(relay.address);
-      return send(res, 200, { ok: true, relay: relay.address, balance: formatEther(bal), settlement: settlementAddr }, origin);
+      return send(res, 200, { ok: true, relay: relay.address, balance: formatEther(bal), settlement: settlementAddr, forwarder: forwarderAddr ?? null }, origin);
     }
 
     if (rateLimited(ip)) return send(res, 429, { error: "rate limited" }, origin);
@@ -136,6 +152,21 @@ const server = http.createServer(async (req, res) => {
       return send(res, 200, { submitted: true, txHash: tx.hash, method }, origin);
     }
 
+    // ── Relay a gasless user action via the EIP-2771 forwarder (F8) ──────────
+    if (req.method === "POST" && url.pathname === "/forward") {
+      if (!forwarder) return send(res, 503, { error: "forwarder not configured" }, origin);
+      const { request } = await readJson(req);
+      if (!request || !isAddress(request.to)) return send(res, 400, { error: "bad request" }, origin);
+      // Never front value, and only forward to FARE's metatx-aware contracts.
+      if (BigInt(request.value ?? 0) !== 0n) return send(res, 400, { error: "value must be 0 (relay never fronts escrow)" }, origin);
+      if (!FORWARD_TARGETS.has(String(request.to).toLowerCase())) return send(res, 400, { error: "target not allowlisted" }, origin);
+      const tx = await serialize(async () => {
+        const nonce = await provider.getTransactionCount(relay.address);
+        return forwarder.execute(request, { gasLimit: GAS_FORWARD, nonce });
+      });
+      return send(res, 200, { forwarded: true, txHash: tx.hash, from: request.from }, origin);
+    }
+
     return send(res, 404, { error: "not found" }, origin);
   } catch (e) {
     return send(res, 500, { error: e?.shortMessage ?? e?.message ?? String(e) }, origin);
@@ -147,4 +178,5 @@ server.listen(PORT, () => {
   console.log(`[relay] relay account: ${relay.address}`);
   console.log(`[relay] settlement:    ${settlementAddr}`);
   console.log(`[relay] relayable:     ${[...RELAYABLE].join(", ")}`);
+  console.log(`[relay] forwarder:     ${forwarderAddr ?? "(none — /forward disabled)"}`);
 });

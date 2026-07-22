@@ -262,7 +262,7 @@ Ordered roughly by leverage. Check off as landed.
 | F5 | DA scoring (challenge-response) | F | venue-node/scorer.mjs | ✅ done |
 | F6 | On-chain rewards | F | FareOrders (rebate) | 🟡 partial |
 | F7 | Hosted super-node mode | F | venue-node/agent.mjs | ✅ done |
-| F8 | Venue-operated gasless relay | F | Infra + views | 🟡 partial |
+| F8 | Venue-operated gasless relay | F | venue-node/ + FareForwarder | ✅ done |
 
 ### Group F — Network / infra (venues as infrastructure)
 *Turn venues into network nodes — geo-replicated menus, chain access, gas relay.
@@ -274,7 +274,7 @@ Full design in [NETWORK-ARCHITECTURE.md](NETWORK-ARCHITECTURE.md).*
 - [x] F5 Data-availability scoring (challenge-response + client reports) — `venue-node/scorer.mjs` + leaderboard
 - [~] F6 On-chain rewards — Tier 1 shipped: trustless relay gas-rebate (`relayRebateBps` in FareOrders, carved from the fee → the settling relay). Tier 2 (DA-score reward via `FareDataAvailability` + attester) deferred
 - [x] F7 Hosted super-node mode (for non-technical venues) — one appliance serves many venues via `HOME_COORDS` (union of regions)
-- [ ] F8 Venue-operated gasless relay (region meta-tx)
+- [x] F8 Venue-operated gasless relay (region meta-tx) — relay + EIP-2771 `FareForwarder`; non-value user actions gasless via `_msgSender()`
 
 ## See also
 - [REMAINING-ACTIONS.md](REMAINING-ACTIONS.md) — consolidated what's-left list (ops · follow-ons · not-started · mainnet gates)

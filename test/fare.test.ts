@@ -18,6 +18,38 @@ const ORDER_VALUE = ethers.parseEther("1");
 const TIP = ethers.parseEther("0.1");
 const MAX_FARE = ethers.parseEther("0.5");
 
+// Build + sign an EIP-2771 ForwardRequest for FareForwarder (OZ ERC2771Forwarder),
+// so a relay can submit `signer`'s call to `target.data` and pay the gas (F8).
+async function signForwardRequest(
+  forwarder: any,
+  signer: HardhatEthersSigner,
+  target: string,
+  data: string
+) {
+  const chainId = (await ethers.provider.getNetwork()).chainId;
+  const nonce = await forwarder.nonces(signer.address);
+  const deadline = (await time.latest()) + 3600;
+  const gas = 500_000n;
+  const req = { from: signer.address, to: target, value: 0n, gas, nonce, deadline: BigInt(deadline), data };
+  const signature = await signer.signTypedData(
+    { name: "FareForwarder", version: "1", chainId, verifyingContract: forwarder.target as string },
+    {
+      ForwardRequest: [
+        { name: "from", type: "address" },
+        { name: "to", type: "address" },
+        { name: "value", type: "uint256" },
+        { name: "gas", type: "uint256" },
+        { name: "nonce", type: "uint256" },
+        { name: "deadline", type: "uint48" },
+        { name: "data", type: "bytes" },
+      ],
+    },
+    req
+  );
+  // execute() takes ForwardRequestData (no nonce field — it reads the chain nonce).
+  return { from: req.from, to: req.to, value: req.value, gas: req.gas, deadline: req.deadline, data, signature };
+}
+
 const abi = ethers.AbiCoder.defaultAbiCoder();
 
 // Opaque drop commitment for the lifecycle tests. The real protocol commit is
@@ -48,11 +80,12 @@ describe("FARE protocol", () => {
     const vault = await (await ethers.getContractFactory("FareVault")).deploy();
     const drivers = await (await ethers.getContractFactory("FareDrivers")).deploy(pause.target);
     const venues = await (await ethers.getContractFactory("FareVenues")).deploy(pause.target);
-    const orders = await (await ethers.getContractFactory("FareOrders")).deploy(pause.target);
+    const forwarder = await (await ethers.getContractFactory("FareForwarder")).deploy();
+    const orders = await (await ethers.getContractFactory("FareOrders")).deploy(pause.target, forwarder.target);
     const settlement = await (await ethers.getContractFactory("FareSettlement")).deploy(pause.target);
     const disputes = await (await ethers.getContractFactory("FareDisputes")).deploy(pause.target);
     const verifier = await (await ethers.getContractFactory("MockLocationVerifier")).deploy();
-    const ratings = await (await ethers.getContractFactory("FareRatings")).deploy();
+    const ratings = await (await ethers.getContractFactory("FareRatings")).deploy(forwarder.target);
     await ratings.configure(orders.target);
 
     // wiring
@@ -92,7 +125,7 @@ describe("FARE protocol", () => {
     return {
       deployer, treasury, customer, driver1, driver2, venueOp, venueSigner, stranger,
       pause, vault, drivers, venues, orders, settlement, disputes, verifier, ratings,
-      venueId, domain,
+      forwarder, venueId, domain,
     };
   }
 
@@ -399,6 +432,55 @@ describe("FARE protocol", () => {
       expect(await f.vault.balanceOf(f.driver2.address)).to.equal(
         fare - fee + TIP + ethers.parseEther("0.1")
       );
+    });
+  });
+
+  describe("gasless meta-transactions (F8)", () => {
+    it("placeBid via the forwarder: bid recorded under the driver, relay pays gas", async () => {
+      const f = await loadFixture(deployAll);
+      // an Open order to bid on
+      const commit = dropCommit(DROP_LAT, DROP_LON, DROP_SALT);
+      await f.orders.connect(f.customer).createOrder(f.venueId, commit, 0, 0, MAX_FARE, 0, 0, { value: 0 });
+      const orderId = 1n;
+
+      const amount = ethers.parseEther("0.3");
+      const data = f.orders.interface.encodeFunctionData("placeBid", [orderId, amount]);
+      const req = await signForwardRequest(f.forwarder, f.driver1, f.orders.target as string, data);
+
+      // driver1 holds NO gas of its own; the relay (deployer) submits + pays.
+      const driverBalBefore = await ethers.provider.getBalance(f.driver1.address);
+      await expect(f.forwarder.connect(f.deployer).execute(req))
+        .to.emit(f.orders, "BidPlaced")
+        .withArgs(orderId, f.driver1.address, amount); // identity = driver1, not the relay
+
+      expect(await f.orders.bidOf(orderId, f.driver1.address)).to.equal(amount);
+      // the driver spent nothing — fully gasless
+      expect(await ethers.provider.getBalance(f.driver1.address)).to.equal(driverBalBefore);
+    });
+
+    it("rate via the forwarder: the order's customer rates gaslessly", async () => {
+      const f = await loadFixture(deployAll);
+      const { orderId } = await createAndAssign(f);
+      await confirmPickupOk(f, orderId, f.driver2);
+      await confirmDropoffOk(f, orderId, f.driver2);
+
+      const data = f.ratings.interface.encodeFunctionData("rate", [orderId, 5, 4]);
+      const req = await signForwardRequest(f.forwarder, f.customer, f.ratings.target as string, data);
+      await expect(f.forwarder.connect(f.deployer).execute(req))
+        .to.emit(f.ratings, "Rated")
+        .withArgs(orderId, f.driver2.address, f.venueId, 5, 4, f.customer.address);
+    });
+
+    it("a forged forward request (signer ≠ from) is rejected by the forwarder", async () => {
+      const f = await loadFixture(deployAll);
+      await f.orders.connect(f.customer).createOrder(f.venueId, dropCommit(DROP_LAT, DROP_LON, DROP_SALT), 0, 0, MAX_FARE, 0, 0, { value: 0 });
+      const data = f.orders.interface.encodeFunctionData("placeBid", [1n, ethers.parseEther("0.3")]);
+      // stranger signs but claims to be driver1 → OZ forwarder validates the sig
+      // against `from` and refuses to execute.
+      const req = await signForwardRequest(f.forwarder, f.stranger, f.orders.target as string, data);
+      req.from = f.driver1.address;
+      await expect(f.forwarder.connect(f.deployer).execute(req)).to.be.reverted;
+      expect(await f.orders.bidOf(1n, f.driver1.address)).to.equal(0n);
     });
   });
 

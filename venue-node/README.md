@@ -38,14 +38,22 @@ by doing the two things that are safe to relay:
 |---|---|
 | `POST /fund { address }` | **Sponsor gas** — top up a burner below `FUND_MIN_PAS` up to `FUND_AMOUNT_PAS` (a region-local, decentralized `/api/drip`). |
 | `POST /submit { method, args }` | **Relay a settlement call.** Only `confirmPickup` / `confirmDropoffZK` are allowlisted — they carry their own signatures / ZK proof and don't check `msg.sender`, so the relay submits them paying gas → those steps are fully gasless. |
-| `GET /health` | Relay address + gas balance + wired settlement address. |
+| `POST /forward { request }` | **Relay a gasless user action (F8).** Submits a user-signed EIP-2771 `ForwardRequest` through `FareForwarder`. Guarded: `value` must be 0 and `to` must be `FareOrders`/`FareRatings`, so the relay pays gas but never fronts a customer's escrow. |
+| `GET /health` | Relay address + gas balance + wired settlement + forwarder address. |
 
-**Deliberately not relayed:** `createOrder` / `acceptBid` / `placeBid` / `rate` /
-`register`. They check `msg.sender` and/or move the user's own value. Full gasless
-for those needs an **EIP-2771 forwarder** (a contract change) — the relay would
-then `execute()` a user-signed request through the forwarder. That's the next
-step toward end-to-end zero-friction; note the *order value itself* is always the
-user's money (gasless removes the "buy PAS for gas" friction, not the payment).
+**Gasless user actions via the forwarder (F8).** `FareOrders`/`FareRatings` are
+EIP-2771-aware, so the **non-value** actions — `placeBid`, `withdrawBid`,
+`cancelOpen`, `cancelAssigned`, `abandonOrder`, `rate` — read `_msgSender()` and
+can be meta-forwarded: the user signs a `ForwardRequest`, the relay `execute()`s
+it and pays gas, and the contract still sees the *user* as the sender (the
+forwarder verifies the signature). Drivers can bid fully gasless.
+
+**Still direct (not forwarded):** the **value-bearing** actions `createOrder` /
+`acceptBid` / `increaseTip`. They move the user's *own* money, so meta-forwarding
+would make the relay front the escrow — instead these stay on the gas-sponsored
+funded-burner path (`/fund` tops the burner up so it can pay its own value). The
+order value is always the user's money; gasless removes the "buy PAS for gas"
+friction, not the payment.
 
 ### Trust
 The relay holds a **funded venue account and pays gas only** — it can never move a

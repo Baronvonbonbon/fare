@@ -196,10 +196,10 @@ Ranked by leverage:
 | F5 | DA scoring (challenge-response + client reports), off-chain leaderboard | F3 | ✅ shipped (`scorer.mjs`) |
 | F6 | On-chain rewards | F5 | 🟡 Tier 1 shipped: trustless relay gas-rebate (`relayRebateBps` in `FareOrders`). Tier 2 (DA-score reward via `FareDataAvailability` + attester) deferred |
 | F7 | Hosted super-node mode (multi-venue appliance) | F2 | ✅ shipped (`HOME_COORDS` multi-region in `agent.mjs`) |
-| F8 | Venue-operated gasless relay | — | 🟡 relay shipped (`venue-node/`): gas sponsorship + settlement relay, no contract change; EIP-2771 forwarder for full meta-tx is the next step |
+| F8 | Venue-operated gasless relay | — | ✅ shipped — relay (gas sponsorship + settlement) **and** the EIP-2771 forwarder (`FareForwarder` + `_msgSender()` in `FareOrders`/`FareRatings`, `/forward` in the relay) for gasless non-value user actions |
 
 Phasing: **F1 → F2/F3 (replication substrate) → F4 → F5 → F6**, with F7 alongside
-F2 and F8 as the independent big network-effect bet. **F1–F5 shipped; F6 Tier 1
-shipped** (trustless relay gas-rebate). Remaining in F: **F6 Tier 2** (DA-score
-reward — needs an attester/oracle to bring F5 scores on-chain), **F7** (hosted
-super-node), **F8**'s EIP-2771 forwarder.
+F2 and F8 as the independent big network-effect bet. **F1–F5, F7, F8 shipped; F6
+Tier 1 shipped** (trustless relay gas-rebate). The only Group-F remainder is **F6
+Tier 2** (DA-score reward — deferred: it needs a trusted attester/oracle to bring
+F5 scores on-chain, and we're holding off on oracles for now).

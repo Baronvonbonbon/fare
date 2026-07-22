@@ -3,6 +3,8 @@ pragma solidity ^0.8.24;
 
 import "@openzeppelin/contracts/access/Ownable2Step.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import "@openzeppelin/contracts/utils/Context.sol";
+import "@openzeppelin/contracts/metatx/ERC2771Context.sol";
 import "./interfaces/IFare.sol";
 import "./lib/FareUpgradable.sol";
 import "./lib/GeoLib.sol";
@@ -31,7 +33,7 @@ import "./lib/GeoLib.sol";
 ///           pickup cosign  → orderValue credited to venue payout
 ///           dropoff cosign → fare (minus protocol fee) + tip to driver
 ///         All value leaves through FareVault pull-payments.
-contract FareOrders is Ownable2Step, ReentrancyGuard, FareUpgradable, IFareOrders {
+contract FareOrders is Ownable2Step, ReentrancyGuard, FareUpgradable, ERC2771Context, IFareOrders {
     struct Order {
         address customer;
         uint64 venueId;
@@ -111,7 +113,15 @@ contract FareOrders is Ownable2Step, ReentrancyGuard, FareUpgradable, IFareOrder
     uint8 public constant REASON_DRIVER_NO_SHOW = 2;
     uint8 public constant REASON_DRIVER_ABANDON = 3;
 
-    constructor(address _pauseRegistry) Ownable(msg.sender) {
+    /// @param _forwarder trusted EIP-2771 forwarder (FareForwarder) for gasless
+    ///        meta-txs on the non-value user actions — placeBid / withdrawBid /
+    ///        cancels / abandon (F8). Pass address(0) to disable meta-txs; value
+    ///        actions (createOrder / acceptBid / increaseTip) always use the
+    ///        direct caller, so the relay can never front a customer's escrow.
+    constructor(address _pauseRegistry, address _forwarder)
+        Ownable(msg.sender)
+        ERC2771Context(_forwarder)
+    {
         pauseRegistry = IFarePauseRegistry(_pauseRegistry);
     }
 
@@ -259,7 +269,7 @@ contract FareOrders is Ownable2Step, ReentrancyGuard, FareUpgradable, IFareOrder
     ///         customers can always exit an open order.
     function cancelOpen(uint256 orderId) external nonReentrant {
         Order storage o = orders[orderId];
-        require(msg.sender == o.customer, "not-customer");
+        require(_msgSender() == o.customer, "not-customer"); // gasless via forwarder (F8)
         require(o.status == Status.Open, "bad-status");
         uint96 refund = o.escrow;
         o.escrow = 0;
@@ -274,7 +284,7 @@ contract FareOrders is Ownable2Step, ReentrancyGuard, FareUpgradable, IFareOrder
     ///         it's a driver no-show — full refund and a reputation strike.
     function cancelAssigned(uint256 orderId) external nonReentrant {
         Order storage o = orders[orderId];
-        require(msg.sender == o.customer, "not-customer");
+        require(_msgSender() == o.customer, "not-customer"); // gasless via forwarder (F8)
         require(o.status == Status.Assigned, "bad-status");
 
         uint96 escrow = o.escrow;
@@ -299,7 +309,7 @@ contract FareOrders is Ownable2Step, ReentrancyGuard, FareUpgradable, IFareOrder
     ///         a trapped assignment is worse than a strike.
     function abandonOrder(uint256 orderId) external nonReentrant {
         Order storage o = orders[orderId];
-        require(msg.sender == o.driver, "not-driver");
+        require(_msgSender() == o.driver, "not-driver"); // gasless via forwarder (F8)
         require(o.status == Status.Assigned, "bad-status");
         uint96 refund = o.escrow;
         o.escrow = 0;
@@ -313,20 +323,22 @@ contract FareOrders is Ownable2Step, ReentrancyGuard, FareUpgradable, IFareOrder
 
     function placeBid(uint256 orderId, uint96 amount) external whenNotPaused whenNotFrozen {
         Order storage o = orders[orderId];
+        address driver = _msgSender(); // gasless via forwarder (F8)
         require(o.status == Status.Open, "bad-status");
-        require(drivers.isEligible(msg.sender), "driver-not-eligible");
+        require(drivers.isEligible(driver), "driver-not-eligible");
         require(amount > 0 && amount <= o.maxFare, "bad-amount");
-        if (bidOf[orderId][msg.sender] == 0) {
-            _bidders[orderId].push(msg.sender);
+        if (bidOf[orderId][driver] == 0) {
+            _bidders[orderId].push(driver);
         }
-        bidOf[orderId][msg.sender] = amount;
-        emit BidPlaced(orderId, msg.sender, amount);
+        bidOf[orderId][driver] = amount;
+        emit BidPlaced(orderId, driver, amount);
     }
 
     function withdrawBid(uint256 orderId) external {
-        require(bidOf[orderId][msg.sender] > 0, "no-bid");
-        bidOf[orderId][msg.sender] = 0;
-        emit BidWithdrawn(orderId, msg.sender);
+        address driver = _msgSender(); // gasless via forwarder (F8)
+        require(bidOf[orderId][driver] > 0, "no-bid");
+        bidOf[orderId][driver] = 0;
+        emit BidWithdrawn(orderId, driver);
     }
 
     /// @notice Customer picks the winning driver — any bid, not forced-lowest,
@@ -473,5 +485,22 @@ contract FareOrders is Ownable2Step, ReentrancyGuard, FareUpgradable, IFareOrder
 
     function biddersOf(uint256 orderId) external view returns (address[] memory) {
         return _bidders[orderId];
+    }
+
+    // ---- EIP-2771 context (F8) ----
+    // Context is inherited via both Ownable and ERC2771Context; resolve to the
+    // 2771 versions so `_msgSender()` unwraps the appended sender on a forwarded
+    // call. Value functions above deliberately still read `msg.sender` directly.
+
+    function _msgSender() internal view override(Context, ERC2771Context) returns (address) {
+        return ERC2771Context._msgSender();
+    }
+
+    function _msgData() internal view override(Context, ERC2771Context) returns (bytes calldata) {
+        return ERC2771Context._msgData();
+    }
+
+    function _contextSuffixLength() internal view override(Context, ERC2771Context) returns (uint256) {
+        return ERC2771Context._contextSuffixLength();
     }
 }

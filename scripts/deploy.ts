@@ -117,11 +117,14 @@ async function main() {
   const vault = await deployOrReuse("vault", "FareVault");
   const drivers = await deployOrReuse("drivers", "FareDrivers", [pause]);
   const venues = await deployOrReuse("venues", "FareVenues", [pause]);
-  const orders = await deployOrReuse("orders", "FareOrders", [pause]);
+  // EIP-2771 trusted forwarder for gasless meta-txs (F8) — must exist before
+  // FareOrders / FareRatings so it can be baked into their (immutable) context.
+  const forwarder = await deployOrReuse("forwarder", "FareForwarder");
+  const orders = await deployOrReuse("orders", "FareOrders", [pause, forwarder]);
   const settlement = await deployOrReuse("settlement", "FareSettlement", [pause]);
   const disputes = await deployOrReuse("disputes", "FareDisputes", [pause]);
   const locationVerifier = await deployOrReuse("locationVerifier", "FareLocationVerifier");
-  const ratings = await deployOrReuse("ratings", "FareRatings");
+  const ratings = await deployOrReuse("ratings", "FareRatings", [forwarder]);
 
   // ── 2. Wiring ──────────────────────────────────────────────────────────
   console.log("\n2. Wiring");

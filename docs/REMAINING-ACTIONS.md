@@ -42,10 +42,14 @@ infra/UI, spec'd in the linked design note.
   (`web/src/photo.ts`). Remaining: capture+compress UI, an **authorized submitter**
   (Bulletin Chain `store` / IPFS pin), key-wrap over `msg.ts`, and the expiry job.
   See [PHOTOS.md](PHOTOS.md).
-- 🟡 **C1 / F8 Gasless relay** — `venue-node/` relay shipped (gas sponsorship +
-  settlement relay, no contract change). Remaining: **run it** against the live
-  deploy, and an **EIP-2771 forwarder** for full meta-tx (createOrder / placeBid /
-  rate). See [NETWORK-ARCHITECTURE.md](NETWORK-ARCHITECTURE.md).
+- ✅ **C1 / F8 Gasless relay** — `venue-node/` relay (gas sponsorship + settlement
+  relay) **and** the EIP-2771 forwarder: `FareForwarder` + `_msgSender()` in
+  `FareOrders`/`FareRatings` make the **non-value** user actions (placeBid /
+  withdrawBid / cancels / rate) gasless via the relay's `/forward`. Value actions
+  (createOrder / acceptBid / increaseTip) stay on the gas-sponsored funded-burner
+  path so the relay never fronts escrow. Remaining: **run it** against the live
+  deploy (needs a deploy that includes `FareForwarder`), and optional PWA wiring
+  to build/sign forward requests. See [NETWORK-ARCHITECTURE.md](NETWORK-ARCHITECTURE.md).
 
 ---
 

@@ -52,7 +52,9 @@ async function main() {
   console.log("1. Deploy FareOrders v2");
   const factory = await ethers.getContractFactory("FareOrders", deployer);
   const nonce = await provider.getTransactionCount(deployer.address);
-  const unsigned = await factory.getDeployTransaction(book.pauseRegistry);
+  // Preserve the EIP-2771 forwarder (F8) across the upgrade; ZeroAddress on an
+  // older book simply leaves meta-txs disabled on the new instance.
+  const unsigned = await factory.getDeployTransaction(book.pauseRegistry, book.forwarder ?? ethers.ZeroAddress);
   await deployer.sendTransaction({ ...unsigned, nonce, gasLimit: GAS_LIMIT });
   await waitForNonce(provider, deployer.address, nonce);
   const ordersV2Addr = ethers.getCreateAddress({ from: deployer.address, nonce });
