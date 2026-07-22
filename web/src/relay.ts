@@ -31,6 +31,50 @@ export function forwarderAvailable(): boolean {
   return !!activeRelayUrl() && !!ADDRESSES.forwarder;
 }
 
+// ── relay POST + decline handling ────────────────────────────────────────────
+// The relay runs a profitability guard (venue-node/economics.mjs): it returns
+// HTTP 402 when a fare's fee reward can't cover the gas it would sponsor. On a
+// decline we ask the user whether to submit the tx paying their own gas.
+
+/// Thrown when the relay declines (402) — carries its reason detail for the prompt.
+class RelayDeclined extends Error {
+  detail: any;
+  constructor(reason: string, detail: any) { super(reason); this.detail = detail; }
+}
+
+/// POST to the relay; returns the JSON, throws RelayDeclined on 402, else Error.
+/// BigInts (e.g. ZK pubSignals) are stringified.
+async function postRelay(path: string, body: any): Promise<any> {
+  const res = await fetch(`${activeRelayUrl()}${path}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body, (_k, v) => (typeof v === "bigint" ? v.toString() : v)),
+  });
+  const j = (await res.json().catch(() => ({}))) as { txHash?: string; error?: string; declined?: boolean };
+  if (res.status === 402 || j.declined) throw new RelayDeclined(j.error ?? "relay declined", j);
+  if (!res.ok || !j.txHash) throw new Error(j.error ?? `relay ${path} failed`);
+  return j;
+}
+
+/// Run `relayFn`; if the relay declines, ask whether to pay own gas and, if so,
+/// run the direct `directFn`. A declined-and-refused action throws "cancelled".
+async function withDecline<T>(label: string, directFn: () => Promise<T>, relayFn: () => Promise<T>): Promise<T> {
+  try {
+    return await relayFn();
+  } catch (e) {
+    if (e instanceof RelayDeclined) {
+      const d = e.detail ?? {};
+      const why = d.rebate !== undefined ? `\n\nFee reward ${d.rebate} PAS < gas cost ${d.cost} PAS.`
+        : d.action ? `\n\n(${e.message})` : "";
+      const ok = typeof window !== "undefined" &&
+        window.confirm(`The relay won't sponsor gas for "${label}" right now — ${e.message}.${why}\n\nSubmit paying your own gas instead?`);
+      if (ok) return directFn();
+      throw new Error("cancelled — nothing submitted");
+    }
+    throw e;
+  }
+}
+
 /// Ask the venue relay to sponsor gas for `address`.
 async function relayFund(address: string): Promise<DripResult> {
   const res = await fetch(`${activeRelayUrl()}/fund`, {
@@ -73,33 +117,21 @@ export async function sponsorGas(address: string): Promise<DripResult> {
   return requestDrip(address);
 }
 
-/// Submit a relayable settlement call. Only confirmPickup / confirmDropoffZK are
-/// relayable (the relay enforces this too). Returns the tx hash.
-async function relaySubmit(method: "confirmPickup" | "confirmDropoffZK", args: any[]): Promise<string> {
-  const res = await fetch(`${activeRelayUrl()}/submit`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    // BigInt (e.g. ZK pubSignals) isn't JSON-serializable — stringify them.
-    body: JSON.stringify({ method, args }, (_k, v) => (typeof v === "bigint" ? v.toString() : v)),
-  });
-  const j = (await res.json().catch(() => ({}))) as { txHash?: string; error?: string };
-  if (!res.ok || !j.txHash) throw new Error(j.error ?? "relay submit failed");
-  return j.txHash;
-}
-
 /// Submit a settlement call through the relay (gasless) when configured, else
-/// directly from the user's wallet. Returns a tx-like object with .wait() so it
-/// drops into the existing act() flow unchanged.
+/// directly from the user's wallet. Only confirmPickup / confirmDropoffZK are
+/// relayable. Returns a tx-like object with .wait() so it drops into act(). On a
+/// relay decline (unprofitable) it prompts to submit paying own gas.
 export async function relaySettle(
   runner: any,
   method: "confirmPickup" | "confirmDropoffZK",
   args: any[]
 ): Promise<{ hash?: string; wait: () => Promise<any> }> {
-  if (relayConfigured()) {
-    const hash = await relaySubmit(method, args);
-    return { hash, wait: () => sendProvider.waitForTransaction(hash) };
-  }
-  return runner.settlement[method](...args);
+  const direct = () => runner.settlement[method](...args);
+  if (!relayConfigured()) return direct();
+  return withDecline(method, direct, async () => {
+    const j = await postRelay("/submit", { method, args });
+    return { hash: j.txHash, wait: () => sendProvider.waitForTransaction(j.txHash) };
+  });
 }
 
 // ── gasless user actions via EIP-2771 forwarder (F8) ─────────────────────────
@@ -138,35 +170,25 @@ async function buildForwardRequest(signer: any, to: string, data: string) {
   return { from, to, value: "0", gas: gas.toString(), deadline, data, signature };
 }
 
-async function relayForwardSubmit(request: any): Promise<string> {
-  const res = await fetch(`${activeRelayUrl()}/forward`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ request }),
-  });
-  const j = (await res.json().catch(() => ({}))) as { txHash?: string; error?: string };
-  if (!res.ok || !j.txHash) throw new Error(j.error ?? "relay forward failed");
-  return j.txHash;
-}
-
 /// Submit a non-value user action gaslessly through the forwarder when available,
 /// else directly from the bound wallet. `contract` is the signer-bound handle
 /// (its runner both signs the request and is the direct-call fallback); `target`
 /// selects the on-chain address the relay is allowed to forward to. Returns a
-/// tx-like object with .wait() so it drops into act() unchanged.
+/// tx-like object with .wait(). On a relay decline it prompts to pay own gas.
 export async function relayForward(
   target: "orders" | "ratings",
   contract: any,
   method: string,
   args: any[]
 ): Promise<{ hash?: string; wait: () => Promise<any> }> {
-  if (forwarderAvailable()) {
+  const direct = () => contract[method](...args); // direct funded-burner path
+  if (!forwarderAvailable()) return direct();
+  return withDecline(method, direct, async () => {
     const data = contract.interface.encodeFunctionData(method, args);
     const request = await buildForwardRequest(contract.runner, ADDRESSES[target], data);
-    const hash = await relayForwardSubmit(request);
-    return { hash, wait: () => sendProvider.waitForTransaction(hash) };
-  }
-  return contract[method](...args); // direct funded-burner path
+    const j = await postRelay("/forward", { request });
+    return { hash: j.txHash, wait: () => sendProvider.waitForTransaction(j.txHash) };
+  });
 }
 
 // ── gasless withdraw (F8) ────────────────────────────────────────────────────
@@ -195,7 +217,9 @@ export async function relayWithdraw(
   const signer = vaultContract.runner;
   const account: string = await signer.getAddress();
   const to = recipient ?? account;
-  if (forwarderAvailable()) {
+  const direct = () => (recipient ? vaultContract.withdrawTo(recipient) : vaultContract.withdraw());
+  if (!forwarderAvailable()) return direct();
+  return withDecline("withdraw", direct, async () => {
     const nonce: bigint = await vaultContract.withdrawNonce(account);
     const deadline = Math.floor(Date.now() / 1000) + 3600;
     const signature = await signer.signTypedData(
@@ -203,14 +227,7 @@ export async function relayWithdraw(
       WITHDRAW_TYPES,
       { account, recipient: to, nonce, deadline }
     );
-    const res = await fetch(`${activeRelayUrl()}/withdraw`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ account, recipient: to, deadline, signature }),
-    });
-    const j = (await res.json().catch(() => ({}))) as { txHash?: string; error?: string };
-    if (!res.ok || !j.txHash) throw new Error(j.error ?? "relay withdraw failed");
-    return { hash: j.txHash, wait: () => sendProvider.waitForTransaction(j.txHash!) };
-  }
-  return recipient ? vaultContract.withdrawTo(recipient) : vaultContract.withdraw();
+    const j = await postRelay("/withdraw", { account, recipient: to, deadline, signature });
+    return { hash: j.txHash, wait: () => sendProvider.waitForTransaction(j.txHash) };
+  });
 }

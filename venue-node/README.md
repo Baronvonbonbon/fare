@@ -71,6 +71,26 @@ user's funds. Worst case an abuser drains the relay's gas budget; it's
 balance-gated + rate-limited, and the operator refills. Run it behind a
 rate-limited reverse proxy / Cloudflare tunnel; never raw-expose it.
 
+### Profitability guard (F6/F8 economics)
+
+The relay only sponsors what pays off (`economics.mjs`, unit-tested):
+
+- **Reward-bearing actions** — the **dropoff settlement** (earns the F6 rebate =
+  `fare · feeBps · relayRebateBps / 1e8`) and **`withdrawFor`** (earns the F8 fee
+  = `balance · withdrawFeeBps`). Each is relayed only if the reward covers the
+  cost × `RELAY_MIN_MARGIN`. For settlement the "cost" is the fare's **cumulative**
+  relayed gas — the relay tracks every unit it spent relaying that order's bids +
+  pickup, and requires the rebate to cover the whole fare before it settles.
+- **No-reward actions** — `/fund`, bids, pickup, cancels, rate — are sponsored as
+  loss-leaders under a rolling **`RELAY_GAS_BUDGET_PAS`** per **`RELAY_BUDGET_WINDOW_MS`**.
+- On a decline the relay returns **HTTP 402**; the PWA prompts the user to submit
+  the tx **paying their own gas** instead (so nothing dead-ends).
+
+> **Testnet caveat:** demo fares are tiny (a 0.4 PAS fare rebates ~0.002 PAS),
+> which won't cover real gas — so the guard will usually **decline** settlements
+> on Paseo and the app will prompt "pay your own gas?". For a fully-gasless demo
+> set `RELAY_PROFIT_GUARD=off`, or raise the on-chain `relayRebateBps`/`feeBps`.
+
 ### Run
 
 ```bash
