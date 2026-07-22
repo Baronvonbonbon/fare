@@ -2,6 +2,7 @@
 import {
   BrowserProvider,
   Contract,
+  FallbackProvider,
   JsonRpcProvider,
   Wallet,
   ethers,
@@ -9,6 +10,8 @@ import {
 import deployed from "./deployed-addresses.json";
 import { MicroDeg } from "./geo";
 import { positionCommit } from "./zk";
+import { rpcPool } from "./pool";
+import { readEndpoints, broadcastTargets, firstSuccess } from "./rpcpool";
 import {
   DISPUTES_ABI,
   DRIVERS_ABI,
@@ -119,22 +122,71 @@ export const RPC_URL = (() => {
   }
 })();
 
+/// Build the read provider for the current mode. Light-client modes (daemon /
+/// embedded-placeholder) read through a single trustless endpoint. Hosted mode
+/// (weak devices) folds any discovered venue RPCs in as *lower-priority
+/// fallbacks* behind the hosted anchor via a FallbackProvider (quorum 1 → use
+/// the highest-priority endpoint that answers; fall to a venue RPC only when
+/// hosted stalls) — liveness without displacing the non-venue anchor (F4, §4).
+function buildReadProvider(): ethers.AbstractProvider {
+  const mode = getNodeMode();
+  const hosted = mode === "pine-daemon" ? getNodeUrl() : HOSTED_URL;
+  const eps = readEndpoints(mode, hosted, rpcPool());
+  if (eps.length <= 1) {
+    return new JsonRpcProvider(hosted, CHAIN_ID, { staticNetwork: true });
+  }
+  return new FallbackProvider(
+    eps.map((e) => ({
+      provider: new JsonRpcProvider(e.url, CHAIN_ID, { staticNetwork: true }),
+      priority: e.priority,
+      stallTimeout: 3000,
+    })),
+    CHAIN_ID,
+    { quorum: 1 }
+  );
+}
+
 /// The active read provider. For hosted/pine-daemon it's ready at module
 /// load; for pine-embedded it's a placeholder until initNode() swaps in the
 /// connected light-client provider.
-export let readProvider: ethers.AbstractProvider = new JsonRpcProvider(
-  getNodeMode() === "pine-daemon" ? getNodeUrl() : HOSTED_URL,
-  CHAIN_ID,
-  { staticNetwork: true }
-);
+export let readProvider: ethers.AbstractProvider = buildReadProvider();
 
 /// Broadcast provider for local-key wallets (burner / pasted key). Reads may
 /// go through a light client, but light clients can't broadcast — so we always
-/// SEND transactions through the hosted eth-rpc gateway. This is the standard
-/// light-client split: verify reads locally, submit through a gateway.
-export const sendProvider: JsonRpcProvider = new JsonRpcProvider(HOSTED_URL, CHAIN_ID, {
-  staticNetwork: true,
-});
+/// SEND transactions through the hosted eth-rpc gateway. To resist a single RPC
+/// silently dropping (censoring) a tx, this fans each broadcast out to the
+/// hosted anchor plus any discovered venue RPCs, resolving on the hosted-bound
+/// response (so .wait() works) and falling over to a venue submission only if
+/// hosted itself fails (F4, §4 "submit to several"). Nonce/gas/reads stay on
+/// the authoritative hosted endpoint.
+class MultiSubmitProvider extends JsonRpcProvider {
+  #extra: JsonRpcProvider[];
+  constructor(hosted: string, chainId: number, venue: string[]) {
+    super(hosted, chainId, { staticNetwork: true });
+    // broadcastTargets keeps hosted first + deduped; drop it here (super is it).
+    this.#extra = broadcastTargets(hosted, venue)
+      .filter((u) => u !== hosted)
+      .map((u) => new JsonRpcProvider(u, chainId, { staticNetwork: true }));
+  }
+  async broadcastTransaction(signedTx: string) {
+    // Fan out to venue RPCs in parallel (fire-and-forget — a submission the
+    // hosted RPC might drop still reaches them); resolve on the hosted result.
+    const extras = this.#extra.map((p) => p.broadcastTransaction(signedTx));
+    extras.forEach((p) => p.catch(() => {}));
+    try {
+      return await super.broadcastTransaction(signedTx);
+    } catch (hostedErr) {
+      if (extras.length === 0) throw hostedErr;
+      return firstSuccess(extras); // hosted censored → carry it via a venue RPC
+    }
+  }
+}
+
+export const sendProvider: JsonRpcProvider = new MultiSubmitProvider(
+  HOSTED_URL,
+  CHAIN_ID,
+  rpcPool()
+);
 
 export type PineSyncStep = string;
 let nodeInitPromise: Promise<void> | null = null;

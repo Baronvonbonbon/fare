@@ -78,7 +78,7 @@ infra/UI, spec'd in the linked design note.
 - ✅ **F1 `VenueMetadataUpdated` event** — `setMetadata` now emits it (+ test); event-driven menu-update replication unblocked.
 - ✅ **F2 Venue appliance** — `venue-node/` Docker Compose (Kubo + agent + relay + Caddy). Remaining: **run it** on a venue box, and an optional `pine-rpc` light-client container (folded into F4).
 - ✅ **F3 Replication agent** — `venue-node/agent.mjs`: chain-indexed region pinning + region-manifest publish, re-pins on `VenueMetadataUpdated`.
-- 🟡 **F4 Client gateway/RPC fallback pool** — gateway pool shipped (`web/src/pool.ts` + test): the client learns venue/region IPFS gateways from manifests as it loads menus and folds them into menu resolution. Remaining: the **RPC-provider pool** — venue RPCs multiplexed *behind* the in-app light client (never a sole trusted read path).
+- ✅ **F4 Client gateway/RPC fallback pool** — gateway pool (`web/src/pool.ts`): the client learns venue/region IPFS gateways from manifests as it loads menus. RPC-provider pool (`web/src/rpcpool.ts`, wired in `chain.ts`): venue RPCs augment reads only in hosted mode as lower-priority fallbacks behind the hosted anchor, and broadcasts fan out to several endpoints — the in-app light client stays the trustless primary, venue RPC never a sole read path (§4/§5). Both tested.
 - ✅ **F5 Data-availability scoring** — `venue-node/scorer.mjs`: challenge-response (random byte-range vs. CID-canonical content) + decayed client reports → per-node score + leaderboard. Feeds F6.
 - ☐ **F6 On-chain DA rewards** (fee discount / token) — protocol-incentivized replication.
 - ☐ **F7 Hosted super-node mode** (for non-technical venues).

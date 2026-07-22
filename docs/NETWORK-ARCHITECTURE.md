@@ -178,17 +178,17 @@ Ranked by leverage:
 | F1 | `VenueMetadataUpdated` event (+ test) | — | ✅ shipped (S, on-chain) |
 | F2 | Venue appliance (`venue-node/` compose: Kubo + agent + relay + Caddy) | — | ✅ shipped (pine-rpc container deferred to F4) |
 | F3 | Replication agent: chain-indexed region pinning + manifest publish | F1, F2 | ✅ shipped (`agent.mjs`) |
-| F4 | Client: build gateway/RPC fallback pool from manifests; light-client-primary | F3 | 🟡 gateway pool shipped (`web/src/pool.ts`); RPC-provider pool (multiplexed, light-client-primary) remaining |
+| F4 | Client: build gateway/RPC fallback pool from manifests; light-client-primary | F3 | ✅ shipped — gateway pool (`web/src/pool.ts`) + RPC-provider pool (`web/src/rpcpool.ts`, wired in `chain.ts`) |
 | F5 | DA scoring (challenge-response + client reports), off-chain leaderboard | F3 | ✅ shipped (`scorer.mjs`) |
 | F6 | On-chain DA rewards (`FareDataAvailability`: fee discount / token) | F5 | L |
 | F7 | Hosted super-node mode (multi-venue appliance) | F2 | M |
 | F8 | Venue-operated gasless relay | — | 🟡 relay shipped (`venue-node/`): gas sponsorship + settlement relay, no contract change; EIP-2771 forwarder for full meta-tx is the next step |
 
 Phasing: **F1 → F2/F3 (replication substrate) → F4 → F5 → F6**, with F7 alongside
-F2 and F8 as the independent big network-effect bet. **F1–F3 shipped** and **F4's
-gateway pool shipped** (`web/src/pool.ts` — the client learns venue/region
-gateways from manifests as it loads menus). Remaining on F4: the **RPC-provider
-pool** — venue RPCs discovered into `rpcPool()` must be multiplexed *behind* the
-in-app light client, never a sole trusted read path (§4/§5), so that's its own
-careful pass. **F5 shipped** (`scorer.mjs` — challenge-response + client reports
-→ leaderboard); it feeds **F6** (on-chain DA rewards) once scores are trusted.
+F2 and F8 as the independent big network-effect bet. **F1–F5 shipped.** F4's
+RPC-provider pool (`web/src/rpcpool.ts`) keeps the in-app light client the
+trustless primary — venue RPCs augment reads *only* in hosted mode as
+lower-priority fallbacks behind the hosted anchor, and broadcasts fan out to
+several endpoints (censorship-resistance) — never a sole trusted read path
+(§4/§5). Remaining in F: **F6** (on-chain DA rewards, gated on F5 scores), **F7**
+(hosted super-node), **F8**'s EIP-2771 forwarder.
