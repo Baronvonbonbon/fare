@@ -106,6 +106,19 @@ export const PAUSE_ABI = [
 export const ROUTER_ABI = [
   "function currentAddrOf(bytes32) view returns (address)",
   "function versionOf(bytes32) view returns (uint64)",
+  // Upgrade console (D4): registry admin + freeze-and-drain promotion.
+  "function owner() view returns (address)",
+  "function historyOf(bytes32) view returns (address[])",
+  "function register(bytes32 name, address addr)",
+  "function upgradeContract(bytes32 name, address newAddr, bool freezeOld)",
+  "function setContractFrozen(bytes32 name, address addr, bool frozenState)",
+];
+
+// Minimal FareUpgradable surface — read the live freeze state + router binding
+// of whatever address the registry points at (D4).
+export const UPGRADABLE_ABI = [
+  "function frozen() view returns (bool)",
+  "function router() view returns (address)",
 ];
 
 export const RATINGS_ABI = [

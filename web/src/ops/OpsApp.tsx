@@ -3,6 +3,7 @@ import { Session, SignerMode, connect, short } from "../chain";
 import DisputesConsole from "./DisputesConsole";
 import GovernanceConsole from "./GovernanceConsole";
 import PauseConsole from "./PauseConsole";
+import UpgradeConsole from "./UpgradeConsole";
 
 // FARE — ops / governance console (integration-plan group D).
 //
@@ -13,8 +14,7 @@ import PauseConsole from "./PauseConsole";
 //   • Disputes (D1) — arbiter ruling queue
 //   • Params   (D2) — owner-tunable governance knobs
 //   • Pause    (D3) — guardian emergency stop
-//
-// D4 (upgrade) lands here as a further tab.
+//   • Upgrade  (D4) — router registry + freeze-and-drain promotion
 
 export type Run = (label: string, fn: () => Promise<any>, after?: () => Promise<any> | void) => Promise<void>;
 
@@ -25,12 +25,13 @@ export interface ConsoleProps {
   say: (msg: string, err?: boolean) => void;
 }
 
-type Tab = "disputes" | "params" | "pause";
+type Tab = "disputes" | "params" | "pause" | "upgrade";
 
 const TABS: { id: Tab; glyph: string; label: string }[] = [
   { id: "disputes", glyph: "⚖️", label: "disputes" },
   { id: "params", glyph: "🎛", label: "params" },
   { id: "pause", glyph: "⏸", label: "pause" },
+  { id: "upgrade", glyph: "⬆", label: "upgrade" },
 ];
 
 export default function OpsApp() {
@@ -100,6 +101,7 @@ export default function OpsApp() {
       {tab === "disputes" && <DisputesConsole {...props} />}
       {tab === "params" && <GovernanceConsole {...props} />}
       {tab === "pause" && <PauseConsole {...props} />}
+      {tab === "upgrade" && <UpgradeConsole {...props} />}
 
       {toast && <div className={`toast${toast.err ? " err" : ""}`}>{toast.msg}</div>}
     </>
