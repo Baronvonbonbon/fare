@@ -76,8 +76,8 @@ infra/UI, spec'd in the linked design note.
 
 **Group F — venues-as-infrastructure** (design in [NETWORK-ARCHITECTURE.md](NETWORK-ARCHITECTURE.md))
 - ✅ **F1 `VenueMetadataUpdated` event** — `setMetadata` now emits it (+ test); event-driven menu-update replication unblocked.
-- ☐ **F2 Venue appliance** — Docker Compose (Kubo + pine-rpc light client + agent).
-- ☐ **F3 Replication agent** — chain-indexed region pinning + manifest publish.
+- ✅ **F2 Venue appliance** — `venue-node/` Docker Compose (Kubo + agent + relay + Caddy). Remaining: **run it** on a venue box, and an optional `pine-rpc` light-client container (folded into F4).
+- ✅ **F3 Replication agent** — `venue-node/agent.mjs`: chain-indexed region pinning + region-manifest publish, re-pins on `VenueMetadataUpdated`.
 - ☐ **F4 Client gateway/RPC fallback pool** from venue manifests (light-client-first).
 - ☐ **F5 Data-availability scoring** (challenge-response + client reports).
 - ☐ **F6 On-chain DA rewards** (fee discount / token) — protocol-incentivized replication.

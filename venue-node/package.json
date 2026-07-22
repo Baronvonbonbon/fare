@@ -3,9 +3,10 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
-  "description": "FARE venue appliance — starts with a gasless relay (sponsor gas + relay settlement).",
+  "description": "FARE venue appliance — gasless relay (sponsor gas + relay settlement) + chain-indexed replication agent (region pinning + manifest).",
   "scripts": {
-    "relay": "node --env-file=.env relay.mjs"
+    "relay": "node --env-file=.env relay.mjs",
+    "agent": "node --env-file=.env agent.mjs"
   },
   "dependencies": {
     "ethers": "^6.13.0"

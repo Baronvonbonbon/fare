@@ -1,0 +1,75 @@
+# FARE venue appliance (F2) — one-command bundle: Kubo (IPFS) + replication agent
+# + gasless relay, fronted by a rate-limited Caddy reverse proxy.
+# See ../docs/NETWORK-ARCHITECTURE.md §1.
+#
+#   cp .env.example .env   # set HOME_LAT/HOME_LON (+ RELAY_PRIVATE_KEY for gas)
+#   docker compose up -d
+#
+# Never raw-expose Kubo or the RPC — only Caddy binds a public port. Kubo's API
+# and the agent/relay listen on the internal compose network only.
+
+services:
+  # ── IPFS: pins this venue's menu + replicates the region's (agent-driven) ────
+  kubo:
+    image: ipfs/kubo:v0.30.0
+    restart: unless-stopped
+    volumes:
+      - ipfs-data:/data/ipfs
+    # API (5001) stays internal to the compose network — Caddy exposes only the
+    # gateway (8080), read-only. Swarm port is published for DHT connectivity.
+    ports:
+      - "4001:4001" # libp2p swarm (inbound peers)
+      - "4001:4001/udp"
+    networks: [venue]
+
+  # ── Replication agent (F3): chain-indexed region pinning + manifest publish ──
+  agent:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["node", "--env-file=.env", "agent.mjs"]
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      # Reach Kubo over the compose network, not localhost.
+      KUBO_API_URL: http://kubo:5001
+      ADDRESS_BOOK: /deployed-addresses.json
+    volumes:
+      - ../deployed-addresses.json:/deployed-addresses.json:ro
+    depends_on: [kubo]
+    networks: [venue]
+
+  # ── Gasless relay (F8/C1): sponsor gas + relay settlement calls ──────────────
+  # Only starts if RELAY_PRIVATE_KEY is set; harmless to leave running otherwise
+  # (it exits and restart:on-failure won't spin it hot).
+  relay:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["node", "--env-file=.env", "relay.mjs"]
+    restart: on-failure:3
+    env_file: .env
+    environment:
+      ADDRESS_BOOK: /deployed-addresses.json
+    volumes:
+      - ../deployed-addresses.json:/deployed-addresses.json:ro
+    networks: [venue]
+
+  # ── Reverse proxy: the ONLY public surface. Rate-limited, read-only routes. ──
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "8080:8080" # public HTTP (front with a Cloudflare tunnel / TLS in prod)
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+    depends_on: [kubo, agent, relay]
+    networks: [venue]
+
+networks:
+  venue:
+
+volumes:
+  ipfs-data:
+  caddy-data:

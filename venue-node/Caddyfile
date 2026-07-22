@@ -1,0 +1,31 @@
+# FARE venue appliance — reverse proxy. The ONLY public surface (F2).
+# Everything else binds the internal compose network only; nothing here exposes
+# Kubo's API (5001) or lets the outside write to it — the gateway is read-only.
+#
+# In production, front this with a Cloudflare tunnel (TLS + edge rate limiting).
+# The relay already does per-IP rate limiting in-process; for hard limits on the
+# gateway, build Caddy with the caddy-ratelimit plugin and add a `rate_limit`
+# directive here.
+
+:8080 {
+	# ── IPFS gateway (read-only): resolve any pinned/region CID ──────────────
+	handle_path /ipfs/* {
+		rewrite * /ipfs{uri}
+		reverse_proxy kubo:8080
+	}
+
+	# ── Replication agent status (F3): pinned CIDs, region set, manifest CID ─
+	handle_path /agent/* {
+		reverse_proxy agent:8789
+	}
+
+	# ── Gasless relay (F8): /fund, /submit, /health ─────────────────────────
+	handle_path /relay/* {
+		reverse_proxy relay:8788
+	}
+
+	# Everything else: no raw Kubo API, no default listing.
+	handle {
+		respond "FARE venue node" 200
+	}
+}

@@ -256,8 +256,8 @@ Ordered roughly by leverage. Check off as landed.
 | E3 | External audit | E | — | ☐ todo |
 | E4 | Device attestation | E | Driver view | ☐ todo |
 | F1 | VenueMetadataUpdated event | F | Contracts | ✅ done |
-| F2 | Venue appliance (Kubo+RPC+agent) | F | venue-node/ | ☐ todo |
-| F3 | Replication agent (region pinning + manifest) | F | venue-node/ | ☐ todo |
+| F2 | Venue appliance (Kubo+RPC+agent) | F | venue-node/ | ✅ done |
+| F3 | Replication agent (region pinning + manifest) | F | venue-node/ | ✅ done |
 | F4 | Client gateway/RPC fallback pool | F | Infra | ☐ todo |
 | F5 | DA scoring (challenge-response) | F | Off-chain | ☐ todo |
 | F6 | On-chain DA rewards | F | Contracts | ☐ todo |
@@ -268,8 +268,8 @@ Ordered roughly by leverage. Check off as landed.
 *Turn venues into network nodes — geo-replicated menus, chain access, gas relay.
 Full design in [NETWORK-ARCHITECTURE.md](NETWORK-ARCHITECTURE.md).*
 - [x] F1 `VenueMetadataUpdated` event (event-driven menu-update replication)
-- [ ] F2 Venue appliance — Docker Compose (Kubo + pine-rpc light client + agent)
-- [ ] F3 Replication agent — chain-indexed region pinning + manifest publish
+- [x] F2 Venue appliance — Docker Compose (Kubo + agent + relay + Caddy; pine-rpc container deferred to F4)
+- [x] F3 Replication agent — chain-indexed region pinning + manifest publish
 - [ ] F4 Client gateway/RPC fallback pool from venue manifests (light-client-first)
 - [ ] F5 Data-availability scoring (challenge-response + client reports)
 - [ ] F6 On-chain DA rewards (fee discount / token, protocol-incentivized)

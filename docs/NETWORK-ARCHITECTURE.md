@@ -176,8 +176,8 @@ Ranked by leverage:
 | # | Item | Depends on | Size |
 |---|---|---|---|
 | F1 | `VenueMetadataUpdated` event (+ test) | — | ✅ shipped (S, on-chain) |
-| F2 | Venue appliance (`venue-node/` compose: Kubo + pine-rpc + agent) | — | M |
-| F3 | Replication agent: chain-indexed region pinning + manifest publish | F1, F2 | M |
+| F2 | Venue appliance (`venue-node/` compose: Kubo + agent + relay + Caddy) | — | ✅ shipped (pine-rpc container deferred to F4) |
+| F3 | Replication agent: chain-indexed region pinning + manifest publish | F1, F2 | ✅ shipped (`agent.mjs`) |
 | F4 | Client: build gateway/RPC fallback pool from manifests; light-client-primary | F3 | M |
 | F5 | DA scoring (challenge-response + client reports), off-chain leaderboard | F3 | M |
 | F6 | On-chain DA rewards (`FareDataAvailability`: fee discount / token) | F5 | L |
@@ -185,4 +185,6 @@ Ranked by leverage:
 | F8 | Venue-operated gasless relay | — | 🟡 relay shipped (`venue-node/`): gas sponsorship + settlement relay, no contract change; EIP-2771 forwarder for full meta-tx is the next step |
 
 Phasing: **F1 → F2/F3 (replication substrate) → F4 → F5 → F6**, with F7 alongside
-F2 and F8 as the independent big network-effect bet.
+F2 and F8 as the independent big network-effect bet. **F1–F3 shipped** — the
+replication substrate is in place; next is **F4** (client builds a gateway/RPC
+fallback pool from region manifests, light-client-primary).
