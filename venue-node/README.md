@@ -8,6 +8,7 @@ menu, replicating its region's, providing chain access, and relaying gas.
 |---|---|---|---|
 | **Gasless relay** | `relay.mjs` | F8/C1 | Sponsor gas + relay settlement calls (no contract change). |
 | **Replication agent** | `agent.mjs` | F3 | Chain-indexed region pinning + region-manifest publish. |
+| **DA scorer** | `scorer.mjs` | F5 | Challenge-response + client reports → per-node availability score + leaderboard. |
 | **Appliance** | `docker-compose.yml` | F2 | Kubo (IPFS) + agent + relay behind a Caddy reverse proxy. |
 
 > The in-app **smoldot light client** is the primary chain-access path (F4); the
@@ -101,3 +102,34 @@ curl localhost:8789 | jq          # status: pinned CIDs, region set, manifest CI
 Key env (full list in `.env.example`): `HOME_LAT`/`HOME_LON` (microdegrees,
 **required**), `REGION_RADIUS_KM`, `GLOBAL_SAMPLE`, `KUBO_API_URL`, `AGENT_RPC_URL`,
 `START_BLOCK`, and `PUBLIC_GATEWAY`/`PUBLIC_RPC` (echoed into the manifest).
+
+## DA scorer (`scorer.mjs` / F5)
+
+The off-chain, measurable tier of the incentive model — you can't reward data
+availability (F6) before you can measure it. Run it on a **monitor** (not
+necessarily every venue); it scores the nodes it watches:
+
+- **Challenge-response.** Each round it reads a node's region manifest (agent
+  status → `manifestCid` → `servedCids`), samples random claimed CIDs, fetches a
+  random **byte-range** from the node, and checks it byte-for-byte against
+  canonical content from a trusted reference gateway, within a latency bound. A
+  dropped pin or garbage response fails. Content is CID-addressed, so the
+  reference bytes are themselves trustworthy — this proves the node holds the
+  *real* content, not just *a* response.
+- **Client reports.** `POST /report { node, ok }` folds in real user
+  availability experience, decayed on a half-life.
+- **Blend + leaderboard.** `score = W·challenge + (1−W)·clientReports`, published
+  at `GET /leaderboard` (sorted, unscored nodes last).
+
+This is deliberately **not** Filecoin-grade proof-of-replication —
+challenge-response + reputation is the pragmatic tier (see NETWORK-ARCHITECTURE
+§3, P2). It feeds F6 (on-chain DA rewards) once the scores are trusted.
+
+```bash
+cd venue-node
+cp .env.example .env               # set SCORER_NODES=https://venueA/,https://venueB/
+npm install
+npm run scorer                     # node --env-file=.env scorer.mjs
+curl localhost:8790/leaderboard | jq
+npm test                           # node --test — scoring/blend/decay unit tests
+```
