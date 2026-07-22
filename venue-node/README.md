@@ -103,6 +103,24 @@ Key env (full list in `.env.example`): `HOME_LAT`/`HOME_LON` (microdegrees,
 **required**), `REGION_RADIUS_KM`, `GLOBAL_SAMPLE`, `KUBO_API_URL`, `AGENT_RPC_URL`,
 `START_BLOCK`, and `PUBLIC_GATEWAY`/`PUBLIC_RPC` (echoed into the manifest).
 
+### Hosted super-node mode (F7)
+
+Non-technical venues shouldn't need to run a box. A **super-node** operator (FARE,
+or a community operator) runs one appliance on behalf of many venues; each venue
+just manages its menu in the PWA (the hosted publish path `/api/menu → IPFS`
+already exists). One instance serves many venues by setting **`HOME_COORDS`** to a
+semicolon-separated list of `lat,lon` centers instead of a single `HOME_LAT`/
+`HOME_LON` — the agent pins the **union** of all their regions:
+
+```bash
+HOME_COORDS="37774900,-122419400;40712800,-74006000" npm run agent
+# → homes: 2 center(s)  regions=60   (both regions served from one node)
+```
+
+The relay is already region-agnostic (it funds any burner and relays any
+settlement), so it serves every hosted venue's customers without extra config.
+Same protocol as a self-hosted node — just more centers.
+
 ## DA scorer (`scorer.mjs` / F5)
 
 The off-chain, measurable tier of the incentive model — you can't reward data

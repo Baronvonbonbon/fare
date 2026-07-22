@@ -35,6 +35,8 @@ Two deployment modes, same protocol:
   appliance on the venue's behalf; the venue just manages its menu in the PWA.
   The hosted publish path already exists (`/api/menu` → IPFS proxy). Non-technical
   venues are first-class; the network isn't gated on merchant sysadmin skill.
+  **Implemented (F7):** one appliance serves many venues by setting `HOME_COORDS`
+  to a list of centers — the agent pins the union of their regions from one box.
 
 ---
 
@@ -193,7 +195,7 @@ Ranked by leverage:
 | F4 | Client: build gateway/RPC fallback pool from manifests; light-client-primary | F3 | ✅ shipped — gateway pool (`web/src/pool.ts`) + RPC-provider pool (`web/src/rpcpool.ts`, wired in `chain.ts`) |
 | F5 | DA scoring (challenge-response + client reports), off-chain leaderboard | F3 | ✅ shipped (`scorer.mjs`) |
 | F6 | On-chain rewards | F5 | 🟡 Tier 1 shipped: trustless relay gas-rebate (`relayRebateBps` in `FareOrders`). Tier 2 (DA-score reward via `FareDataAvailability` + attester) deferred |
-| F7 | Hosted super-node mode (multi-venue appliance) | F2 | M |
+| F7 | Hosted super-node mode (multi-venue appliance) | F2 | ✅ shipped (`HOME_COORDS` multi-region in `agent.mjs`) |
 | F8 | Venue-operated gasless relay | — | 🟡 relay shipped (`venue-node/`): gas sponsorship + settlement relay, no contract change; EIP-2771 forwarder for full meta-tx is the next step |
 
 Phasing: **F1 → F2/F3 (replication substrate) → F4 → F5 → F6**, with F7 alongside

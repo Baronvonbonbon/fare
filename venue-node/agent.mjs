@@ -29,8 +29,6 @@ const RPC = process.env.AGENT_RPC_URL || process.env.RELAY_RPC_URL || "https://e
 const KUBO = (process.env.KUBO_API_URL || "http://127.0.0.1:5001").replace(/\/$/, "");
 const ADDRESS_BOOK = process.env.ADDRESS_BOOK || "../deployed-addresses.json";
 const PORT = Number(process.env.AGENT_PORT || 8789);
-const HOME_LAT = Number(process.env.HOME_LAT ?? "NaN"); // microdegrees
-const HOME_LON = Number(process.env.HOME_LON ?? "NaN"); // microdegrees
 const REGION_RADIUS_KM = Number(process.env.REGION_RADIUS_KM || 60); // pin home region ± this
 const GLOBAL_SAMPLE = Number(process.env.GLOBAL_SAMPLE || 50); // extra global venues to pin
 const START_BLOCK = Number(process.env.START_BLOCK || 0);
@@ -40,10 +38,29 @@ const LOG_RANGE = Number(process.env.LOG_RANGE || 5_000); // getLogs page size
 const PUBLIC_GATEWAY = process.env.PUBLIC_GATEWAY || ""; // e.g. https://venue.example/ipfs/
 const PUBLIC_RPC = process.env.PUBLIC_RPC || ""; // e.g. https://venue.example/rpc
 
-if (Number.isNaN(HOME_LAT) || Number.isNaN(HOME_LON)) {
-  console.error("[agent] HOME_LAT / HOME_LON (microdegrees) required. Exiting.");
-  process.exit(1);
+// Home centers (microdegrees). A single self-hosted venue sets HOME_LAT/HOME_LON;
+// a HOSTED SUPER-NODE (F7) serving many venues sets HOME_COORDS to a
+// semicolon-separated list "lat1,lon1;lat2,lon2;…" — the agent pins the union of
+// all their regions from one box. HOME_COORDS wins when both are set.
+export function parseCenters(env) {
+  const list = (env.HOME_COORDS || "").trim();
+  if (list) {
+    return list
+      .split(";")
+      .map((s) => s.trim())
+      .filter(Boolean)
+      .map((pair) => {
+        const [lat, lon] = pair.split(",").map((x) => Number(x.trim()));
+        return { lat, lon };
+      })
+      .filter((c) => Number.isFinite(c.lat) && Number.isFinite(c.lon));
+  }
+  const lat = Number(env.HOME_LAT ?? "NaN");
+  const lon = Number(env.HOME_LON ?? "NaN");
+  return Number.isFinite(lat) && Number.isFinite(lon) ? [{ lat, lon }] : [];
 }
+
+const CENTERS = parseCenters(process.env);
 
 const venuesAddr = (() => {
   const book = JSON.parse(readFileSync(new URL(ADDRESS_BOOK, import.meta.url), "utf8"));
@@ -62,25 +79,29 @@ const venues = new Contract(venuesAddr, VENUES_ABI, provider);
 // ── region math — MUST match GeoLib.regionOf / web/src/chain.ts exactly ───────
 const REGION_CELL = 500_000; // microdegrees (~0.5°), == GeoLib.REGION_CELL
 const coder = AbiCoder.defaultAbiCoder();
-const cellRegion = (latCell, lonCell) => keccak256(coder.encode(["int256", "int256"], [latCell, lonCell]));
-const regionOf = (lat, lon) => cellRegion(Math.trunc(lat / REGION_CELL), Math.trunc(lon / REGION_CELL));
+export const cellRegion = (latCell, lonCell) => keccak256(coder.encode(["int256", "int256"], [latCell, lonCell]));
+export const regionOf = (lat, lon) => cellRegion(Math.trunc(lat / REGION_CELL), Math.trunc(lon / REGION_CELL));
 
-// Home region set: every cell overlapping REGION_RADIUS_KM around home, padded a
-// cell each way so truncation at edges can't miss one (mirrors regionsCovering).
-function homeRegionSet() {
-  const r = REGION_RADIUS_KM * 1000;
+// Region set: every cell overlapping REGION_RADIUS_KM around EACH center, padded
+// a cell each way so truncation at edges can't miss one (mirrors regionsCovering).
+// The union over centers is what makes one hosted super-node serve many venues.
+export function regionSetFor(centers, radiusKm) {
+  const r = radiusKm * 1000;
   const dLat = (r / 111_320) * 1e6;
-  const cosLat = Math.max(Math.cos(((HOME_LAT / 1e6) * Math.PI) / 180), 1e-6);
-  const dLon = (r / (111_320 * cosLat)) * 1e6;
-  const latMin = Math.trunc((HOME_LAT - dLat) / REGION_CELL) - 1;
-  const latMax = Math.trunc((HOME_LAT + dLat) / REGION_CELL) + 1;
-  const lonMin = Math.trunc((HOME_LON - dLon) / REGION_CELL) - 1;
-  const lonMax = Math.trunc((HOME_LON + dLon) / REGION_CELL) + 1;
   const set = new Set();
-  for (let la = latMin; la <= latMax; la++) for (let lo = lonMin; lo <= lonMax; lo++) set.add(cellRegion(la, lo));
+  for (const c of centers) {
+    if (!Number.isFinite(c.lat) || !Number.isFinite(c.lon)) continue;
+    const cosLat = Math.max(Math.cos(((c.lat / 1e6) * Math.PI) / 180), 1e-6);
+    const dLon = (r / (111_320 * cosLat)) * 1e6;
+    const latMin = Math.trunc((c.lat - dLat) / REGION_CELL) - 1;
+    const latMax = Math.trunc((c.lat + dLat) / REGION_CELL) + 1;
+    const lonMin = Math.trunc((c.lon - dLon) / REGION_CELL) - 1;
+    const lonMax = Math.trunc((c.lon + dLon) / REGION_CELL) + 1;
+    for (let la = latMin; la <= latMax; la++) for (let lo = lonMin; lo <= lonMax; lo++) set.add(cellRegion(la, lo));
+  }
   return set;
 }
-const HOME_REGIONS = homeRegionSet();
+const HOME_REGIONS = regionSetFor(CENTERS, REGION_RADIUS_KM);
 
 // ── metadataURI → CID ─────────────────────────────────────────────────────────
 // Accepts ipfs://<cid>[/path], /ipfs/<cid>, or a gateway URL; skips local://.
@@ -152,7 +173,7 @@ async function publishManifest() {
         kind: "fare-region-manifest",
         version: 1,
         venuesContract: venuesAddr,
-        home: { lat: HOME_LAT, lon: HOME_LON },
+        homes: CENTERS, // one center (self-host) or many (hosted super-node, F7)
         regions: [...HOME_REGIONS],
         services: {
           ...(PUBLIC_GATEWAY ? { ipfsGateway: PUBLIC_GATEWAY } : {}),
@@ -212,27 +233,39 @@ async function loop() {
 }
 
 // ── local status API (front with the reverse proxy; never expose Kubo raw) ────
-http
-  .createServer((req, res) => {
-    const body = JSON.stringify({
-      ok: true,
-      venuesContract: venuesAddr,
-      home: { lat: HOME_LAT, lon: HOME_LON },
-      homeRegions: HOME_REGIONS.size,
-      lastBlock,
-      knownVenues: known.size,
-      pinnedCids: pinned.size,
-      globalPins,
-      manifestCid,
-      stats,
+function startServer() {
+  http
+    .createServer((req, res) => {
+      const body = JSON.stringify({
+        ok: true,
+        venuesContract: venuesAddr,
+        homes: CENTERS,
+        homeRegions: HOME_REGIONS.size,
+        lastBlock,
+        knownVenues: known.size,
+        pinnedCids: pinned.size,
+        globalPins,
+        manifestCid,
+        stats,
+      });
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(body);
+    })
+    .listen(PORT, () => {
+      console.log(`[agent] FARE replication agent on :${PORT}`);
+      console.log(`[agent] venues:  ${venuesAddr}`);
+      console.log(`[agent] kubo:    ${KUBO}`);
+      console.log(`[agent] homes:   ${CENTERS.length} center(s)  regions=${HOME_REGIONS.size}  radius=${REGION_RADIUS_KM}km`);
+      loop();
     });
-    res.writeHead(200, { "content-type": "application/json" });
-    res.end(body);
-  })
-  .listen(PORT, () => {
-    console.log(`[agent] FARE replication agent on :${PORT}`);
-    console.log(`[agent] venues:  ${venuesAddr}`);
-    console.log(`[agent] kubo:    ${KUBO}`);
-    console.log(`[agent] home:    ${HOME_LAT},${HOME_LON}  regions=${HOME_REGIONS.size}  radius=${REGION_RADIUS_KM}km`);
-    loop();
-  });
+}
+
+// Boot only when run directly (not when imported by a test). Config validation
+// lives here so importing for tests never exits the process.
+if (import.meta.filename === process.argv[1]) {
+  if (CENTERS.length === 0) {
+    console.error("[agent] no home center — set HOME_LAT/HOME_LON or HOME_COORDS (microdegrees). Exiting.");
+    process.exit(1);
+  }
+  startServer();
+}
