@@ -229,6 +229,18 @@ describe("FARE protocol", () => {
       await f.venues.connect(f.venueOp).setActive(f.venueId, false);
       expect(await f.venues.isActive(f.venueId)).to.equal(false);
     });
+
+    it("setMetadata emits VenueMetadataUpdated for event-driven menu re-pin (F1)", async () => {
+      const f = await loadFixture(deployAll);
+      await expect(f.venues.connect(f.venueOp).setMetadata(f.venueId, "ipfs://menu-v2"))
+        .to.emit(f.venues, "VenueMetadataUpdated")
+        .withArgs(f.venueId, "ipfs://menu-v2");
+      const v = await f.venues.venues(f.venueId);
+      expect(v.metadataURI).to.equal("ipfs://menu-v2");
+      await expect(
+        f.venues.connect(f.stranger).setMetadata(f.venueId, "ipfs://evil")
+      ).to.be.revertedWith("not-operator");
+    });
   });
 
   describe("orders & auction", () => {

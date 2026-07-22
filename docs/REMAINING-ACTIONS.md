@@ -75,7 +75,7 @@ infra/UI, spec'd in the linked design note.
 - ☐ **E4 Device-attestation tier** (Play Integrity / App Attest), L0/L1/L2 gradient.
 
 **Group F — venues-as-infrastructure** (design in [NETWORK-ARCHITECTURE.md](NETWORK-ARCHITECTURE.md))
-- ☐ **F1 `VenueMetadataUpdated` event** — cheap, event-driven menu-update replication (do first; small contract change).
+- ✅ **F1 `VenueMetadataUpdated` event** — `setMetadata` now emits it (+ test); event-driven menu-update replication unblocked.
 - ☐ **F2 Venue appliance** — Docker Compose (Kubo + pine-rpc light client + agent).
 - ☐ **F3 Replication agent** — chain-indexed region pinning + manifest publish.
 - ☐ **F4 Client gateway/RPC fallback pool** from venue manifests (light-client-first).

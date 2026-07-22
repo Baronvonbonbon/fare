@@ -58,6 +58,7 @@ contract FareVenues is Ownable2Step, FareUpgradable {
     );
     event VenueUpdated(uint64 indexed venueId, address signer, address payout, bool active);
     event VenueLocationUpdated(uint64 indexed venueId, int32 lat, int32 lon);
+    event VenueMetadataUpdated(uint64 indexed venueId, string metadataURI);
     event PickupRecorded(uint64 indexed venueId, uint32 totalPickups);
     event AuthorizedSet(address indexed account, bool enabled);
 
@@ -164,6 +165,7 @@ contract FareVenues is Ownable2Step, FareUpgradable {
 
     function setMetadata(uint64 venueId, string calldata metadataURI) external onlyOperator(venueId) {
         venues[venueId].metadataURI = metadataURI;
+        emit VenueMetadataUpdated(venueId, metadataURI);
     }
 
     // ---- protocol hooks ----

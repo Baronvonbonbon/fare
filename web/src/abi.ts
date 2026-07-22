@@ -32,6 +32,8 @@ export const VENUES_ABI = [
   "function setPayout(uint64 venueId, address payout)",
   "function setSigner(uint64 venueId, address signer)",
   "function setMetadata(uint64 venueId, string metadataURI)",
+  // event-driven menu-update replication (F1)
+  "event VenueMetadataUpdated(uint64 indexed venueId, string metadataURI)",
 ];
 
 export const DRIVERS_ABI = [

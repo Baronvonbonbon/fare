@@ -255,7 +255,7 @@ Ordered roughly by leverage. Check off as landed.
 | E2 | Slither/Mythril | E | CI | ☐ todo |
 | E3 | External audit | E | — | ☐ todo |
 | E4 | Device attestation | E | Driver view | ☐ todo |
-| F1 | VenueMetadataUpdated event | F | Contracts | ☐ todo |
+| F1 | VenueMetadataUpdated event | F | Contracts | ✅ done |
 | F2 | Venue appliance (Kubo+RPC+agent) | F | venue-node/ | ☐ todo |
 | F3 | Replication agent (region pinning + manifest) | F | venue-node/ | ☐ todo |
 | F4 | Client gateway/RPC fallback pool | F | Infra | ☐ todo |
@@ -267,7 +267,7 @@ Ordered roughly by leverage. Check off as landed.
 ### Group F — Network / infra (venues as infrastructure)
 *Turn venues into network nodes — geo-replicated menus, chain access, gas relay.
 Full design in [NETWORK-ARCHITECTURE.md](NETWORK-ARCHITECTURE.md).*
-- [ ] F1 `VenueMetadataUpdated` event (event-driven menu-update replication)
+- [x] F1 `VenueMetadataUpdated` event (event-driven menu-update replication)
 - [ ] F2 Venue appliance — Docker Compose (Kubo + pine-rpc light client + agent)
 - [ ] F3 Replication agent — chain-indexed region pinning + manifest publish
 - [ ] F4 Client gateway/RPC fallback pool from venue manifests (light-client-first)

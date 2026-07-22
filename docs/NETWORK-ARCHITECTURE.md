@@ -53,10 +53,10 @@ discovery). So each node:
    even when the origin venue is offline. **Availability never depends on one
    node being up.**
 
-**Fix required:** `FareVenues.setMetadata` is the *only* venue mutator that emits
-no event, so menu *updates* can't be watched — replicators would have to poll.
-Add `VenueMetadataUpdated(uint64 indexed venueId, string metadataURI)` so re-pin
-on menu change is event-driven. (Small, self-contained; do it first — Group F1.)
+**Fixed (F1):** `FareVenues.setMetadata` used to be the *only* venue mutator that
+emitted no event, so menu *updates* couldn't be watched — replicators would have
+had to poll. It now emits `VenueMetadataUpdated(uint64 indexed venueId, string
+metadataURI)`, so re-pin on menu change is event-driven.
 
 **The venue manifest.** The JSON behind `metadataURI` is a superset of the menu —
 it's the venue's *service manifest*:
@@ -145,7 +145,7 @@ support, not a replacement for the client's own light client.
 
 | Change | Why | Size |
 |---|---|---|
-| `VenueMetadataUpdated(venueId, metadataURI)` event | Cheap, event-driven menu-update replication | Small — do first |
+| ~~`VenueMetadataUpdated(venueId, metadataURI)` event~~ ✅ shipped | Cheap, event-driven menu-update replication | Small — done |
 | (optional) region as an indexed topic on venue events | Server-side region queries for replicas, mirroring `OrderRegion` | Small |
 | `FareDataAvailability` (epoch DA scores + reward claims) | P3 protocol-incentivized replication | Larger — later |
 
@@ -175,7 +175,7 @@ Ranked by leverage:
 
 | # | Item | Depends on | Size |
 |---|---|---|---|
-| F1 | `VenueMetadataUpdated` event (+ test) | — | S (on-chain) |
+| F1 | `VenueMetadataUpdated` event (+ test) | — | ✅ shipped (S, on-chain) |
 | F2 | Venue appliance (`venue-node/` compose: Kubo + pine-rpc + agent) | — | M |
 | F3 | Replication agent: chain-indexed region pinning + manifest publish | F1, F2 | M |
 | F4 | Client: build gateway/RPC fallback pool from manifests; light-client-primary | F3 | M |
