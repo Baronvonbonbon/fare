@@ -9,6 +9,7 @@ menu, replicating its region's, providing chain access, and relaying gas.
 | **Gasless relay** | `relay.mjs` | F8/C1 | Sponsor gas + relay settlement calls (no contract change). |
 | **Replication agent** | `agent.mjs` | F3 | Chain-indexed region pinning + region-manifest publish. |
 | **DA scorer** | `scorer.mjs` | F5 | Challenge-response + client reports → per-node availability score + leaderboard. |
+| **Push service** | `push.mjs` | B4 | Watches order events → sends Web Push (VAPID) **by region** to subscribed devices. |
 | **Appliance** | `docker-compose.yml` | F2 | Kubo (IPFS) + agent + relay behind a Caddy reverse proxy. |
 
 > The in-app **smoldot light client** is the primary chain-access path (F4); the
@@ -189,3 +190,28 @@ npm run scorer                     # node --env-file=.env scorer.mjs
 curl localhost:8790/leaderboard | jq
 npm test                           # node --test — scoring/blend/decay unit tests
 ```
+
+## Region push service (`push.mjs` / B4 P2)
+
+Background notifications for a region, without linking anyone. The service watches
+order events (`OrderRegion`/`Assigned`/`PickedUp`/`Delivered`) and sends **Web
+Push (VAPID)** to subscribed devices **by region** — it never learns which order
+is a device's. Devices subscribe with only their coarse `GeoLib` region(s); the
+service pushes every region-relevant event; the client's **service worker filters
+locally** (it holds the per-order burner list, the service doesn't). So the push
+service sees only "a device in region X" — burners stay unlinkable.
+
+| Endpoint | Does |
+|---|---|
+| `POST /subscribe { subscription, regions }` | Register a device push subscription + its regions. |
+| `GET /vapid` | The VAPID public key (for `PushManager.subscribe`). |
+| `GET /health` | Subscriptions, last block, push stats. |
+
+```bash
+npx web-push generate-vapid-keys      # → set VAPID_PUBLIC_KEY / VAPID_PRIVATE_KEY in .env
+npm run push                          # node --env-file=.env push.mjs
+```
+
+Point the web build at it: set `VITE_VAPID_PUBLIC_KEY` to the **same public key**;
+the client discovers the push endpoint from the relay pool (or a `/api/push`
+fallback). Foreground/local notifications (B4 P1) work with no service at all.

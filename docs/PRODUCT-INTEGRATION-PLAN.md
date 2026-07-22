@@ -238,7 +238,7 @@ Ordered roughly by leverage. Check off as landed.
 | B1 | Catalog / menu / cart | B | New service + all views | ✅ done |
 | B2 | Live tracking + ETA | B | Customer/Driver | ✅ done (E2E driver location + TrackMap) |
 | B3 | Order-scoped messaging | B | Customer/Driver | ✅ done (channel + chat) |
-| B4 | Notifications | B | Cross-cutting | 🟡 P1 local done; P2 (VAPID+venue push) spec'd |
+| B4 | Notifications | B | Cross-cutting + venue-node | ✅ done (P1 local + P2 region push) |
 | B5 | Ratings (stars) | B | Post-delivery | ✅ done |
 | B6 | Proof-of-delivery photo | B | Driver/Customer | ✅ done (capture→seal→store→E2E view) |
 | B7 | History / receipts / reorder | B | Customer view | ✅ done |

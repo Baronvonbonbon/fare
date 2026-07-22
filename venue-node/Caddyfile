@@ -24,6 +24,11 @@
 		reverse_proxy relay:8788
 	}
 
+	# ── Region push service (B4): /subscribe, /vapid, /health ───────────────
+	handle_path /push/* {
+		reverse_proxy push:8791
+	}
+
 	# Everything else: no raw Kubo API, no default listing.
 	handle {
 		respond "FARE venue node" 200

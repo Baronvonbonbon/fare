@@ -98,11 +98,28 @@ Bounded and non-identifying, mirroring the messaging-relay stance.
 | Step | Status |
 |---|---|
 | P1 foreground/local notifications + permission bell (`notify.ts`) | ✅ done |
-| Service worker `push` + `notificationclick` handlers | ☐ |
-| VAPID keypair + client `PushManager.subscribe` (opt-in) | ☐ |
-| Venue-node push service: store subscriptions (by region), watch chain, send Web Push | ☐ |
-| Region-filter + local-order filtering (privacy) | ☐ |
-| `/api/push` Cloudflare fallback (P1.5) | ☐ (optional) |
+| Service worker `push` + `notificationclick` handlers | ✅ done (`web/public/sw.js`) |
+| VAPID keypair + client `PushManager.subscribe` (opt-in) | ✅ done (`web/src/push.ts`; the 🔔 bell subscribes) |
+| Venue-node push service: subscriptions by region, watch chain, send Web Push | ✅ done (`venue-node/push.mjs`) |
+| Region-filter (relay) + local-order filtering (SW via IndexedDB) | ✅ done |
+| `/api/push` Cloudflare fallback (P1.5) | ☐ (optional; client already prefers the venue relay) |
+
+**Shipped (P2).** The venue-node `push.mjs` watches `OrderRegion`/`Assigned`/
+`PickedUp`/`Delivered`, and Web-Pushes `{orderId, kind}` to devices subscribed to
+that region. The client (`push.ts`) subscribes the device with only its coarse
+region(s) and syncs its watched order ids into IndexedDB; the service worker
+(`sw.js`) shows a specific notification only for a watched order and collapses
+everything else into one quiet "activity nearby". The push service never learns
+which order is a device's.
+
+### Deploy / verify
+1. `cd venue-node && npm install && npx web-push generate-vapid-keys`.
+2. Set `VAPID_PUBLIC_KEY`/`VAPID_PRIVATE_KEY` in `venue-node/.env`; run `npm run push`.
+3. Build the web app with `VITE_VAPID_PUBLIC_KEY` = the **same** public key, and
+   a reachable relay (so the client discovers `…/push`, or add `/api/push`).
+4. In the PWA, tap 🔔 → "enabled (incl. background)"; place/advance an order and
+   confirm a push arrives with the app **closed**. (Background delivery can only
+   be verified on a real device with a running push service — not in unit tests.)
 
 **Sources on the landscape:** [Push Protocol](https://comms.push.org/) ·
 [Web3alert](https://medium.com/polkadot-news/web3alert-notification-service-for-web-3-f1cb87d8730d) ·

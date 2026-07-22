@@ -45,6 +45,7 @@ import { isAddress } from "ethers";
 import { OrderThread, type ChatMsg, type LocUpdate } from "./channel";
 import { newPhotoKey, sealPhoto, openPhoto } from "./photo";
 import { notify, notifyPermission, enableNotifications, type NotifyPermission } from "./notify";
+import { pushConfigured, pushSubscribed, subscribePush, syncWatched } from "./push";
 import { compressImage, storeSealed, fetchSealed, photoObjectUrl } from "./photoflow";
 import {
   Menu, MenuItem, Cart, fetchMenu, cartTotal, cartCount,
@@ -449,6 +450,26 @@ export default function App() {
     prevOrders.current = next;
   }, [orders, role, session]);
 
+  // B4 (P2): the coarse region(s) we ask the push service to notify us about —
+  // our search area + our orders' venue cells. The service pushes by region only;
+  // it never learns which order is ours.
+  const subscribeRegions = useCallback((): string[] => {
+    const set = new Set<string>();
+    if (myLoc) for (const r of regionsCovering(myLoc, Math.max(radiusKm, 5))) set.add(r);
+    for (const o of orders) {
+      const v = venues.find((x: VenueRow) => String(x.id) === String(o.venueId));
+      if (v) for (const r of regionsCovering({ lat: v.lat, lon: v.lon }, 1)) set.add(r);
+    }
+    return [...set];
+  }, [myLoc, radiusKm, orders, venues]);
+
+  // Keep the SW's watched-order set (local filter) + push regions fresh.
+  useEffect(() => {
+    if (notifyPermission() !== "granted") return;
+    syncWatched(orders.map((o) => String(o.id)));
+    if (pushConfigured() && pushSubscribed()) subscribePush(subscribeRegions());
+  }, [orders, subscribeRegions]);
+
   /// Wrap a tx-sending action with busy state + toast + refresh.
   const act = useCallback(
     async (label: string, fn: () => Promise<any>) => {
@@ -514,7 +535,10 @@ export default function App() {
           <small>p2p delivery · polkadot hub</small>
         </div>
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-          <NotifyBell say={say} />
+          <NotifyBell say={say} onEnabled={async () => {
+            await syncWatched(orders.map((o) => String(o.id)));
+            if (pushConfigured()) await subscribePush(subscribeRegions());
+          }} />
           <NodeChip />
           <WalletChip session={session} balance={nativeBal} onConnect={async (mode, key) => {
             try {
@@ -596,18 +620,24 @@ export default function App() {
 
 /// Enable local order notifications (B4 P1). Tap to grant permission; foreground
 /// only, no server/identity. Hidden where the Notification API is unavailable.
-function NotifyBell({ say }: { say: (m: string, err?: boolean) => void }) {
+function NotifyBell({ say, onEnabled }: { say: (m: string, err?: boolean) => void; onEnabled: () => Promise<void> }) {
   const [perm, setPerm] = useState<NotifyPermission>(() => notifyPermission());
   if (perm === "unsupported") return null;
   const label = perm === "granted" ? "🔔" : "🔕";
-  const title = perm === "granted" ? "Order notifications on" : perm === "denied" ? "Notifications blocked in browser settings" : "Enable order notifications";
+  const bg = pushConfigured() ? " + background" : "";
+  const title = perm === "granted" ? `Order notifications on${bg}` : perm === "denied" ? "Notifications blocked in browser settings" : `Enable order notifications${bg}`;
   return (
     <button className="btn ghost small" title={title} style={{ padding: "4px 8px" }}
       onClick={async () => {
         if (perm === "granted") { say("Notifications are on"); return; }
         const r = await enableNotifications();
         setPerm(r);
-        say(r === "granted" ? "Notifications enabled ✓" : r === "denied" ? "Notifications blocked — enable them in browser settings" : "Notifications not enabled", r !== "granted");
+        if (r === "granted") {
+          say(pushConfigured() ? "Notifications enabled ✓ (incl. background)" : "Notifications enabled ✓");
+          onEnabled().catch(() => {});
+        } else {
+          say(r === "denied" ? "Notifications blocked — enable them in browser settings" : "Notifications not enabled", true);
+        }
       }}>
       {label}
     </button>

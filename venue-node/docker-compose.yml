@@ -55,6 +55,21 @@ services:
       - ../deployed-addresses.json:/deployed-addresses.json:ro
     networks: [venue]
 
+  # ── Region push service (B4): order events → Web Push, by region ─────────────
+  # Only useful once VAPID_PUBLIC_KEY / VAPID_PRIVATE_KEY are set in .env.
+  push:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["node", "--env-file=.env", "push.mjs"]
+    restart: on-failure:3
+    env_file: .env
+    environment:
+      ADDRESS_BOOK: /deployed-addresses.json
+    volumes:
+      - ../deployed-addresses.json:/deployed-addresses.json:ro
+    networks: [venue]
+
   # ── Reverse proxy: the ONLY public surface. Rate-limited, read-only routes. ──
   caddy:
     image: caddy:2-alpine
@@ -64,7 +79,7 @@ services:
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy-data:/data
-    depends_on: [kubo, agent, relay]
+    depends_on: [kubo, agent, relay, push]
     networks: [venue]
 
 networks:

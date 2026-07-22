@@ -102,14 +102,16 @@ infra/UI, spec'd in the linked design note.
 ## 3. Not started (☐)
 
 **Group B — product**
-- 🟡 **B4 Notifications** — **P1 shipped** (`web/src/notify.ts` + order-diff hook +
-  a 🔔 permission bell): local notifications on relevant order transitions
-  (assigned / picked up / delivered / bid-accepted / new nearby order), foreground
-  only, no server/keys/identity. **P2 spec'd** ([NOTIFICATIONS.md](NOTIFICATIONS.md)):
-  true background push via VAPID + the **venue-node relay as a per-device,
-  region-filtered push service** (chain-event-triggered) — no "AVIDITY"/Parity
-  native push exists, and Push-Protocol's wallet-linked model is rejected (would
-  re-link burners).
+- ✅ **B4 Notifications** — **shipped (P1 + P2).** P1: local notifications on
+  order transitions (`notify.ts` + order-diff hook + 🔔 bell), no server/identity.
+  P2: **background Web Push** via `venue-node/push.mjs` (watches order events →
+  VAPID push **by region**) + client subscribe (`push.ts`) + service-worker
+  `push`/`notificationclick` handlers, with **per-device, region-filtered**
+  privacy (SW filters watched orders locally via IndexedDB; the push service only
+  ever sees "a device in region X"). No "AVIDITY"/Parity native push exists;
+  Push-Protocol's wallet-linked model was rejected (would re-link burners).
+  **Ops:** run the push service with a VAPID keypair + build the web app with
+  `VITE_VAPID_PUBLIC_KEY`. See [NOTIFICATIONS.md](NOTIFICATIONS.md).
 
 **Group C — payments / economics**
 - ☐ **C2 Fiat-denominated pricing** — quote in local currency, settle at an oracle
