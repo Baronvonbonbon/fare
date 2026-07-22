@@ -80,7 +80,7 @@ infra/UI, spec'd in the linked design note.
 - ✅ **F3 Replication agent** — `venue-node/agent.mjs`: chain-indexed region pinning + region-manifest publish, re-pins on `VenueMetadataUpdated`.
 - ✅ **F4 Client gateway/RPC fallback pool** — gateway pool (`web/src/pool.ts`): the client learns venue/region IPFS gateways from manifests as it loads menus. RPC-provider pool (`web/src/rpcpool.ts`, wired in `chain.ts`): venue RPCs augment reads only in hosted mode as lower-priority fallbacks behind the hosted anchor, and broadcasts fan out to several endpoints — the in-app light client stays the trustless primary, venue RPC never a sole read path (§4/§5). Both tested.
 - ✅ **F5 Data-availability scoring** — `venue-node/scorer.mjs`: challenge-response (random byte-range vs. CID-canonical content) + decayed client reports → per-node score + leaderboard. Feeds F6.
-- ☐ **F6 On-chain DA rewards** (fee discount / token) — protocol-incentivized replication.
+- 🟡 **F6 On-chain rewards** — Tier 1 shipped: **trustless relay gas-rebate** (`relayRebateBps` in `FareOrders`, + test). A governed share of the protocol fee is carved to the account that submits the dropoff tx (the relay that fronted gas), self-identified via `msg.sender` — no oracle, no new cost to orders, escrow math exact. Defaults to 0 (dormant) until governance enables it. Remaining: **Tier 2 DA-score reward** (`FareDataAvailability` + a trusted attester to bring F5 scores on-chain); token emission intentionally out of MVP. **Live-deploy note:** shipping this to Paseo needs a `FareOrders` router upgrade (`scripts/upgrade-orders.ts` procedure) + a `setRelayRebateBps` governance call.
 - ☐ **F7 Hosted super-node mode** (for non-technical venues).
 
 ---

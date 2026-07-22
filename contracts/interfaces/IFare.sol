@@ -68,7 +68,9 @@ interface IFareOrders {
 
     // Settlement callbacks (onlySettlement)
     function onPickupConfirmed(uint256 orderId) external;
-    function onDropoffConfirmed(uint256 orderId) external;
+    // `relayer` is the account that submitted the dropoff settlement tx (the
+    // gas-payer) — used for the relay gas-rebate (F6).
+    function onDropoffConfirmed(uint256 orderId, address relayer) external;
 
     // Dispute hooks (onlyDisputes)
     function markDisputed(uint256 orderId) external;

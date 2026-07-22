@@ -260,7 +260,7 @@ Ordered roughly by leverage. Check off as landed.
 | F3 | Replication agent (region pinning + manifest) | F | venue-node/ | ✅ done |
 | F4 | Client gateway/RPC fallback pool | F | web/src/pool.ts,rpcpool.ts | ✅ done |
 | F5 | DA scoring (challenge-response) | F | venue-node/scorer.mjs | ✅ done |
-| F6 | On-chain DA rewards | F | Contracts | ☐ todo |
+| F6 | On-chain rewards | F | FareOrders (rebate) | 🟡 partial |
 | F7 | Hosted super-node mode | F | Infra | ☐ todo |
 | F8 | Venue-operated gasless relay | F | Infra + views | 🟡 partial |
 
@@ -272,7 +272,7 @@ Full design in [NETWORK-ARCHITECTURE.md](NETWORK-ARCHITECTURE.md).*
 - [x] F3 Replication agent — chain-indexed region pinning + manifest publish
 - [x] F4 Client gateway/RPC fallback pool from venue manifests (light-client-first) — gateway pool (`web/src/pool.ts`) + RPC-provider pool (`web/src/rpcpool.ts`)
 - [x] F5 Data-availability scoring (challenge-response + client reports) — `venue-node/scorer.mjs` + leaderboard
-- [ ] F6 On-chain DA rewards (fee discount / token, protocol-incentivized)
+- [~] F6 On-chain rewards — Tier 1 shipped: trustless relay gas-rebate (`relayRebateBps` in FareOrders, carved from the fee → the settling relay). Tier 2 (DA-score reward via `FareDataAvailability` + attester) deferred
 - [ ] F7 Hosted super-node mode (for non-technical venues)
 - [ ] F8 Venue-operated gasless relay (region meta-tx)
 

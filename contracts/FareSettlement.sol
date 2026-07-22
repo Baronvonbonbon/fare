@@ -262,7 +262,10 @@ contract FareSettlement is Ownable2Step, EIP712, FareUpgradable {
         require(locationVerifier.verifyProximity(proof, pubSignals), "bad-proof");
 
         usedNullifiers[nullifier] = true;
-        orders.onDropoffConfirmed(orderId);
+        // msg.sender is whoever submitted this settlement tx — a venue relay in
+        // the gasless path, or the customer/driver self-submitting. FareOrders
+        // rebates the configured share of the protocol fee to them (F6).
+        orders.onDropoffConfirmed(orderId, msg.sender);
         emit DropoffConfirmed(orderId, driver, customer);
     }
 

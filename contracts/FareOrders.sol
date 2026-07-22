@@ -67,6 +67,11 @@ contract FareOrders is Ownable2Step, ReentrancyGuard, FareUpgradable, IFareOrder
 
     uint16 public feeBps = 250; // protocol fee on fare only, max 10%
     uint16 public assignedCancelBps = 2000; // driver compensation when customer cancels post-assign
+    // Share of the protocol fee rebated to the relay that settles an order (bps
+    // of the fee, ≤ 10000). Offsets the gas a venue relay fronts for gasless
+    // orders (F6); carved from the treasury's fee, so no new customer cost.
+    // Defaults to 0 (dormant) — governance enables it via setRelayRebateBps.
+    uint16 public relayRebateBps = 0;
     uint64 public constant MIN_WINDOW = 10 minutes;
     uint64 public constant MAX_WINDOW = 24 hours;
     uint64 public defaultPickupWindow = 45 minutes;
@@ -87,6 +92,11 @@ contract FareOrders is Ownable2Step, ReentrancyGuard, FareUpgradable, IFareOrder
     event TipIncreased(uint256 indexed orderId, uint96 added, uint96 newTip);
     event OrderPickedUp(uint256 indexed orderId, uint64 deliveryDeadline);
     event OrderDelivered(uint256 indexed orderId, uint96 driverPaid, uint96 protocolFee);
+    /// Relay gas-rebate paid at settlement — a slice of `protocolFee` routed to
+    /// the account that submitted the dropoff tx (F6). `amount` is included in
+    /// the `protocolFee` reported by OrderDelivered; treasury received the rest.
+    event RelayRebated(uint256 indexed orderId, address indexed relayer, uint96 amount);
+    event RelayRebateSet(uint16 relayRebateBps);
     event OrderCancelled(uint256 indexed orderId, uint8 reason, uint96 refunded, uint96 driverComp);
     event OrderDisputed(uint256 indexed orderId);
     event OrderResolved(uint256 indexed orderId, uint96 customerAmount, uint96 driverAmount);
@@ -162,6 +172,15 @@ contract FareOrders is Ownable2Step, ReentrancyGuard, FareUpgradable, IFareOrder
         defaultPickupWindow = _defaultPickupWindow;
         defaultDeliveryWindow = _defaultDeliveryWindow;
         emit ParamsSet(_feeBps, _assignedCancelBps, _defaultPickupWindow, _defaultDeliveryWindow);
+    }
+
+    /// @notice Set the share of the protocol fee rebated to the settling relay
+    ///         (bps of the fee; 0 disables, 10000 = the whole fee). Carved from
+    ///         the treasury's cut, so it never adds cost to an order (F6).
+    function setRelayRebateBps(uint16 _bps) external onlyOwner {
+        require(_bps <= 10_000, "rebate-too-high"); // ≤ 100% of the fee
+        relayRebateBps = _bps;
+        emit RelayRebateSet(_bps);
     }
 
     // ---- customer: create / tip / cancel ----
@@ -366,21 +385,30 @@ contract FareOrders is Ownable2Step, ReentrancyGuard, FareUpgradable, IFareOrder
     }
 
     /// @notice Both dropoff attestations verified by FareSettlement: pay the
-    ///         driver (fare − protocol fee + tip) and close the order.
-    function onDropoffConfirmed(uint256 orderId) external onlySettlement nonReentrant {
+    ///         driver (fare − protocol fee + tip), rebate a slice of the fee to
+    ///         the settling relay (F6), send the rest to treasury, and close.
+    /// @param relayer the account that submitted the dropoff tx (the gas-payer).
+    function onDropoffConfirmed(uint256 orderId, address relayer) external onlySettlement nonReentrant {
         Order storage o = orders[orderId];
         require(o.status == Status.PickedUp, "bad-status");
         o.status = Status.Delivered;
 
         uint96 fee = uint96((uint256(o.fare) * feeBps) / 10_000);
+        // Carve the relay rebate out of the fee (never adds to the total). Skip
+        // a zero/treasury relayer so we don't emit or double-credit needlessly.
+        uint96 rebate = uint96((uint256(fee) * relayRebateBps) / 10_000);
+        if (relayer == address(0) || relayer == treasury) rebate = 0;
+        uint96 toTreasury = fee - rebate;
         uint96 toDriver = o.fare - fee + o.tip;
-        o.escrow -= (o.fare + o.tip);
+        o.escrow -= (o.fare + o.tip); // == toDriver + toTreasury + rebate
 
         if (toDriver > 0) vault.credit{value: toDriver}(o.driver);
-        if (fee > 0) vault.credit{value: fee}(treasury);
+        if (toTreasury > 0) vault.credit{value: toTreasury}(treasury);
+        if (rebate > 0) vault.credit{value: rebate}(relayer);
         drivers.recordDelivered(o.driver);
 
         emit OrderDelivered(orderId, toDriver, fee);
+        if (rebate > 0) emit RelayRebated(orderId, relayer, rebate);
     }
 
     // ---- dispute hooks ----

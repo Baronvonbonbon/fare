@@ -175,7 +175,8 @@ describe("FARE protocol", () => {
   async function confirmDropoffOk(
     f: Awaited<ReturnType<typeof deployAll>>,
     orderId: bigint,
-    driver: HardhatEthersSigner
+    driver: HardhatEthersSigner,
+    submitter?: HardhatEthersSigner // the relay/gas-payer; defaults to deployer
   ) {
     const now = await time.latest();
     const posCommit = driverCommit(orderId);
@@ -189,7 +190,8 @@ describe("FARE protocol", () => {
       radius,
       BigInt(nullifierOf(orderId, DROP_SALT)),
     ];
-    return f.settlement.confirmDropoffZK(dAtt, dSig, DUMMY_PROOF, pubSignals);
+    const s = submitter ? f.settlement.connect(submitter) : f.settlement;
+    return s.confirmDropoffZK(dAtt, dSig, DUMMY_PROOF, pubSignals);
   }
 
   // ---------------------------------------------------------------
@@ -285,6 +287,44 @@ describe("FARE protocol", () => {
       expect(delivered).to.equal(1);
       const venue = await f.venues.venues(f.venueId);
       expect(venue.pickups).to.equal(1);
+    });
+
+    it("relay gas-rebate (F6): a fee slice goes to the settling relay, rest to treasury", async () => {
+      const f = await loadFixture(deployAll);
+      // Governance enables it: 20% of the protocol fee rebated to the relay.
+      await expect(f.orders.setRelayRebateBps(2000))
+        .to.emit(f.orders, "RelayRebateSet")
+        .withArgs(2000);
+
+      const { orderId, fare } = await createAndAssign(f);
+      await confirmPickupOk(f, orderId, f.driver2);
+
+      const fee = (fare * 250n) / 10_000n;
+      const rebate = (fee * 2000n) / 10_000n;
+      const toTreasury = fee - rebate;
+
+      // `stranger` stands in for the venue relay — the account that fronts gas
+      // by submitting the dropoff settlement tx.
+      await expect(confirmDropoffOk(f, orderId, f.driver2, f.stranger))
+        .to.emit(f.orders, "RelayRebated")
+        .withArgs(orderId, f.stranger.address, rebate);
+
+      expect(await f.vault.balanceOf(f.driver2.address)).to.equal(fare - fee + TIP);
+      expect(await f.vault.balanceOf(f.treasury.address)).to.equal(toTreasury);
+      expect(await f.vault.balanceOf(f.stranger.address)).to.equal(rebate);
+      // Value conservation: the rebate is carved from the fee, not added on top.
+      expect(fare - fee + TIP + toTreasury + rebate).to.equal(fare + TIP);
+    });
+
+    it("relay rebate is dormant by default and is capped + owner-gated", async () => {
+      const f = await loadFixture(deployAll);
+      expect(await f.orders.relayRebateBps()).to.equal(0);
+      // default 0 → the full fee still goes to treasury (covered by happy path);
+      // here: the setter caps at 100% of the fee and is owner-only.
+      await expect(f.orders.setRelayRebateBps(10_001)).to.be.revertedWith("rebate-too-high");
+      await expect(
+        f.orders.connect(f.stranger).setRelayRebateBps(2000)
+      ).to.be.revertedWithCustomError(f.orders, "OwnableUnauthorizedAccount");
     });
 
     it("fare-only order (orderValue = 0, tip = 0) settles cleanly", async () => {

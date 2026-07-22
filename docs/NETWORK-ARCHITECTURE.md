@@ -93,11 +93,22 @@ reward what you can't measure, so the honest path phases into it:
   availability reports → a per-venue **data-availability score**. Published
   leaderboard. No cryptographic proof-of-replication (Filecoin-grade) — that's
   out of scope; challenge-response + reputation is the pragmatic tier.
-- **P3 — On-chain rewards.** Once scoring is trusted, reward high-DA venues via a
-  **protocol-fee discount** (lower `feeBps` for the venue) and/or **token
-  emission** (the DATUM token plane), gated by epoch DA scores. Avoid harsh
-  slashing early — griefing risk. Likely a `FareDataAvailability` contract
-  recording epoch scores + reward claims.
+- **P3 — On-chain rewards.** Two levers, split by how much trust they need:
+  - **Relay gas-rebate — shipped (F6, Tier 1).** Fully trustless, no oracle. A
+    governed `relayRebateBps` share of the existing protocol fee is routed to the
+    account that *submits the dropoff settlement tx* — i.e. the venue relay that
+    fronted the gas for a gasless order (`msg.sender` self-identifies the
+    gas-payer; threaded from `FareSettlement` into `FareOrders.onDropoffConfirmed`).
+    Carved from the treasury's cut, so it never adds cost to an order, and the
+    escrow math stays exact (`driver + treasury + rebate = fare + tip`). Defaults
+    to 0 (dormant) until governance sets it. This directly offsets the cost of
+    running a relay — the strongest network-effect lever (§7.1).
+  - **DA-score reward — deferred (Tier 2).** Rewarding menu *hosting* needs the
+    off-chain F5 score brought on-chain, so it requires a trusted attester/oracle
+    (acceptable per P2, but a real trust decision). A `FareDataAvailability`
+    contract would record epoch scores + reward claims (fee discount and/or token
+    emission). Token emission is intentionally left out of the MVP (speculative;
+    intersects the mainnet gates).
 
 ---
 
@@ -147,7 +158,8 @@ support, not a replacement for the client's own light client.
 |---|---|---|
 | ~~`VenueMetadataUpdated(venueId, metadataURI)` event~~ ✅ shipped | Cheap, event-driven menu-update replication | Small — done |
 | (optional) region as an indexed topic on venue events | Server-side region queries for replicas, mirroring `OrderRegion` | Small |
-| `FareDataAvailability` (epoch DA scores + reward claims) | P3 protocol-incentivized replication | Larger — later |
+| ~~`relayRebateBps` (fee slice → the settling relay)~~ ✅ shipped (F6 Tier 1) | Trustless relay gas-rebate — offsets gasless-tx cost | Small — done |
+| `FareDataAvailability` (epoch DA scores + reward claims) | P3 DA-score reward (Tier 2), needs an attester | Larger — later |
 
 No contract change is needed for menu storage, manifests, or RPC discovery — the
 existing `metadataURI` pointer + off-chain manifest cover them.
@@ -180,15 +192,12 @@ Ranked by leverage:
 | F3 | Replication agent: chain-indexed region pinning + manifest publish | F1, F2 | ✅ shipped (`agent.mjs`) |
 | F4 | Client: build gateway/RPC fallback pool from manifests; light-client-primary | F3 | ✅ shipped — gateway pool (`web/src/pool.ts`) + RPC-provider pool (`web/src/rpcpool.ts`, wired in `chain.ts`) |
 | F5 | DA scoring (challenge-response + client reports), off-chain leaderboard | F3 | ✅ shipped (`scorer.mjs`) |
-| F6 | On-chain DA rewards (`FareDataAvailability`: fee discount / token) | F5 | L |
+| F6 | On-chain rewards | F5 | 🟡 Tier 1 shipped: trustless relay gas-rebate (`relayRebateBps` in `FareOrders`). Tier 2 (DA-score reward via `FareDataAvailability` + attester) deferred |
 | F7 | Hosted super-node mode (multi-venue appliance) | F2 | M |
 | F8 | Venue-operated gasless relay | — | 🟡 relay shipped (`venue-node/`): gas sponsorship + settlement relay, no contract change; EIP-2771 forwarder for full meta-tx is the next step |
 
 Phasing: **F1 → F2/F3 (replication substrate) → F4 → F5 → F6**, with F7 alongside
-F2 and F8 as the independent big network-effect bet. **F1–F5 shipped.** F4's
-RPC-provider pool (`web/src/rpcpool.ts`) keeps the in-app light client the
-trustless primary — venue RPCs augment reads *only* in hosted mode as
-lower-priority fallbacks behind the hosted anchor, and broadcasts fan out to
-several endpoints (censorship-resistance) — never a sole trusted read path
-(§4/§5). Remaining in F: **F6** (on-chain DA rewards, gated on F5 scores), **F7**
-(hosted super-node), **F8**'s EIP-2771 forwarder.
+F2 and F8 as the independent big network-effect bet. **F1–F5 shipped; F6 Tier 1
+shipped** (trustless relay gas-rebate). Remaining in F: **F6 Tier 2** (DA-score
+reward — needs an attester/oracle to bring F5 scores on-chain), **F7** (hosted
+super-node), **F8**'s EIP-2771 forwarder.
