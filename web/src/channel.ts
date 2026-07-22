@@ -85,6 +85,15 @@ export interface LocUpdate {
   ts: number;
 }
 
+/// Proof-of-delivery photo pointer (B6): the crypto-shred key + the storage id of
+/// the sealed blob, wrapped E2E to the customer. The photo bytes live in blob
+/// storage (/api/photo); only this key — delivered here — can decrypt them.
+export interface PhotoRef {
+  key: string;
+  id: string;
+  ts: number;
+}
+
 /// A live, E2E-encrypted thread for one order between two known participants.
 /// `myPriv` is the sender's per-order/session private key (needed for ECDH — so
 /// chat requires a local-key wallet, not an injected one); `peerAddr` is the
@@ -96,13 +105,15 @@ export class OrderThread {
   private seen = new Set<string>();
 
   private lastLocTs = 0;
+  private lastPhotoTs = 0;
 
   constructor(
     private orderId: string | bigint,
     private myPriv: string,
     private myAddr: string,
     private peerAddr: string,
-    private onLoc?: (loc: LocUpdate) => void // B2: called with each new peer location
+    private onLoc?: (loc: LocUpdate) => void, // B2: called with each new peer location
+    private onPhoto?: (p: PhotoRef) => void // B6: called with a proof-of-delivery photo pointer
   ) {
     this.topic = topicOf(orderId);
   }
@@ -144,10 +155,23 @@ export class OrderThread {
     return true;
   }
 
+  /// Wrap + send a proof-of-delivery photo pointer to the peer (B6). The sealed
+  /// blob is stored separately (photoflow.ts); only its key + id travel here,
+  /// E2E to the customer. No-op until the peer has announced.
+  async sendPhoto(photoKey: string, id: string): Promise<boolean> {
+    if (!this.peerPub) {
+      await this.open();
+      return false;
+    }
+    const sealed = await sealMessage(this.myPriv, this.peerPub, this.orderId, JSON.stringify({ key: photoKey, id }));
+    await post(this.topic, { from: this.myAddr, seq: 0, kind: "photo", ts: Date.now(), iv: sealed.iv, ct: sealed.ct });
+    return true;
+  }
+
   /// Fetch the thread, learn/authenticate the peer's pubkey, and return any NEW
   /// decrypted messages from the peer (own messages are shown optimistically by
   /// send(), so they're skipped here). Also surfaces the peer's latest location
-  /// via the onLoc callback (B2).
+  /// (onLoc, B2) and any proof-of-delivery photo (onPhoto, B6).
   async poll(): Promise<ChatMsg[]> {
     const thread = await fetchThread(this.topic);
 
@@ -200,6 +224,25 @@ export class OrderThread {
         try {
           const { lat, lon } = JSON.parse(await openMessage(this.myPriv, this.peerPub, this.orderId, { iv: newest.iv!, ct: newest.ct! }));
           if (Number.isFinite(lat) && Number.isFinite(lon)) this.onLoc({ lat, lon, ts: newest.ts });
+        } catch {
+          /* tampered / wrong key — drop */
+        }
+      }
+    }
+
+    // Pass 4 (B6): the peer's latest proof-of-delivery photo pointer.
+    if (this.onPhoto && this.peerPub) {
+      let newest: Envelope | null = null;
+      for (const e of thread) {
+        if (e.kind === "photo" && e.from.toLowerCase() === this.peerAddr.toLowerCase() && e.iv && e.ct) {
+          if (!newest || e.ts > newest.ts) newest = e;
+        }
+      }
+      if (newest && newest.ts > this.lastPhotoTs) {
+        this.lastPhotoTs = newest.ts;
+        try {
+          const { key, id } = JSON.parse(await openMessage(this.myPriv, this.peerPub, this.orderId, { iv: newest.iv!, ct: newest.ct! }));
+          if (typeof key === "string" && typeof id === "string") this.onPhoto({ key, id, ts: newest.ts });
         } catch {
           /* tampered / wrong key — drop */
         }

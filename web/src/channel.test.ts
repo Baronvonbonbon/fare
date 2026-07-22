@@ -110,6 +110,29 @@ describe("relay channel (B3)", () => {
     expect(locs).toHaveLength(2);
   });
 
+  it("proof-of-delivery photo pointer (B6) is delivered E2E via onPhoto", async () => {
+    const cust = Wallet.createRandom();
+    const drv = Wallet.createRandom();
+    const orderId = 11n;
+    const photos: any[] = [];
+    const custThread = new OrderThread(orderId, cust.privateKey, cust.address, drv.address, undefined, (p) => photos.push(p));
+    const drvThread = new OrderThread(orderId, drv.privateKey, drv.address, cust.address);
+
+    await custThread.open();
+    await drvThread.open();
+    await drvThread.poll(); // driver learns the customer's key
+
+    const key = "0x" + "ab".repeat(32);
+    const id = "0x" + "cd".repeat(32);
+    expect(await drvThread.sendPhoto(key, id)).toBe(true);
+    await custThread.poll();
+    expect(photos).toHaveLength(1);
+    expect(photos[0]).toMatchObject({ key, id });
+    // idempotent: a re-poll of the same photo doesn't re-fire
+    await custThread.poll();
+    expect(photos).toHaveLength(1);
+  });
+
   it("send() before the peer has joined throws a friendly wait", async () => {
     const a = Wallet.createRandom();
     const b = Wallet.createRandom();

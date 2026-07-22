@@ -129,9 +129,8 @@ on-chain counterparty (`o.driver` / `o.customer`) before deriving the shared key
 so an impersonator who knows the orderId can't inject a key, and chat works from
 assignment onward, not just post-handoff.
 
-**One channel, three features (`kind`).** The envelope is `kind`-tagged
-(`hello`/`chat`/`loc`/`photo`). **B2 live tracking shipped** on it — the driver
-opt-in publishes E2E-sealed `kind:"loc"` updates (`OrderThread.sendLoc`), the
-customer renders them on `TrackMap` (channel.ts + App `TrackPublisher`/`TrackPanel`).
-**B6** (proof-of-delivery photo-key delivery → `kind:"photo"`) is the remaining
-rider — UI + an authorized blob submitter, not new transport.
+**One channel, three features (`kind`) — all shipped.** The envelope is
+`kind`-tagged (`hello`/`chat`/`loc`/`photo`): **B3** chat, **B2** live tracking
+(`sendLoc` → `TrackMap`), and **B6** proof-of-delivery photo (`sendPhoto` wraps
+the crypto-shred key E2E; the sealed blob rides `/api/photo`, and the customer's
+`TrackPanel` fetches + decrypts + views it). One transport, three features.

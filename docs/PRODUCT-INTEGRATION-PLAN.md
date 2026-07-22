@@ -120,7 +120,7 @@ role views. The mapping below is the target shape.
 | **Live tracking** (status, driver on map, ETA) | order `status` + E2E channel (`kind:loc`) | ✅ | Driver opt-in shares live location; customer sees driver+trace+ETA on TrackMap (off-chain, E2E) |
 | Pick a Dasher (FARE-specific: reverse auction) | `biddersOf` / `acceptBid` | ✅ | Bid cards — but **no driver rating shown** (⛔ `reputationOf`) |
 | Chat with Dasher / support | E2E crypto (`msg.ts`) + relay channel (`channel.ts`) | ✅ | ChatPanel in order cards; per-order topic, KV/venue-node relay (MESSAGING.md) |
-| Handoff / proof of delivery | `confirmDropoffZK` (ZK) | ✅ | No delivery photo / "leave at door" option |
+| Handoff / proof of delivery | `confirmDropoffZK` (ZK) + E2E photo (`kind:photo`) | ✅ | ZK dropoff + optional E2E delivery photo (crypto-shred, expires) |
 | Rate order + driver + restaurant | `FareRatings` (verified-delivery) | ✅ | On-chain stars, gated to a Delivered order's customer; shown in bid cards |
 | Reorder, history, receipts | per-order wallet registry (local) | 🟡 | History is device-local; no receipts/reorder |
 | Refunds / problems | `openDispute` | 🟡 | Opens with empty evidence; no status/outcome view |
@@ -240,7 +240,7 @@ Ordered roughly by leverage. Check off as landed.
 | B3 | Order-scoped messaging | B | Customer/Driver | ✅ done (channel + chat) |
 | B4 | Push notifications | B | Cross-cutting | ☐ todo |
 | B5 | Ratings (stars) | B | Post-delivery | ✅ done |
-| B6 | Proof-of-delivery photo | B | Driver view | 🟡 partial |
+| B6 | Proof-of-delivery photo | B | Driver/Customer | ✅ done (capture→seal→store→E2E view) |
 | B7 | History / receipts / reorder | B | Customer view | ✅ done |
 | C1 | Gasless meta-tx relay | C | Infra + all views | 🟡 partial |
 | C2 | Fiat pricing (oracle) | C | Checkout | ☐ todo |

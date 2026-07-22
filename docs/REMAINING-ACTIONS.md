@@ -39,9 +39,10 @@ The full protocol (incl. F6/F8) is deployed + seeded on Paseo. Remaining ops:
 - ☐ **IPFS (optional, shared menus)** — stand up the DATUM node + set
   `IPFS_ADD_URL` / `IPFS_API_KEY` / `VITE_IPFS_GATEWAY`. Without it, published
   menus are device-local (`local://`), single-device only.
-- ☐ **Messaging KV (optional, chat/channel)** — bind a `MSG_KV` namespace in
-  Cloudflare Pages (Settings → Functions → KV) so `/api/msg` store-and-forwards
-  order chats. Without it, chat needs a running venue relay (`/msg`) or degrades.
+- ☐ **Channel KV (optional; chat / tracking / photo)** — bind `MSG_KV` and
+  `PHOTO_KV` namespaces in Cloudflare Pages (Settings → Functions → KV) so
+  `/api/msg` and `/api/photo` back the order channel + delivery-photo store.
+  Without them, these need a running venue relay (`/msg`, `/photo`) or degrade.
 - ✅ **Cloudflare Pages rebuild** auto-triggers on push to `main` (address books
   committed); the client also re-resolves upgraded contracts from the router at
   runtime.
@@ -67,11 +68,13 @@ infra/UI, spec'd in the linked design note.
   renders the driver + venue + a trace on a tile-less `TrackMap` with distance +
   a rough ETA. Round-trip integration-tested (`channel.test.ts`). Preserves the
   "driver location stays off-chain" invariant — sharing is consensual + E2E.
-- 🟡 **B6 Proof-of-delivery photo** — crypto-shred sealing done + tested
-  (`web/src/photo.ts`); the channel can carry the wrapped key (`kind:"photo"`).
-  Remaining: capture+compress UI, an **authorized submitter** (Bulletin Chain
-  `store` / IPFS pin) for the sealed blob, key-wrap over `msg.ts`, and the expiry
-  job. See [PHOTOS.md](PHOTOS.md).
+- ✅ **B6 Proof-of-delivery photo** — **shipped.** Driver captures →
+  `compressImage` (downscale + EXIF-strip) → crypto-shred seal (`photo.ts`) →
+  `storeSealed` (content-addressed `/api/photo` KV, venue `/photo` fallback) →
+  `sendPhoto` wraps the key E2E over the channel (`kind:"photo"`); the customer's
+  `TrackPanel` fetches, decrypts, and views it. Expires by storage TTL (~2 wk)
+  ∧ crypto-shred. Round-trip tested. Remaining niceties: swap the demo store for
+  Bulletin Chain `store` when live; a proactive local key-purge. See [PHOTOS.md](PHOTOS.md).
 - ✅ **C1 / F8 Gasless relay** — `venue-node/` relay (gas sponsorship + settlement
   relay) **and** the EIP-2771 forwarder: `FareForwarder` + `_msgSender()` in
   `FareOrders`/`FareRatings` make the **non-value** user actions (placeBid /

@@ -99,7 +99,14 @@ the *content* unrecoverable regardless.
 | Step | Status |
 |---|---|
 | Photo sealing + crypto-shred (`photo.ts`) + tests | ✅ done |
-| Capture + downscale/strip-EXIF in the driver dropoff flow | ☐ |
-| Authorized submitter (`/api/photo` or venue node) → Bulletin `store` / IPFS pin | ☐ (infra) |
-| Key wrap over `msg.ts` + attach CID to the order record / dispute evidence | ☐ |
-| Expiry job — don't-renew + key-shred after order + grace | ☐ |
+| Capture + downscale/strip-EXIF in the driver dropoff flow | ✅ done (`photoflow.ts` `compressImage`; `TrackPublisher` "📷 Delivery photo") |
+| Authorized submitter → transient storage | ✅ done (`/api/photo` KV, content-addressed + ~2-wk TTL; venue-node `/photo` P2) |
+| Key wrap over the channel + attach the storage id | ✅ done (`OrderThread.sendPhoto` → `kind:"photo"`; customer `TrackPanel` decrypts + views) |
+| Expiry — don't-renew + key-shred | 🟡 TTL-driven (KV/venue TTL ~2 wk = "don't renew"); crypto-shred is inherent (fresh key, never persisted server-side). A proactive local key-purge after terminal + grace is the remaining nicety. |
+| Bulletin Chain `store` submitter (vs the KV/IPFS demo store) | ☐ (swap `/api/photo` for the Bulletin path when it's live — §2) |
+
+**Shipped.** Driver captures at dropoff → `compressImage` (downscale + EXIF-strip)
+→ `newPhotoKey` + `sealPhoto` → `storeSealed` (content-addressed `/api/photo`,
+venue `/photo` fallback) → `OrderThread.sendPhoto` wraps the key+id E2E to the
+customer, whose `TrackPanel` fetches, `openPhoto`s, and renders it — expiring by
+storage TTL ∧ crypto-shred. Round-trip tested (`channel.test.ts`).

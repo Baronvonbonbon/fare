@@ -25,6 +25,7 @@
 
 import http from "node:http";
 import { readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { JsonRpcProvider, Wallet, Contract, Interface, parseEther, formatEther, isAddress } from "ethers";
 import { rebateWei, withdrawFeeWei, coversCost, withinBudget, windowSpent } from "./economics.mjs";
 
@@ -181,6 +182,15 @@ function threadOf(topic) {
 }
 setInterval(() => { const now = Date.now(); for (const [k, v] of threads) if (v.exp < now) threads.delete(k); }, 3_600_000).unref?.();
 
+// ── proof-of-delivery photo blob store (B6, P2) — in-memory, TTL ─────────────
+// Holds only ciphertext (sealed client-side by photo.ts). Content-addressed by
+// sha256(ct); expires with a TTL (crypto-shred handles the rest).
+const photos = new Map(); // id → { iv, ct, exp }
+const PHOTO_TTL_MS = 14 * 24 * 3_600_000; // ~2 weeks
+const isHex = (s) => typeof s === "string" && /^0x[0-9a-fA-F]*$/.test(s);
+const sha256Hex = (s) => "0x" + createHash("sha256").update(s).digest("hex");
+setInterval(() => { const now = Date.now(); for (const [k, v] of photos) if (v.exp < now) photos.delete(k); }, 3_600_000).unref?.();
+
 // ── crude per-IP rate limit ──────────────────────────────────────────────────
 const hits = new Map();
 function rateLimited(ip) {
@@ -235,6 +245,15 @@ const server = http.createServer(async (req, res) => {
       return send(res, 200, { messages: threadOf(topic).msgs.filter((m) => m.ts > since) }, origin);
     }
 
+    // ── Photo store: fetch a sealed blob by id (cheap read) ──────────────────
+    if (req.method === "GET" && url.pathname === "/photo") {
+      const id = url.searchParams.get("id");
+      if (!isHex(id)) return send(res, 400, { error: "bad id" }, origin);
+      const p = photos.get(id);
+      if (!p || p.exp < Date.now()) return send(res, 404, { error: "not found (expired?)" }, origin);
+      return send(res, 200, { iv: p.iv, ct: p.ct }, origin);
+    }
+
     if (rateLimited(ip)) return send(res, 429, { error: "rate limited" }, origin);
 
     // ── Message channel: append an envelope (idempotent by from+seq+kind) ────
@@ -252,6 +271,16 @@ const server = http.createServer(async (req, res) => {
       if (t.msgs.length > MSG_THREAD_MAX) t.msgs = t.msgs.slice(-MSG_THREAD_MAX);
       t.exp = Date.now() + MSG_TTL_MS;
       return send(res, 200, { ok: true, seq: msg.seq }, origin);
+    }
+
+    // ── Photo store: store a sealed blob → content id ────────────────────────
+    if (req.method === "POST" && url.pathname === "/photo") {
+      const { iv, ct } = await readJson(req);
+      if (!isHex(iv) || !isHex(ct)) return send(res, 400, { error: "bad sealed photo" }, origin);
+      if (ct.length > 3 * 1024 * 1024) return send(res, 413, { error: "photo too large" }, origin);
+      const id = sha256Hex(ct);
+      photos.set(id, { iv, ct, exp: Date.now() + PHOTO_TTL_MS });
+      return send(res, 200, { id }, origin);
     }
 
     // ── Sponsor gas ──────────────────────────────────────────────────────────

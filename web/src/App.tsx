@@ -43,6 +43,8 @@ import {
 } from "./wallets";
 import { isAddress } from "ethers";
 import { OrderThread, type ChatMsg, type LocUpdate } from "./channel";
+import { newPhotoKey, sealPhoto, openPhoto } from "./photo";
+import { compressImage, storeSealed, fetchSealed, photoObjectUrl } from "./photoflow";
 import {
   Menu, MenuItem, Cart, fetchMenu, cartTotal, cartCount,
   emptyMenu, newItemId, publishMenu, hasMenuURI,
@@ -1243,18 +1245,33 @@ function ChatPanel({ orderId, myPriv, myAddr, peerAddr }: { orderId: bigint; myP
   );
 }
 
-/// Driver-side live-location publisher (B2). Opt-in — the driver taps to share;
-/// positions are E2E-sealed to the order's customer and sent over the channel,
-/// never on-chain. Throttled; stops on unmount / toggle-off.
+/// Driver-side delivery tools (B2 + B6). Maintains one channel thread for the
+/// order; the driver can opt-in to share live location (E2E, throttled) and/or
+/// send a proof-of-delivery photo (compressed + sealed under a fresh key; only
+/// the key travels E2E, the blob goes to the photo store). Nothing on-chain.
 function TrackPublisher({ orderId, myPriv, myAddr, peerAddr }: { orderId: bigint; myPriv?: string | null; myAddr?: string; peerAddr?: string }) {
   const [sharing, setSharing] = useState(false);
   const [note, setNote] = useState("");
+  const [photo, setPhoto] = useState("");
+  const threadRef = useRef<OrderThread | null>(null);
+  const fileRef = useRef<HTMLInputElement | null>(null);
 
+  // One thread for the order — learns the customer's key + carries loc/photo.
   useEffect(() => {
-    if (!sharing || !myPriv || !myAddr || !peerAddr || !isAddress(peerAddr)) return;
-    if (!("geolocation" in navigator)) { setNote("no geolocation on this device"); return; }
+    if (!myPriv || !myAddr || !peerAddr || !isAddress(peerAddr)) return;
     const t = new OrderThread(orderId, myPriv, myAddr, peerAddr);
+    threadRef.current = t;
+    let alive = true;
     t.open().catch(() => {});
+    t.poll().catch(() => {});
+    const iv = setInterval(() => { if (alive) t.poll().catch(() => {}); }, 4000);
+    return () => { alive = false; clearInterval(iv); threadRef.current = null; };
+  }, [String(orderId), myPriv, myAddr, peerAddr]);
+
+  // Location watch, gated on the opt-in toggle.
+  useEffect(() => {
+    if (!sharing) return;
+    if (!("geolocation" in navigator)) { setNote("no geolocation on this device"); return; }
     let last = 0;
     const wid = navigator.geolocation.watchPosition(
       (pos) => {
@@ -1263,22 +1280,46 @@ function TrackPublisher({ orderId, myPriv, myAddr, peerAddr }: { orderId: bigint
         last = now;
         const lat = Math.round(pos.coords.latitude * 1e6);
         const lon = Math.round(pos.coords.longitude * 1e6);
-        t.sendLoc(lat, lon).then((ok) => setNote(ok ? "sharing your location…" : "waiting for the customer to open tracking…")).catch(() => {});
+        threadRef.current?.sendLoc(lat, lon).then((ok) => setNote(ok ? "sharing your location…" : "waiting for the customer to open tracking…")).catch(() => {});
       },
       (err) => setNote(err.message),
       { enableHighAccuracy: true, maximumAge: 5000 }
     );
-    const iv = setInterval(() => t.poll().catch(() => {}), 4000); // learn the customer's key
-    return () => { navigator.geolocation.clearWatch(wid); clearInterval(iv); };
-  }, [sharing, String(orderId), myPriv, myAddr, peerAddr]);
+    return () => navigator.geolocation.clearWatch(wid);
+  }, [sharing]);
+
+  const onFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const f = e.target.files?.[0];
+    const t = threadRef.current;
+    if (!f || !t) return;
+    setPhoto("sealing…");
+    try {
+      const bytes = await compressImage(f); // downscale + strip EXIF
+      const key = newPhotoKey(); // crypto-shred handle
+      const sealed = await sealPhoto(key, bytes);
+      setPhoto("storing…");
+      const id = await storeSealed(sealed);
+      const ok = await t.sendPhoto(key, id);
+      setPhoto(ok ? "delivery photo sent ✓ (expires)" : "stored — will deliver when the customer opens the order");
+    } catch (err: any) {
+      setPhoto(err?.message ?? "photo failed");
+    } finally {
+      if (fileRef.current) fileRef.current.value = "";
+    }
+  };
 
   if (!myPriv || !peerAddr || !isAddress(peerAddr)) return null;
   return (
     <div style={{ marginTop: 8 }}>
-      <button className={sharing ? "btn small" : "btn ghost small"} onClick={() => setSharing((s) => !s)}>
-        {sharing ? "📍 Sharing location — tap to stop" : "📍 Share live location"}
-      </button>
+      <div className="btn-row">
+        <button className={sharing ? "btn small" : "btn ghost small"} onClick={() => setSharing((s) => !s)}>
+          {sharing ? "📍 Sharing — stop" : "📍 Share location"}
+        </button>
+        <button className="btn ghost small" onClick={() => fileRef.current?.click()}>📷 Delivery photo</button>
+        <input ref={fileRef} type="file" accept="image/*" capture="environment" style={{ display: "none" }} onChange={onFile} />
+      </div>
       {sharing && note && <div className="hint" style={{ marginTop: 4 }}>{note}</div>}
+      {photo && <div className="hint" style={{ marginTop: 4 }}>{photo}</div>}
     </div>
   );
 }
@@ -1290,6 +1331,8 @@ function TrackPanel({ orderId, myPriv, myAddr, peerAddr, drop, venue }: { orderI
   const [open, setOpen] = useState(false);
   const [driver, setDriver] = useState<MicroDeg | null>(null);
   const [trace, setTrace] = useState<MicroDeg[]>([]);
+  const [photoUrl, setPhotoUrl] = useState("");
+  const [photoNote, setPhotoNote] = useState("");
 
   useEffect(() => {
     if (!open || !myPriv || !myAddr || !peerAddr || !isAddress(peerAddr)) return;
@@ -1298,7 +1341,18 @@ function TrackPanel({ orderId, myPriv, myAddr, peerAddr, drop, venue }: { orderI
       setDriver(p);
       setTrace((tr) => [...tr.slice(-40), p]);
     };
-    const t = new OrderThread(orderId, myPriv, myAddr, peerAddr, onLoc);
+    const onPhoto = async (ref: { key: string; id: string }) => {
+      setPhotoNote("decrypting delivery photo…");
+      try {
+        const sealed = await fetchSealed(ref.id);
+        const bytes = await openPhoto(ref.key, sealed);
+        setPhotoUrl(photoObjectUrl(bytes));
+        setPhotoNote("");
+      } catch (e: any) {
+        setPhotoNote(e?.message ?? "photo unavailable");
+      }
+    };
+    const t = new OrderThread(orderId, myPriv, myAddr, peerAddr, onLoc, onPhoto);
     let alive = true;
     t.open().catch(() => {});
     const tick = () => { if (alive) t.poll().catch(() => {}); };
@@ -1306,6 +1360,8 @@ function TrackPanel({ orderId, myPriv, myAddr, peerAddr, drop, venue }: { orderI
     const iv = setInterval(tick, 4000);
     return () => { alive = false; clearInterval(iv); };
   }, [open, String(orderId), myPriv, myAddr, peerAddr]);
+
+  useEffect(() => () => { if (photoUrl) URL.revokeObjectURL(photoUrl); }, [photoUrl]);
 
   if (!myPriv || !peerAddr || !isAddress(peerAddr) || !drop) return null;
   const distM = driver ? distanceMeters(driver, drop) : null;
@@ -1326,6 +1382,13 @@ function TrackPanel({ orderId, myPriv, myAddr, peerAddr, drop, venue }: { orderI
           ) : (
             <div className="hint">Waiting for the driver to share their location…</div>
           )}
+          {photoUrl && (
+            <div style={{ marginTop: 8 }}>
+              <div className="hint">📷 Proof of delivery — end-to-end encrypted, expires:</div>
+              <img src={photoUrl} alt="proof of delivery" style={{ maxWidth: "100%", borderRadius: 8, marginTop: 4 }} />
+            </div>
+          )}
+          {photoNote && <div className="hint" style={{ marginTop: 4 }}>{photoNote}</div>}
         </div>
       )}
     </div>
