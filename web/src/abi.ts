@@ -87,4 +87,10 @@ export const DISPUTES_ABI = [
   "function openDispute(uint256 orderId, string evidenceURI) payable returns (uint256)",
   "function disputeOfOrder(uint256 orderId) view returns (uint256)",
   "function disputes(uint256) view returns (uint256 orderId, address opener, uint96 bond, uint8 status, string evidenceURI)",
+  // Arbiter console (D1): queue enumeration + the ruling call.
+  "function nextDisputeId() view returns (uint256)",
+  "function arbiter() view returns (address)",
+  "function treasury() view returns (address)",
+  "function resolve(uint256 disputeId, uint16 customerShareBps, bool openerWins, bool driverAtFault, uint256 slashDriverAmount)",
+  "event DisputeResolved(uint256 indexed disputeId, uint256 indexed orderId, uint16 customerShareBps, bool openerWins, uint256 driverSlashed)",
 ];

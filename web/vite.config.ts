@@ -5,6 +5,17 @@ import { fileURLToPath } from "node:url";
 export default defineConfig({
   plugins: [react()],
   server: { port: 5180 },
+  // Two apps from one project: the consumer PWA (index.html) and the ops /
+  // governance console (ops.html → /ops), which shares the chain glue but has
+  // no shared nav and no service worker. See src/ops/.
+  build: {
+    rollupOptions: {
+      input: {
+        main: fileURLToPath(new URL("./index.html", import.meta.url)),
+        ops: fileURLToPath(new URL("./ops.html", import.meta.url)),
+      },
+    },
+  },
   resolve: {
     alias: {
       // pine-rpc's root entry also exports its node-only JsonRpcServer

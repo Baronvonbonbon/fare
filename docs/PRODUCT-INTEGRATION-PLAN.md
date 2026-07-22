@@ -49,8 +49,8 @@ surface is `contracts/`; for the app surface, `web/src/{abi,chain,App}.tsx`.
 | Entry point | In PWA? | Notes |
 |---|---|---|
 | `openDispute` | 🟡 | Wired, but **evidence is always `""`** — no evidence flow |
-| `resolve` (arbiter ruling) | ⛔ | **No arbiter UI at all** — needs an ops/arbiter console |
-| (no dispute list / detail / status view) | ⛔ | Can't see open disputes, evidence, or outcome in-app |
+| `resolve` (arbiter ruling) | ⚙️ | **Arbiter console** (D1) — ops app at `/ops`, not the consumer PWA |
+| (dispute list / detail / status view) | ⚙️ | Dispute queue + order/driver context in the ops console (D1) |
 | `setArbiter` / `setDisputeBond` / `configure` / `setRouter` | ⚙️ | Admin |
 
 ### FareDrivers (registry, stake, reputation)
@@ -94,7 +94,7 @@ surface is `contracts/`; for the app surface, `web/src/{abi,chain,App}.tsx`.
 **Audit summary — the tie-in gaps (⛔) worth wiring:**
 1. Bids: `withdrawBid`
 2. Driver stake lifecycle: `addStake`, `requestUnstake`, `withdrawStake`, `setMetadata`
-3. Disputes: evidence flow on `openDispute`, an **arbiter console** for `resolve`, and a dispute detail/list view
+3. Disputes: evidence flow on `openDispute` (A7 ✅), an **arbiter console** for `resolve` (D1 ✅, ops app), and a dispute detail/list view (D1 ✅)
 4. Venue management: `setActive`, `setLocation`, `setPayout`, `setSigner`, `setMetadata`
 5. Vault: `withdrawTo`, `claimPaseoDust` (+ show `pendingPaseoDust`)
 6. Reputation surfaced in **bid cards** (`reputationOf`)
@@ -210,7 +210,14 @@ Ordered roughly by leverage. Check off as landed.
 - [ ] Shielded **funding path** for per-order burner wallets (privacy mainnet gate)
 
 ### Group D — Ops / governance / trust (⚙️ console, not consumer app)
-- [ ] **Arbiter console**: dispute queue + `resolve` (customerShareBps, openerWins, slash)
+*A separate app (`web/ops.html` → `/ops`, `web/src/ops/`) — shares the chain glue
+with the PWA, no shared nav, no service worker. D1 is the first tenant; D2–D4
+land as sibling tabs.*
+- [x] **Arbiter console**: dispute queue + `resolve` (customerShareBps, openerWins,
+  driverAtFault, slash) — `web/src/ops/OpsApp.tsx`. Connect the arbiter wallet
+  (badges whether it matches the on-chain `arbiter`), see each open dispute with
+  its order + driver context (frozen escrow, reputation, stake), issue a ruling
+  with a live escrow-split preview. Reuses `connect`/`contracts` from `chain.ts`.
 - [ ] Governance console: `setParams`, `setGeoParams`, `setMinStake`, `setDisputeBond`, `setArbiter`
 - [ ] Guardian pause console: `pause` / `unpause` / `setGuardian`
 - [ ] Upgrade console: router `register` / `upgradeContract` / `setContractFrozen`
@@ -246,7 +253,7 @@ Ordered roughly by leverage. Check off as landed.
 | C2 | Fiat pricing (oracle) | C | Checkout | ☐ todo |
 | C3 | Stablecoin escrow | C | Vault + checkout | ☐ todo |
 | C4 | Shielded burner funding | C | Infra | ☐ todo |
-| D1 | Arbiter console (`resolve`) | D | Ops app | ☐ todo |
+| D1 | Arbiter console (`resolve`) | D | Ops app (`/ops`) | ✅ done |
 | D2 | Governance console | D | Ops app | ☐ todo |
 | D3 | Guardian pause console | D | Ops app | ☐ todo |
 | D4 | Upgrade console | D | Ops app | ☐ todo |

@@ -121,7 +121,13 @@ infra/UI, spec'd in the linked design note.
 - 🔒 **C4 Shielded funding** for per-order burners — see §4.
 
 **Group D — ops / governance console** (⚙️ deliberately out of the consumer PWA)
-- ☐ **D1 Arbiter console** — dispute queue + `resolve` (customerShareBps, openerWins, slash).
+- ✅ **D1 Arbiter console** — **shipped.** A separate ops app (`web/ops.html` →
+  `/ops`, `web/src/ops/`) that shares the chain glue with the PWA but has no
+  shared nav and no service worker. Connect the arbiter wallet (badges whether it
+  matches the on-chain `arbiter`), see the queue of open disputes each with its
+  order + driver context (frozen escrow, opener role, reputation, stake), and
+  issue a ruling — `resolve(customerShareBps, openerWins, driverAtFault, slash)`
+  with a live escrow-split preview. This is the shell D2–D4 will extend.
 - ☐ **D2 Governance console** — `setParams` / `setGeoParams` / `setMinStake` / `setDisputeBond` / `setArbiter`.
 - ☐ **D3 Guardian pause console** — `pause` / `unpause` / `setGuardian`.
 - ☐ **D4 Upgrade console** — router `register` / `upgradeContract` / `setContractFrozen`.
