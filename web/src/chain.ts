@@ -16,6 +16,7 @@ import {
   DISPUTES_ABI,
   DRIVERS_ABI,
   ORDERS_ABI,
+  PAUSE_ABI,
   RATINGS_ABI,
   ROUTER_ABI,
   SETTLEMENT_ABI,
@@ -259,6 +260,7 @@ export function contracts(runner: ethers.ContractRunner = readProvider) {
     settlement: new Contract(ADDRESSES.settlement, SETTLEMENT_ABI, runner),
     vault: new Contract(ADDRESSES.vault, VAULT_ABI, runner),
     disputes: new Contract(ADDRESSES.disputes, DISPUTES_ABI, runner),
+    pauseRegistry: new Contract(ADDRESSES.pauseRegistry, PAUSE_ABI, runner),
   };
   // Additive contract — may not exist in an older deployment's address book.
   if (ADDRESSES.ratings) c.ratings = new Contract(ADDRESSES.ratings, RATINGS_ABI, runner);

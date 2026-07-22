@@ -70,6 +70,17 @@ export const VAULT_ABI = [
   "function claimPaseoDust()",
 ];
 
+export const PAUSE_ABI = [
+  // Guardian pause console (D3). Categories: 0 orders, 1 settlement, 2 disputes,
+  // 3 registry. Guardians (or owner) can pause; only owner unpauses / sets guardians.
+  "function paused(uint8) view returns (bool)",
+  "function isGuardian(address) view returns (bool)",
+  "function owner() view returns (address)",
+  "function pause(uint8 category)",
+  "function unpause(uint8 category)",
+  "function setGuardian(address guardian, bool enabled)",
+];
+
 export const ROUTER_ABI = [
   "function currentAddrOf(bytes32) view returns (address)",
   "function versionOf(bytes32) view returns (uint64)",
