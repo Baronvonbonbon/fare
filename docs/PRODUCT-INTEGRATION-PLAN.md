@@ -117,7 +117,7 @@ role views. The mapping below is the target shape.
 | Checkout: address, tip, schedule | `createOrder(venueId, dropCommit, orderValue, tip, maxFare, windows)` | ✅ | Address = ZK drop commit; tip + windows supported |
 | Pay | native PAS escrow | 🟡 | Works on testnet; needs fiat pricing + gasless + stablecoin (group C) |
 | Order confirmation | `OrderCreated` event | ✅ | — |
-| **Live tracking** (status, driver on map, ETA) | order `status` + `OrderAssigned` | 🟡 | Status shown; no live driver location, no ETA, no map trace |
+| **Live tracking** (status, driver on map, ETA) | order `status` + E2E channel (`kind:loc`) | ✅ | Driver opt-in shares live location; customer sees driver+trace+ETA on TrackMap (off-chain, E2E) |
 | Pick a Dasher (FARE-specific: reverse auction) | `biddersOf` / `acceptBid` | ✅ | Bid cards — but **no driver rating shown** (⛔ `reputationOf`) |
 | Chat with Dasher / support | E2E crypto (`msg.ts`) + relay channel (`channel.ts`) | ✅ | ChatPanel in order cards; per-order topic, KV/venue-node relay (MESSAGING.md) |
 | Handoff / proof of delivery | `confirmDropoffZK` (ZK) | ✅ | No delivery photo / "leave at door" option |
@@ -236,7 +236,7 @@ Ordered roughly by leverage. Check off as landed.
 | A6 | Reputation in bid cards | A | Customer view | ✅ done |
 | A7 | Dispute evidence + status view | A | Customer/Driver | ✅ done |
 | B1 | Catalog / menu / cart | B | New service + all views | ✅ done |
-| B2 | Live tracking + ETA | B | Customer/Driver | 🟡 partial |
+| B2 | Live tracking + ETA | B | Customer/Driver | ✅ done (E2E driver location + TrackMap) |
 | B3 | Order-scoped messaging | B | Customer/Driver | ✅ done (channel + chat) |
 | B4 | Push notifications | B | Cross-cutting | ☐ todo |
 | B5 | Ratings (stars) | B | Post-delivery | ✅ done |

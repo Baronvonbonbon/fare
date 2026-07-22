@@ -84,6 +84,32 @@ describe("relay channel (B3)", () => {
     expect(custThread.ready).toBe(true);
   });
 
+  it("driver location (B2) is delivered E2E to the customer via onLoc", async () => {
+    const cust = Wallet.createRandom();
+    const drv = Wallet.createRandom();
+    const orderId = 7n;
+    const locs: any[] = [];
+    const custThread = new OrderThread(orderId, cust.privateKey, cust.address, drv.address, (l) => locs.push(l));
+    const drvThread = new OrderThread(orderId, drv.privateKey, drv.address, cust.address);
+
+    await custThread.open();
+    await drvThread.open();
+    await drvThread.poll(); // driver learns the customer's key
+
+    expect(await drvThread.sendLoc(37_774_900, -122_419_400)).toBe(true);
+    await custThread.poll();
+    expect(locs).toHaveLength(1);
+    expect(locs[0]).toMatchObject({ lat: 37_774_900, lon: -122_419_400 });
+
+    // a newer position supersedes; an unchanged (older) one doesn't re-fire
+    await drvThread.sendLoc(37_775_500, -122_419_000);
+    await custThread.poll();
+    expect(locs).toHaveLength(2);
+    expect(locs[1]).toMatchObject({ lat: 37_775_500 });
+    await custThread.poll(); // no new loc → no extra callback
+    expect(locs).toHaveLength(2);
+  });
+
   it("send() before the peer has joined throws a friendly wait", async () => {
     const a = Wallet.createRandom();
     const b = Wallet.createRandom();

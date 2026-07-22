@@ -130,6 +130,8 @@ so an impersonator who knows the orderId can't inject a key, and chat works from
 assignment onward, not just post-handoff.
 
 **One channel, three features (`kind`).** The envelope is `kind`-tagged
-(`hello`/`chat`/`loc`/`photo`), so **B2** (driver-location trace → `kind:"loc"`)
-and **B6** (proof-of-delivery photo-key delivery → `kind:"photo"`) ride the same
-transport — their remaining work is UI + payload, not new infra.
+(`hello`/`chat`/`loc`/`photo`). **B2 live tracking shipped** on it — the driver
+opt-in publishes E2E-sealed `kind:"loc"` updates (`OrderThread.sendLoc`), the
+customer renders them on `TrackMap` (channel.ts + App `TrackPublisher`/`TrackPanel`).
+**B6** (proof-of-delivery photo-key delivery → `kind:"photo"`) is the remaining
+rider — UI + an authorized blob submitter, not new transport.

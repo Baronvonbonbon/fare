@@ -61,9 +61,12 @@ infra/UI, spec'd in the linked design note.
   `ChatPanel` in the customer & driver order cards. Integration-tested
   (`channel.test.ts`). **Ops:** bind a `MSG_KV` namespace in Cloudflare Pages (or
   a venue relay serves it). See [MESSAGING.md](MESSAGING.md).
-- 🟡 **B2 Live tracking** — status stepper + ETA done; the off-chain channel now
-  exists. Remaining: driver publishes coarse location as a `kind:"loc"` envelope
-  on the channel + a **map trace** on the customer card. Small — no new infra.
+- ✅ **B2 Live tracking** — **shipped.** The driver opt-in shares live location
+  (`TrackPublisher`), E2E-sealed as `kind:"loc"` envelopes over the channel
+  (never on-chain, only the customer can decrypt); the customer's `TrackPanel`
+  renders the driver + venue + a trace on a tile-less `TrackMap` with distance +
+  a rough ETA. Round-trip integration-tested (`channel.test.ts`). Preserves the
+  "driver location stays off-chain" invariant — sharing is consensual + E2E.
 - 🟡 **B6 Proof-of-delivery photo** — crypto-shred sealing done + tested
   (`web/src/photo.ts`); the channel can carry the wrapped key (`kind:"photo"`).
   Remaining: capture+compress UI, an **authorized submitter** (Bulletin Chain

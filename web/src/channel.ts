@@ -76,6 +76,15 @@ export interface ChatMsg {
   mine: boolean;
 }
 
+/// A driver location update (microdegrees), delivered E2E over the channel — the
+/// live-tracking payload (B2). NEVER goes on-chain; only the order's customer can
+/// decrypt it.
+export interface LocUpdate {
+  lat: number;
+  lon: number;
+  ts: number;
+}
+
 /// A live, E2E-encrypted thread for one order between two known participants.
 /// `myPriv` is the sender's per-order/session private key (needed for ECDH — so
 /// chat requires a local-key wallet, not an injected one); `peerAddr` is the
@@ -86,11 +95,14 @@ export class OrderThread {
   private seq = 0;
   private seen = new Set<string>();
 
+  private lastLocTs = 0;
+
   constructor(
     private orderId: string | bigint,
     private myPriv: string,
     private myAddr: string,
-    private peerAddr: string
+    private peerAddr: string,
+    private onLoc?: (loc: LocUpdate) => void // B2: called with each new peer location
   ) {
     this.topic = topicOf(orderId);
   }
@@ -118,9 +130,24 @@ export class OrderThread {
     return { from: this.myAddr, text, ts, mine: true };
   }
 
+  /// Publish our current location to the peer (B2), sealed to their key. Uses a
+  /// fixed seq so each update REPLACES the last — the thread holds only the
+  /// latest position per sender, not a growing history. No-op until the peer has
+  /// announced (we can't seal without their key yet).
+  async sendLoc(lat: number, lon: number): Promise<boolean> {
+    if (!this.peerPub) {
+      await this.open();
+      return false;
+    }
+    const sealed = await sealMessage(this.myPriv, this.peerPub, this.orderId, JSON.stringify({ lat, lon }));
+    await post(this.topic, { from: this.myAddr, seq: 0, kind: "loc", ts: Date.now(), iv: sealed.iv, ct: sealed.ct });
+    return true;
+  }
+
   /// Fetch the thread, learn/authenticate the peer's pubkey, and return any NEW
   /// decrypted messages from the peer (own messages are shown optimistically by
-  /// send(), so they're skipped here).
+  /// send(), so they're skipped here). Also surfaces the peer's latest location
+  /// via the onLoc callback (B2).
   async poll(): Promise<ChatMsg[]> {
     const thread = await fetchThread(this.topic);
 
@@ -158,6 +185,25 @@ export class OrderThread {
         /* tampered / wrong key — drop */
       }
       this.seen.add(id);
+    }
+
+    // Pass 3 (B2): the peer's latest location, if newer than the last we surfaced.
+    if (this.onLoc && this.peerPub) {
+      let newest: Envelope | null = null;
+      for (const e of thread) {
+        if (e.kind === "loc" && e.from.toLowerCase() === this.peerAddr.toLowerCase() && e.iv && e.ct) {
+          if (!newest || e.ts > newest.ts) newest = e;
+        }
+      }
+      if (newest && newest.ts > this.lastLocTs) {
+        this.lastLocTs = newest.ts;
+        try {
+          const { lat, lon } = JSON.parse(await openMessage(this.myPriv, this.peerPub, this.orderId, { iv: newest.iv!, ct: newest.ct! }));
+          if (Number.isFinite(lat) && Number.isFinite(lon)) this.onLoc({ lat, lon, ts: newest.ts });
+        } catch {
+          /* tampered / wrong key — drop */
+        }
+      }
     }
     return out;
   }

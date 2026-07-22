@@ -42,7 +42,7 @@ import {
   sweepToMain,
 } from "./wallets";
 import { isAddress } from "ethers";
-import { OrderThread, type ChatMsg } from "./channel";
+import { OrderThread, type ChatMsg, type LocUpdate } from "./channel";
 import {
   Menu, MenuItem, Cart, fetchMenu, cartTotal, cartCount,
   emptyMenu, newItemId, publishMenu, hasMenuURI,
@@ -51,7 +51,7 @@ import { proveProximity, positionCommit } from "./zk";
 import { sponsorGas, relaySettle, relayForward, relayWithdraw, ensureGas } from "./relay";
 import { MicroDeg, distanceMeters, fmtCoord, fmtDist, getPosition, snapToGrid } from "./geo";
 import { QRScan, QRShow } from "./qr";
-import { VenuePin } from "./map";
+import { VenuePin, TrackMap } from "./map";
 import { AreaMap, PinMap } from "./tilemap";
 
 // ---- shared types ----
@@ -1243,6 +1243,95 @@ function ChatPanel({ orderId, myPriv, myAddr, peerAddr }: { orderId: bigint; myP
   );
 }
 
+/// Driver-side live-location publisher (B2). Opt-in — the driver taps to share;
+/// positions are E2E-sealed to the order's customer and sent over the channel,
+/// never on-chain. Throttled; stops on unmount / toggle-off.
+function TrackPublisher({ orderId, myPriv, myAddr, peerAddr }: { orderId: bigint; myPriv?: string | null; myAddr?: string; peerAddr?: string }) {
+  const [sharing, setSharing] = useState(false);
+  const [note, setNote] = useState("");
+
+  useEffect(() => {
+    if (!sharing || !myPriv || !myAddr || !peerAddr || !isAddress(peerAddr)) return;
+    if (!("geolocation" in navigator)) { setNote("no geolocation on this device"); return; }
+    const t = new OrderThread(orderId, myPriv, myAddr, peerAddr);
+    t.open().catch(() => {});
+    let last = 0;
+    const wid = navigator.geolocation.watchPosition(
+      (pos) => {
+        const now = Date.now();
+        if (now - last < 8000) return; // throttle to ~8s
+        last = now;
+        const lat = Math.round(pos.coords.latitude * 1e6);
+        const lon = Math.round(pos.coords.longitude * 1e6);
+        t.sendLoc(lat, lon).then((ok) => setNote(ok ? "sharing your location…" : "waiting for the customer to open tracking…")).catch(() => {});
+      },
+      (err) => setNote(err.message),
+      { enableHighAccuracy: true, maximumAge: 5000 }
+    );
+    const iv = setInterval(() => t.poll().catch(() => {}), 4000); // learn the customer's key
+    return () => { navigator.geolocation.clearWatch(wid); clearInterval(iv); };
+  }, [sharing, String(orderId), myPriv, myAddr, peerAddr]);
+
+  if (!myPriv || !peerAddr || !isAddress(peerAddr)) return null;
+  return (
+    <div style={{ marginTop: 8 }}>
+      <button className={sharing ? "btn small" : "btn ghost small"} onClick={() => setSharing((s) => !s)}>
+        {sharing ? "📍 Sharing location — tap to stop" : "📍 Share live location"}
+      </button>
+      {sharing && note && <div className="hint" style={{ marginTop: 4 }}>{note}</div>}
+    </div>
+  );
+}
+
+/// Customer-side live-tracking panel (B2). Subscribes to the driver's E2E
+/// location updates and renders them on a tile-less map with distance + a rough
+/// ETA. The driver's position is decrypted locally and never leaves the device.
+function TrackPanel({ orderId, myPriv, myAddr, peerAddr, drop, venue }: { orderId: bigint; myPriv?: string | null; myAddr?: string; peerAddr?: string; drop?: MicroDeg | null; venue?: MicroDeg | null }) {
+  const [open, setOpen] = useState(false);
+  const [driver, setDriver] = useState<MicroDeg | null>(null);
+  const [trace, setTrace] = useState<MicroDeg[]>([]);
+
+  useEffect(() => {
+    if (!open || !myPriv || !myAddr || !peerAddr || !isAddress(peerAddr)) return;
+    const onLoc = (l: LocUpdate) => {
+      const p = { lat: l.lat, lon: l.lon };
+      setDriver(p);
+      setTrace((tr) => [...tr.slice(-40), p]);
+    };
+    const t = new OrderThread(orderId, myPriv, myAddr, peerAddr, onLoc);
+    let alive = true;
+    t.open().catch(() => {});
+    const tick = () => { if (alive) t.poll().catch(() => {}); };
+    tick();
+    const iv = setInterval(tick, 4000);
+    return () => { alive = false; clearInterval(iv); };
+  }, [open, String(orderId), myPriv, myAddr, peerAddr]);
+
+  if (!myPriv || !peerAddr || !isAddress(peerAddr) || !drop) return null;
+  const distM = driver ? distanceMeters(driver, drop) : null;
+  const etaMin = distM != null ? Math.max(1, Math.round(distM / (25_000 / 60))) : null; // ~25 km/h
+
+  return (
+    <div style={{ marginTop: 8 }}>
+      <button className="btn ghost small" onClick={() => setOpen((v) => !v)}>🗺️ {open ? "Hide tracking" : "Track driver"}</button>
+      {open && (
+        <div style={{ marginTop: 6 }}>
+          {driver ? (
+            <>
+              <TrackMap drop={drop} venue={venue} driver={driver} trace={trace} />
+              <div className="hint" style={{ marginTop: 4 }}>
+                {distM != null && `${fmtDist(distM)} away`}{etaMin != null && ` · ~${etaMin} min`} · location is end-to-end encrypted
+              </div>
+            </>
+          ) : (
+            <div className="hint">Waiting for the driver to share their location…</div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function CustomerOrder({ o, venues, act, busy, session, say }: any) {
   const [payload, setPayload] = useState("");
   const [scanning, setScanning] = useState(false);
@@ -1397,6 +1486,17 @@ function CustomerOrder({ o, venues, act, busy, session, say }: any) {
       {(o.status === 2 || o.status === 3) && (
         <ChatPanel orderId={o.id} myPriv={walletFor(o.customer)?.privateKey} myAddr={o.customer} peerAddr={o.driver} />
       )}
+      {(o.status === 2 || o.status === 3) && (() => {
+        // The customer knows their own drop (stored locally at order creation);
+        // the driver's live position arrives E2E over the channel.
+        let drop: MicroDeg | null = null;
+        try { const r = JSON.parse(localStorage.getItem(dropStoreKey(o.dropCommit)) || "null"); if (r) drop = { lat: r.lat, lon: r.lon }; } catch { /* no local drop */ }
+        const v = venues.find((x: VenueRow) => String(x.id) === String(o.venueId));
+        return (
+          <TrackPanel orderId={o.id} myPriv={walletFor(o.customer)?.privateKey} myAddr={o.customer} peerAddr={o.driver}
+            drop={drop} venue={v ? { lat: v.lat, lon: v.lon } : null} />
+        );
+      })()}
       {(o.status === 2 || o.status === 3 || o.status === 6) && (
         <DisputeControl o={o} handle={os} busy={busy} act={act} />
       )}
@@ -1726,6 +1826,9 @@ function DriverJob({ o, venues, act, busy, signed, session, say }: any) {
       )}
       {(o.status === 2 || o.status === 3) && (
         <ChatPanel orderId={o.id} myPriv={(session?.signer as any)?.privateKey} myAddr={session?.address} peerAddr={o.customer} />
+      )}
+      {(o.status === 2 || o.status === 3) && (
+        <TrackPublisher orderId={o.id} myPriv={(session?.signer as any)?.privateKey} myAddr={session?.address} peerAddr={o.customer} />
       )}
       {(o.status === 2 || o.status === 3) && (
         <DisputeControl o={o} handle={signed} busy={busy} act={act} />
