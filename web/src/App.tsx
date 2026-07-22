@@ -46,7 +46,7 @@ import {
   emptyMenu, newItemId, publishMenu, hasMenuURI,
 } from "./menu";
 import { proveProximity, positionCommit } from "./zk";
-import { sponsorGas, relaySettle } from "./relay";
+import { sponsorGas, relaySettle, relayForward } from "./relay";
 import { MicroDeg, distanceMeters, fmtCoord, fmtDist, getPosition, snapToGrid } from "./geo";
 import { QRScan, QRShow } from "./qr";
 import { VenuePin } from "./map";
@@ -484,7 +484,8 @@ export default function App() {
               const s = await connect(mode, key);
               setSession(s);
               say(`Connected ${short(s.address)}`);
-              if (mode === "burner") maybeDrip(s.address);
+              // No auto-drip: gas is topped up on demand (the "Top up gas"
+              // button) or avoided entirely via gasless meta-txs (F8).
             } catch (e: any) {
               say(e.message, true);
             }
@@ -1136,7 +1137,7 @@ function RateWidget({ o, busy, act, say }: any) {
       <div className="btn-row">
         <button className="btn small" disabled={busy || !os || (dStars === 0 && vStars === 0)}
           onClick={() =>
-            act("Rate", () => os!.ratings.rate(o.id, dStars, vStars)).then(() => setDone(true))
+            act("Rate", () => relayForward("ratings", os!.ratings, "rate", [o.id, dStars, vStars])).then(() => setDone(true))
           }>
           Submit rating
         </button>
@@ -1283,7 +1284,7 @@ function CustomerOrder({ o, venues, act, busy, session, say }: any) {
           ))}
           <div className="btn-row">
             <button className="btn danger small" disabled={busy || orphaned}
-              onClick={() => act("Cancel order", () => os!.orders.cancelOpen(o.id))}>Cancel</button>
+              onClick={() => act("Cancel order", () => relayForward("orders", os!.orders, "cancelOpen", [o.id]))}>Cancel</button>
           </div>
         </>
       )}
@@ -1291,7 +1292,7 @@ function CustomerOrder({ o, venues, act, busy, session, say }: any) {
       {o.status === 2 && (
         <div className="btn-row">
           <button className="btn danger small" disabled={busy || orphaned}
-            onClick={() => act("Cancel", () => os!.orders.cancelAssigned(o.id))}>
+            onClick={() => act("Cancel", () => relayForward("orders", os!.orders, "cancelAssigned", [o.id]))}>
             Cancel (driver keeps a cut pre-deadline)
           </button>
         </div>
@@ -1513,12 +1514,12 @@ function DriverBid({ o, venues, act, busy, signed, session, dist }: any) {
         <input style={{ flex: 1, minWidth: 120 }} placeholder={`≤ ${fmt(o.maxFare)} PAS`}
           value={amount} onChange={(e) => setAmount(e.target.value)} inputMode="decimal" />
         <button className="btn small" disabled={busy || !amount}
-          onClick={() => act("Place bid", () => signed.orders.placeBid(o.id, parse(amount)))}>
+          onClick={() => act("Place bid", () => relayForward("orders", signed.orders, "placeBid", [o.id, parse(amount)]))}>
           {myBid ? "Rebid" : "Bid"}
         </button>
         {myBid && (
           <button className="btn ghost small" disabled={busy}
-            onClick={() => act("Withdraw bid", () => signed.orders.withdrawBid(o.id))}>
+            onClick={() => act("Withdraw bid", () => relayForward("orders", signed.orders, "withdrawBid", [o.id]))}>
             Withdraw
           </button>
         )}
@@ -1626,7 +1627,7 @@ function DriverJob({ o, venues, act, busy, signed, session, say }: any) {
               Confirm pickup
             </button>
             <button className="btn danger small" disabled={busy}
-              onClick={() => act("Abandon", () => signed.orders.abandonOrder(o.id))}>Abandon</button>
+              onClick={() => act("Abandon", () => relayForward("orders", signed.orders, "abandonOrder", [o.id]))}>Abandon</button>
           </div>
         </>
       ) : (

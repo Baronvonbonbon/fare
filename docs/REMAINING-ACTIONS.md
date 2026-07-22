@@ -47,9 +47,11 @@ infra/UI, spec'd in the linked design note.
   `FareOrders`/`FareRatings` make the **non-value** user actions (placeBid /
   withdrawBid / cancels / rate) gasless via the relay's `/forward`. Value actions
   (createOrder / acceptBid / increaseTip) stay on the gas-sponsored funded-burner
-  path so the relay never fronts escrow. Remaining: **run it** against the live
-  deploy (needs a deploy that includes `FareForwarder`), and optional PWA wiring
-  to build/sign forward requests. See [NETWORK-ARCHITECTURE.md](NETWORK-ARCHITECTURE.md).
+  path so the relay never fronts escrow. **PWA wired** (`web/src/relay.ts`
+  `relayForward` — the app signs a `ForwardRequest` and posts it to `/forward`
+  when a forwarder is deployed + `VITE_RELAY_URL` is set, else falls back to
+  direct calls). Remaining: **run it** against a live deploy that includes
+  `FareForwarder`. See [NETWORK-ARCHITECTURE.md](NETWORK-ARCHITECTURE.md).
 
 ---
 

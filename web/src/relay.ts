@@ -5,12 +5,20 @@
 // the relay pays the gas. With no relay configured it falls back transparently to
 // the central faucet + direct submission, so nothing breaks without a relay.
 
-import { requestDrip, sendProvider, type DripResult } from "./chain";
+import { ethers } from "ethers";
+import { requestDrip, sendProvider, readProvider, CHAIN_ID, ADDRESSES, type DripResult } from "./chain";
 
 const RELAY_URL = ((import.meta as any).env?.VITE_RELAY_URL as string | undefined)?.replace(/\/$/, "");
 
 export function relayConfigured(): boolean {
   return !!RELAY_URL;
+}
+
+/// Gasless meta-txs (F8) are possible only when a relay is configured AND the
+/// deployment has an EIP-2771 forwarder in the address book. Pre-forwarder
+/// deployments (or no relay) simply fall back to direct, gas-paying calls.
+export function forwarderAvailable(): boolean {
+  return !!RELAY_URL && !!ADDRESSES.forwarder;
 }
 
 /// Ask the venue relay to sponsor gas for `address`.
@@ -65,4 +73,71 @@ export async function relaySettle(
     return { hash, wait: () => sendProvider.waitForTransaction(hash) };
   }
   return runner.settlement[method](...args);
+}
+
+// ── gasless user actions via EIP-2771 forwarder (F8) ─────────────────────────
+// Only the NON-VALUE actions (placeBid / withdrawBid / cancelOpen /
+// cancelAssigned / abandonOrder / rate) are forwardable — the contracts read
+// _msgSender() for those. Value actions (createOrder / acceptBid / increaseTip)
+// stay on the direct funded-burner path so the relay never fronts escrow.
+
+const FORWARDER_ABI = ["function nonces(address owner) view returns (uint256)"];
+
+const FORWARD_REQUEST_TYPES = {
+  ForwardRequest: [
+    { name: "from", type: "address" },
+    { name: "to", type: "address" },
+    { name: "value", type: "uint256" },
+    { name: "gas", type: "uint256" },
+    { name: "nonce", type: "uint256" },
+    { name: "deadline", type: "uint48" },
+    { name: "data", type: "bytes" },
+  ],
+};
+
+/// Build + sign the user's ForwardRequest. `signer` is the bound wallet/session
+/// signer (the order burner for customer actions, the driver session otherwise).
+async function buildForwardRequest(signer: any, to: string, data: string) {
+  const forwarder = ADDRESSES.forwarder;
+  const from = await signer.getAddress();
+  const fwd = new ethers.Contract(forwarder, FORWARDER_ABI, readProvider);
+  const nonce: bigint = await fwd.nonces(from);
+  const deadline = Math.floor(Date.now() / 1000) + 3600;
+  const gas = 500_000n; // inner call cap; the relay bounds the outer execute()
+  const domain = { name: "FareForwarder", version: "1", chainId: CHAIN_ID, verifyingContract: forwarder };
+  const message = { from, to, value: 0n, gas, nonce, deadline: BigInt(deadline), data };
+  const signature = await signer.signTypedData(domain, FORWARD_REQUEST_TYPES, message);
+  // execute() takes ForwardRequestData (no nonce field); JSON-safe (no bigints).
+  return { from, to, value: "0", gas: gas.toString(), deadline, data, signature };
+}
+
+async function relayForwardSubmit(request: any): Promise<string> {
+  const res = await fetch(`${RELAY_URL}/forward`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ request }),
+  });
+  const j = (await res.json().catch(() => ({}))) as { txHash?: string; error?: string };
+  if (!res.ok || !j.txHash) throw new Error(j.error ?? "relay forward failed");
+  return j.txHash;
+}
+
+/// Submit a non-value user action gaslessly through the forwarder when available,
+/// else directly from the bound wallet. `contract` is the signer-bound handle
+/// (its runner both signs the request and is the direct-call fallback); `target`
+/// selects the on-chain address the relay is allowed to forward to. Returns a
+/// tx-like object with .wait() so it drops into act() unchanged.
+export async function relayForward(
+  target: "orders" | "ratings",
+  contract: any,
+  method: string,
+  args: any[]
+): Promise<{ hash?: string; wait: () => Promise<any> }> {
+  if (forwarderAvailable()) {
+    const data = contract.interface.encodeFunctionData(method, args);
+    const request = await buildForwardRequest(contract.runner, ADDRESSES[target], data);
+    const hash = await relayForwardSubmit(request);
+    return { hash, wait: () => sendProvider.waitForTransaction(hash) };
+  }
+  return contract[method](...args); // direct funded-burner path
 }
