@@ -44,6 +44,7 @@ import {
 import { isAddress } from "ethers";
 import { OrderThread, type ChatMsg, type LocUpdate } from "./channel";
 import { newPhotoKey, sealPhoto, openPhoto } from "./photo";
+import { notify, notifyPermission, enableNotifications, type NotifyPermission } from "./notify";
 import { compressImage, storeSealed, fetchSealed, photoObjectUrl } from "./photoflow";
 import {
   Menu, MenuItem, Cart, fetchMenu, cartTotal, cartCount,
@@ -417,6 +418,37 @@ export default function App() {
 
   useEffect(() => localStorage.setItem("fare.role", role), [role]);
 
+  // B4 (P1): local notifications on relevant order transitions. `orders` is
+  // already role-scoped, so a change there is something this user cares about.
+  // First run just seeds the baseline (no notify on load); no persistent identity
+  // is registered anywhere — foreground-only, purely local.
+  const prevOrders = useRef<Map<string, { status: number; driver: string }> | null>(null);
+  useEffect(() => {
+    const prev = prevOrders.current;
+    const next = new Map(orders.map((o) => [String(o.id), { status: o.status, driver: o.driver }]));
+    if (prev && notifyPermission() === "granted") {
+      const me = session?.address?.toLowerCase();
+      for (const [id, cur] of next) {
+        const was = prev.get(id);
+        if (!was) {
+          if (cur.status === 1 && role === "driver") notify("New order nearby", `Order #${id} is open for bids`, `new-${id}`);
+          else if (cur.status === 1 && role === "venue") notify("New order", `Order #${id} came in for your venue`, `new-${id}`);
+          continue;
+        }
+        if (cur.status === was.status) continue;
+        if (cur.status === 2) {
+          if (role === "driver" && me && cur.driver.toLowerCase() === me) notify("Bid accepted 🎉", `You got order #${id}`, `st-${id}`);
+          else if (role === "customer") notify("Driver assigned", `A driver accepted order #${id}`, `st-${id}`);
+        } else if (cur.status === 3 && role === "customer") {
+          notify("Picked up 🛵", `Order #${id} is on the way`, `st-${id}`);
+        } else if (cur.status === 4 && role === "customer") {
+          notify("Delivered ✅", `Order #${id} was delivered`, `st-${id}`);
+        }
+      }
+    }
+    prevOrders.current = next;
+  }, [orders, role, session]);
+
   /// Wrap a tx-sending action with busy state + toast + refresh.
   const act = useCallback(
     async (label: string, fn: () => Promise<any>) => {
@@ -482,6 +514,7 @@ export default function App() {
           <small>p2p delivery · polkadot hub</small>
         </div>
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <NotifyBell say={say} />
           <NodeChip />
           <WalletChip session={session} balance={nativeBal} onConnect={async (mode, key) => {
             try {
@@ -560,6 +593,26 @@ export default function App() {
 }
 
 // ---------- node selection ----------
+
+/// Enable local order notifications (B4 P1). Tap to grant permission; foreground
+/// only, no server/identity. Hidden where the Notification API is unavailable.
+function NotifyBell({ say }: { say: (m: string, err?: boolean) => void }) {
+  const [perm, setPerm] = useState<NotifyPermission>(() => notifyPermission());
+  if (perm === "unsupported") return null;
+  const label = perm === "granted" ? "🔔" : "🔕";
+  const title = perm === "granted" ? "Order notifications on" : perm === "denied" ? "Notifications blocked in browser settings" : "Enable order notifications";
+  return (
+    <button className="btn ghost small" title={title} style={{ padding: "4px 8px" }}
+      onClick={async () => {
+        if (perm === "granted") { say("Notifications are on"); return; }
+        const r = await enableNotifications();
+        setPerm(r);
+        say(r === "granted" ? "Notifications enabled ✓" : r === "denied" ? "Notifications blocked — enable them in browser settings" : "Notifications not enabled", r !== "granted");
+      }}>
+      {label}
+    </button>
+  );
+}
 
 /// The trust gradient, user-selectable per device: hosted gateway → local
 /// pine daemon (verifying light client behind localhost) → in-browser

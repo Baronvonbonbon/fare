@@ -102,8 +102,14 @@ infra/UI, spec'd in the linked design note.
 ## 3. Not started (☐)
 
 **Group B — product**
-- ☐ **B4 Push notifications** — VAPID keys + push service + service-worker push
-  handlers (status changes, new offers/bids). External infra.
+- 🟡 **B4 Notifications** — **P1 shipped** (`web/src/notify.ts` + order-diff hook +
+  a 🔔 permission bell): local notifications on relevant order transitions
+  (assigned / picked up / delivered / bid-accepted / new nearby order), foreground
+  only, no server/keys/identity. **P2 spec'd** ([NOTIFICATIONS.md](NOTIFICATIONS.md)):
+  true background push via VAPID + the **venue-node relay as a per-device,
+  region-filtered push service** (chain-event-triggered) — no "AVIDITY"/Parity
+  native push exists, and Push-Protocol's wallet-linked model is rejected (would
+  re-link burners).
 
 **Group C — payments / economics**
 - ☐ **C2 Fiat-denominated pricing** — quote in local currency, settle at an oracle
