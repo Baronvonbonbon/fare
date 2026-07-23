@@ -41,7 +41,10 @@ discipline.
 **UX blockers that decide adoption**
 - **Gasless everything for customers and drivers.** Nobody buys PAS to buy
   pad thai. Add a relay path (DATUM `DatumRelay` pattern: relay pays gas,
-  users sign EIP-712); meta-tx for createOrder/placeBid/confirms.
+  users sign EIP-712); meta-tx for createOrder/placeBid/confirms. *(Shipped:
+  F8 forwarder + relay for non-value actions, gasless settlement, gasless
+  withdraw, KS shielded funding. Next: **sponsored onboarding** —
+  [RELAY-SPONSORSHIP.md](RELAY-SPONSORSHIP.md).)*
 - **Fiat-denominated pricing** — quote in local currency, settle in
   DOT/stable via an oracle rate captured at acceptance.
 - **Stablecoin escrow option** (Asset Hub USDC/USDT via the ERC-20

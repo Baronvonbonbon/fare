@@ -156,16 +156,25 @@ Do NOT ship for real value until all hold. Privacy is largely closed already
 
 - 🔒 **Real MPC trusted-setup ceremony** before `setVerifyingKey` (lock-once). The
   shipped setup is single-party — fine for testnet, not mainnet.
-- 🔒 **Shielded funding path** for per-order burner wallets (C4). Faucet-funded
-  burners are unlinkable *only* on testnet (shared faucet); on mainnet, funding
-  from a real wallet re-links them. Needs a mixer / shielded pool / relayer-funded
-  meta-txs.
+- 🟡 **Shielded funding path** for per-order burner wallets (C4) — **mechanism
+  IMPLEMENTED** against Kusama Shield (`web/src/shieldpool.ts` + `shield.ts`,
+  relay `/shield-withdraw`), proven live ([E2E-SHIELDED-DELIVERY-REPORT.md](E2E-SHIELDED-DELIVERY-REPORT.md)).
+  What remains is **not code**: real-world unlinkability needs a KS **anonymity
+  set + time-decorrelation** (Paseo has neither), so this stays a mainnet-*privacy*
+  gate even though the integration is done. See [SHIELDED-FUNDING.md](SHIELDED-FUNDING.md).
 - 🔒 **External audit** (E3) + fuzz/invariant coverage (✅ started, `test/invariant.test.ts`) + static analysis (✅ Slither in CI, [SECURITY-REVIEW.md](SECURITY-REVIEW.md)).
-- 🔒 **Stablecoin escrow** (C3) — food margins can't absorb DOT volatility.
+- ✅ **Stablecoin escrow** (C3) — **shipped** on Paseo (`FareOrders.createOrderERC20` +
+  the token vault path); food margins no longer forced onto DOT volatility.
 
 Full mainnet gate + rationale: [PRIVACY.md](PRIVACY.md) · [ROADMAP.md](ROADMAP.md).
 
 ---
+
+## 5. Possible upgrades (designed, not gated on anything — pick up when useful)
+
+- **Relay sponsorship expansion** ([RELAY-SPONSORSHIP.md](RELAY-SPONSORSHIP.md)) —
+  sponsored driver/venue onboarding (seed-gas now / 2771 registries later),
+  sponsored `setMetadata`, onboarding-fee recoup, Sybil + ED handling.
 
 ## See also
 - [PRODUCT-INTEGRATION-PLAN.md](PRODUCT-INTEGRATION-PLAN.md) — the tracking board (A–F) + DoorDash journeys
