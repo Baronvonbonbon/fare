@@ -110,6 +110,33 @@ next integrator:
 
 ---
 
+## Issue 4 — the 16-entry known-roots window limits relayed / delayed withdrawal under load
+
+This is the one that matters most for our use case (fund a fresh wallet via a
+relayer, with time between deposit and withdrawal for privacy). Solving Issue 1
+lets us reconstruct the tree and withdraw *any* leaf at *any* later time — the
+dwell time between deposit and withdraw is unbounded, which is what we want. But
+withdrawal also requires the proof's root to still be within the last 16:
+
+```solidity
+uint32 public constant ROOT_HISTORY_SIZE = 16;   // circular buffer
+require(isKnownRoot(root), "Unknown root");        // in withdraw / proxy_withdraw
+```
+
+Because appending a leaf changes existing leaves' authentication paths, a
+delayed withdrawal must prove against a *recent* root — and that root must still
+be in the window **when the tx is mined**. If **more than 16 inserts land between
+proof generation and mining** (easy on a busy network, and our funding path adds
+relayer latency), the root is evicted and the withdrawal reverts. 16 is small;
+Tornado Cash uses 30, and higher-throughput mixers keep hundreds.
+
+**Recommendation:** increase `ROOT_HISTORY_SIZE` substantially (e.g. 256–1024) in
+a future deployment, or otherwise retain more historical roots. This widens the
+gen→mine submission window from ~16 inserts to hundreds, so a relayer-submitted,
+time-decorrelated withdrawal reliably lands under load. Client-side we can reduce
+the race (relayer submits with minimal latency; retry on `"Unknown root"`), but
+we can't close it if inserts outpace our rebuild-and-submit cycle.
+
 ## Questions for the team
 
 1. Is there a genesis leaf at index 0? If so, can you publish its value and/or
@@ -118,6 +145,8 @@ next integrator:
    shipped circuit artifacts?
 3. Is a reconstruction indexer / SDK planned, or would you accept a docs PR
    describing the `Deposit`+`NewCommitment` reconstruction?
+4. Would you consider a larger `ROOT_HISTORY_SIZE` to support relayed/delayed
+   withdrawals under network load (Issue 4)?
 
 ## How to reproduce
 
