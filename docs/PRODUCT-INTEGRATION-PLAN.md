@@ -191,7 +191,8 @@ Ordered roughly by leverage. Check off as landed.
       map trace (needs the off-chain location channel — see NETWORK-ARCHITECTURE.md)
 - 🟡 **Messaging**: E2E crypto layer done (`web/src/msg.ts` — secp256k1 ECDH → AES-GCM,
       per-order scoped, 5 tests). Relay/transport deferred — see [MESSAGING.md](MESSAGING.md)
-- [ ] **Notifications**: web-push for status changes, new offers, new bids
+- [x] **Notifications**: local order notifications (B4 P1) + background region push
+      via the venue-node push service (B4 P2) — status changes, new offers, new bids
 - [x] **Ratings**: on-chain verified-delivery stars (`FareRatings`) — gated to the Delivered order's customer, one per order; rate widget in history + driver rating in bid cards
 - 🟡 Proof-of-delivery photo — ephemeral sealing layer done (`web/src/photo.ts` —
       crypto-shred: random-key AES-GCM, key wrapped over msg.ts; 4 tests). Storage
@@ -211,16 +212,23 @@ Ordered roughly by leverage. Check off as landed.
 
 ### Group D — Ops / governance / trust (⚙️ console, not consumer app)
 *A separate app (`web/ops.html` → `/ops`, `web/src/ops/`) — shares the chain glue
-with the PWA, no shared nav, no service worker. D1 is the first tenant; D2–D4
-land as sibling tabs.*
-- [x] **Arbiter console**: dispute queue + `resolve` (customerShareBps, openerWins,
-  driverAtFault, slash) — `web/src/ops/OpsApp.tsx`. Connect the arbiter wallet
+with the PWA, no shared nav, no service worker. Four sibling tabs (D1–D4) share
+one wallet session + toast in `OpsApp.tsx`; only D5 (offline ceremony) remains.*
+- [x] **Arbiter console** (D1): dispute queue + `resolve` (customerShareBps, openerWins,
+  driverAtFault, slash) — `web/src/ops/DisputesConsole.tsx`. Connect the arbiter wallet
   (badges whether it matches the on-chain `arbiter`), see each open dispute with
   its order + driver context (frozen escrow, reputation, stake), issue a ruling
   with a live escrow-split preview. Reuses `connect`/`contracts` from `chain.ts`.
-- [ ] Governance console: `setParams`, `setGeoParams`, `setMinStake`, `setDisputeBond`, `setArbiter`
-- [ ] Guardian pause console: `pause` / `unpause` / `setGuardian`
-- [ ] Upgrade console: router `register` / `upgradeContract` / `setContractFrozen`
+- [x] **Governance console** (D2): `setParams`, `setRelayRebateBps`, `setGeoParams`,
+  `setMinStake`, `setUnbondingSeconds`, `setDisputeBond`, `setWithdrawFeeBps` —
+  `web/src/ops/GovernanceConsole.tsx`. Reads every knob live; bound checks mirror
+  each contract's `require()`; authority gated per-contract `owner()`.
+- [x] **Guardian pause console** (D3): `pause` / `unpause` / `setGuardian` across the
+  four categories — `web/src/ops/PauseConsole.tsx`. Guardian-or-owner pause, owner-only
+  unpause + guardian management.
+- [x] **Upgrade console** (D4): router `register` / `upgradeContract` / `setContractFrozen`
+  — `web/src/ops/UpgradeConsole.tsx`. Live address/version/frozen/history per registered
+  contract; freeze-and-drain promotion with `freezeOld` default on.
 - [ ] MPC trusted-setup ceremony before mainnet `setVerifyingKey` (lock-once)
 
 ### Group E — Trust & release (from ROADMAP R1/R2)
@@ -254,9 +262,9 @@ land as sibling tabs.*
 | C3 | Stablecoin escrow | C | Vault + checkout | ☐ todo |
 | C4 | Shielded burner funding | C | Infra | ☐ todo |
 | D1 | Arbiter console (`resolve`) | D | Ops app (`/ops`) | ✅ done |
-| D2 | Governance console | D | Ops app | ☐ todo |
-| D3 | Guardian pause console | D | Ops app | ☐ todo |
-| D4 | Upgrade console | D | Ops app | ☐ todo |
+| D2 | Governance console | D | Ops app | ✅ done |
+| D3 | Guardian pause console | D | Ops app | ✅ done |
+| D4 | Upgrade console | D | Ops app | ✅ done |
 | D5 | MPC ceremony | D | Ops / offline | ☐ todo |
 | E1 | Filmed field test | E | — | ☐ todo |
 | E2 | Slither/Mythril | E | CI | 🟡 Slither+CI done; Mythril on-demand |
