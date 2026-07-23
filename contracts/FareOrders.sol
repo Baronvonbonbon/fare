@@ -257,9 +257,10 @@ contract FareOrders is Ownable2Step, ReentrancyGuard, FareUpgradable, ERC2771Con
         uint64 deliveryWindowSecs
     ) external whenNotPaused whenNotFrozen returns (uint256 orderId) {
         require(acceptedToken[token], "token-not-accepted");
+        // orderValue + tip may be 0 for a fare-only order (paid off-chain / no
+        // tip) — the fare is escrowed in-token later at acceptBidERC20.
         uint256 escrow = uint256(orderValue) + tip;
-        require(escrow > 0, "zero-escrow"); // a token order with nothing escrowed is a no-op
-        IERC20(token).safeTransferFrom(msg.sender, address(this), escrow);
+        if (escrow > 0) IERC20(token).safeTransferFrom(msg.sender, address(this), escrow);
         orderId = _open(venueId, dropCommit, orderValue, tip, maxFare, pickupWindowSecs, deliveryWindowSecs, token);
     }
 

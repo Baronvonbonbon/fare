@@ -219,6 +219,22 @@ describe("FARE — stablecoin escrow (C3)", () => {
       .to.be.revertedWith("use-native-accept");
   });
 
+  it("fare-only token order (orderValue 0, tip 0): fare escrowed at accept, driver paid in token", async () => {
+    const f = await loadFixture(deployAll);
+    const commit = dropCommit(DROP_LAT, DROP_LON, DROP_SALT);
+    // No escrow pulled at creation.
+    await f.orders.connect(f.customer).createOrderERC20(f.usdc.target, f.venueId, commit, 0, 0, MAX_FARE, 0, 0);
+    expect(await f.usdc.balanceOf(f.orders.target)).to.equal(0n);
+    await f.orders.connect(f.driver2).placeBid(1n, FARE);
+    await f.orders.connect(f.customer).acceptBidERC20(1n, f.driver2.address);
+    expect(await f.usdc.balanceOf(f.orders.target)).to.equal(FARE);
+    await confirmPickup(f, 1n, f.driver2);
+    await confirmDropoff(f, 1n, f.driver2);
+    const fee = (FARE * 250n) / 10_000n;
+    expect(await f.vault.tokenBalanceOf(f.usdc.target, f.driver2.address)).to.equal(FARE - fee);
+    expect(await f.vault.tokenBalanceOf(f.usdc.target, f.venueOp.address)).to.equal(0n);
+  });
+
   it("creditToken is authorized-only", async () => {
     const f = await loadFixture(deployAll);
     await expect(f.vault.connect(f.stranger).creditToken(f.usdc.target, f.stranger.address, 1n))

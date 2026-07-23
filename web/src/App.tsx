@@ -41,7 +41,7 @@ import {
   walletFor,
   sweepToMain,
 } from "./wallets";
-import { isAddress } from "ethers";
+import { isAddress, ZeroAddress } from "ethers";
 import { OrderThread, type ChatMsg, type LocUpdate } from "./channel";
 import { newPhotoKey, sealPhoto, openPhoto } from "./photo";
 import { notify, notifyPermission, enableNotifications, type NotifyPermission } from "./notify";
@@ -54,6 +54,10 @@ import {
 import { proveProximity, positionCommit } from "./zk";
 import { sponsorGas, relaySettle, relayForward, relayWithdraw, ensureGas } from "./relay";
 import { usePasUsd, cachedRate, fiatOf, pasToUsd, formatUsd } from "./pricing";
+import {
+  tokenOrdersEnabled, stablecoinAsset, assetOf, fmtAsset, parseAsset,
+  mintStablecoin, approveToken, stablecoinBalance,
+} from "./token";
 import { MicroDeg, distanceMeters, fmtCoord, fmtDist, getPosition, snapToGrid } from "./geo";
 import { QRScan, QRShow } from "./qr";
 import { VenuePin, TrackMap } from "./map";
@@ -76,6 +80,7 @@ interface OrderRow {
   pickupWindowSecs: bigint;
   pickupDeadline: bigint;
   deliveryDeadline: bigint;
+  token: string; // escrow asset — address(0) native PAS, else the stablecoin (C3)
   bidders: { addr: string; amount: bigint; delivered: number; failed: number; ratingX100: number; ratingN: number }[];
 }
 
@@ -163,19 +168,33 @@ async function placeOrder(opts: {
   lat: number;
   lon: number;
   receipt: ReceiptData;
+  token?: string; // undefined / address(0) = native PAS; else stablecoin escrow (C3)
   act: (label: string, fn: () => Promise<any>) => Promise<any>;
   say: (m: string, err?: boolean) => void;
 }) {
-  const { venueId, orderValueWei, tipWei, maxFareWei, lat, lon, receipt, act, say } = opts;
+  const { venueId, orderValueWei, tipWei, maxFareWei, lat, lon, receipt, token, act, say } = opts;
   const salt = randomSalt();
   const commit = computeDropCommit(lat, lon, salt);
   localStorage.setItem(dropStoreKey(commit), JSON.stringify({ lat, lon, salt }));
   localStorage.setItem(receiptKey(commit), JSON.stringify({ ...receipt, placedAt: Date.now() }));
   const escrow = orderValueWei + tipWei;
+  const isToken = !!token && token !== ZeroAddress;
   return act("Create order", async () => {
     const w = newOrderWallet();
     say("New private wallet — funding from faucet…");
     await sponsorGas(w.address);
+    if (isToken) {
+      // Token order: the burner only needs gas from the faucet; it self-mints
+      // its stablecoin escrow (testnet MockUSDC), then approves + creates. No
+      // link to the customer's main wallet (mainnet: shielded funding, C4).
+      await waitForFunding(w.address, parse("0.3"));
+      say("Minting stablecoin escrow to the private wallet…");
+      await mintStablecoin(w, w.address, escrow);
+      await approveToken(w, token!, ADDRESSES.orders, escrow);
+      return contracts(w).orders.createOrderERC20(
+        token!, venueId, commit, orderValueWei, tipWei, maxFareWei, 0, 0
+      );
+    }
     await waitForFunding(w.address, escrow + parse("0.2"));
     return contracts(w).orders.createOrder(
       venueId, commit, orderValueWei, tipWei, maxFareWei, 0, 0, { value: escrow }
@@ -190,6 +209,7 @@ export default function App() {
   const [orders, setOrders] = useState<OrderRow[]>([]);
   const [venues, setVenues] = useState<VenueRow[]>([]);
   const [vaultBal, setVaultBal] = useState<bigint>(0n);
+  const [vaultTokenBal, setVaultTokenBal] = useState<bigint>(0n); // stablecoin earnings (C3)
   const [pendingDust, setPendingDust] = useState<bigint>(0n);
   const [nativeBal, setNativeBal] = useState<bigint>(0n);
   const [busy, setBusy] = useState(false);
@@ -390,6 +410,7 @@ export default function App() {
             pickupWindowSecs: o.pickupWindowSecs,
             pickupDeadline: o.pickupDeadline,
             deliveryDeadline: o.deliveryDeadline,
+            token: o.token,
             bidders,
           } as OrderRow;
         })
@@ -407,6 +428,9 @@ export default function App() {
         setVaultBal(await c.vault.balanceOf(me));
         setPendingDust(await c.vault.pendingPaseoDust(me));
         setNativeBal(await nativeBalance(me));
+        if (ADDRESSES.stablecoin) {
+          try { setVaultTokenBal(await c.vault.tokenBalanceOf(ADDRESSES.stablecoin, me)); } catch {}
+        }
       }
     } catch (e: any) {
       console.error(e);
@@ -596,7 +620,7 @@ export default function App() {
       )}
 
       {session && (vaultBal > 0n || pendingDust > 0n) && (
-        <VaultStrip {...{ vaultBal, pendingDust, busy, act, signed, say }} />
+        <VaultStrip {...{ vaultBal, vaultTokenBal, pendingDust, busy, act, signed, say }} />
       )}
 
       {role === "customer" && (
@@ -798,11 +822,14 @@ function OrderMeta({ o, venues }: { o: OrderRow; venues: VenueRow[] }) {
     <>
       {o.status >= 1 && o.status <= 4 && <Route status={o.status} />}
       <div className="kv"><span className="k">venue</span><span className="v">#{String(o.venueId)}{venue ? ` · ${venue.metadataURI.replace(/^\w+:\/\//, "")}` : ""}</span></div>
-      <div className="kv"><span className="k">order value</span><span className="v amount">{fmt(o.orderValue)} PAS</span></div>
-      <div className="kv"><span className="k">tip</span><span className="v amount">{fmt(o.tip)} PAS</span></div>
+      {assetOf(o.token).isToken && (
+        <div className="kv"><span className="k">paid in</span><span className="v">{assetOf(o.token).symbol} · stablecoin escrow</span></div>
+      )}
+      <div className="kv"><span className="k">order value</span><span className="v amount">{fmtAsset(o.orderValue, o.token)}</span></div>
+      <div className="kv"><span className="k">tip</span><span className="v amount">{fmtAsset(o.tip, o.token)}</span></div>
       <div className="kv">
         <span className="k">{o.status >= 2 ? "fare" : "max fare"}</span>
-        <span className="v amount">{fmt(o.status >= 2 ? o.fare : o.maxFare)} PAS</span>
+        <span className="v amount">{fmtAsset(o.status >= 2 ? o.fare : o.maxFare, o.token)}</span>
       </div>
       {o.driver !== "0x0000000000000000000000000000000000000000" && (
         <div className="kv"><span className="k">driver</span><span className="v">{short(o.driver)}</span></div>
@@ -856,13 +883,16 @@ function DisputeControl({ o, handle, busy, act }: any) {
   );
 }
 
-function VaultStrip({ vaultBal, pendingDust, busy, act, signed, say }: any) {
+function VaultStrip({ vaultBal, vaultTokenBal, pendingDust, busy, act, signed, say }: any) {
   const [cold, setCold] = useState("");
+  const stable = stablecoinAsset();
+  const hasToken = !!stable && vaultTokenBal > 0n;
   return (
     <div className="vault-strip">
       <div>
         <div className="lbl">vault balance — pull payment</div>
         <div className="amt">{fmt(vaultBal)} PAS</div>
+        {hasToken && <div className="amt">{fmtAsset(vaultTokenBal, stable!.address)}</div>}
         {pendingDust > 0n && (
           <div className="hint">+ {fmt(pendingDust)} PAS queued dust (Paseo rounding)</div>
         )}
@@ -876,6 +906,16 @@ function VaultStrip({ vaultBal, pendingDust, busy, act, signed, say }: any) {
             if (!isAddress(to)) return say("Enter a valid cold-wallet address", true);
             act("Withdraw to cold wallet", () => relayWithdraw(signed!.vault, to));
           }}>→ cold wallet</button>
+        {hasToken && (
+          <button className="btn small" disabled={busy}
+            onClick={() => {
+              const to = cold.trim();
+              const w = to && isAddress(to)
+                ? () => signed!.vault.withdrawTokenTo(stable!.address, to)
+                : () => signed!.vault.withdrawToken(stable!.address);
+              act(`Withdraw ${stable!.symbol}`, w);
+            }}>Withdraw {stable!.symbol}</button>
+        )}
         {pendingDust > 0n && (
           <button className="btn ghost small" disabled={busy}
             onClick={() => act("Claim dust", () => signed!.vault.claimPaseoDust())}>Claim dust</button>
@@ -1003,6 +1043,7 @@ function CreateOrder({ session, venues, act, busy, say, myLoc, locateMe }: any) 
   const [menu, setMenu] = useState<Menu | null>(null);
   const [cart, setCart] = useState<Cart>({});
   const [menuLoading, setMenuLoading] = useState(false);
+  const [asset, setAsset] = useState<"native" | "token">("native"); // escrow asset (C3)
   const { rate } = usePasUsd(); // fiat display rate (C2)
 
   // Fetch the selected venue's off-chain menu (IPFS via metadataURI).
@@ -1015,8 +1056,16 @@ function CreateOrder({ session, venues, act, busy, say, myLoc, locateMe }: any) 
     fetchMenu(v.metadataURI).then(setMenu).catch(() => {}).finally(() => setMenuLoading(false));
   }, [venueId]);
 
+  const stable = stablecoinAsset();
+  const isToken = asset === "token" && !!stable;
+  const escrowToken = isToken ? stable!.address : undefined;
+  const sym = isToken ? stable!.symbol : "PAS";
   const menuDriven = !!menu && menu.items.length > 0;
-  const orderValueWei = menuDriven ? cartTotal(menu, cart) : parse(orderValue);
+  const useMenu = menuDriven && !isToken; // menus are PAS-priced; token orders use manual entry
+  const parseAmt = (v: string) => (isToken ? parseAsset(v, escrowToken) : parse(v));
+  const orderValueWei = useMenu ? cartTotal(menu, cart) : parseAmt(orderValue);
+  const tipWei = parseAmt(tip);
+  const maxFareWei = parseAmt(maxFare);
 
   // Nearest venues first when we know where the customer is.
   const active = venues
@@ -1064,46 +1113,59 @@ function CreateOrder({ session, venues, act, busy, say, myLoc, locateMe }: any) 
           onCancel={() => setMapOpen(false)}
         />
       )}
+      {tokenOrdersEnabled() && (
+        <label className="field">
+          <span>pay with</span>
+          <div className="btn-row">
+            <button type="button" className={`btn small ${asset === "native" ? "" : "ghost"}`}
+              onClick={() => setAsset("native")}>PAS</button>
+            <button type="button" className={`btn small ${asset === "token" ? "" : "ghost"}`}
+              onClick={() => setAsset("token")}>{stable!.symbol} · stablecoin</button>
+          </div>
+        </label>
+      )}
       {menuLoading && <p className="hint">Loading menu…</p>}
-      {menuDriven && <MenuCart menu={menu!} cart={cart} setCart={setCart} rate={rate} />}
+      {useMenu && <MenuCart menu={menu!} cart={cart} setCart={setCart} rate={rate} />}
+      {isToken && menuDriven && <p className="hint">This venue's menu is priced in PAS — pay in {sym} using manual amounts below.</p>}
 
-      <div className={menuDriven ? "row3" : "row3"}>
-        {menuDriven ? (
+      <div className="row3">
+        {useMenu ? (
           <label className="field"><span>cart total{fiatOf(orderValueWei, rate) && ` · ${fiatOf(orderValueWei, rate)}`}</span>
             <input value={`${fmt(orderValueWei)} PAS`} readOnly /></label>
         ) : (
-          <label className="field"><span>order value (PAS)</span>
+          <label className="field"><span>order value ({sym})</span>
             <input value={orderValue} onChange={(e) => setOrderValue(e.target.value)} inputMode="decimal" /></label>
         )}
-        <label className="field"><span>tip (PAS)</span>
+        <label className="field"><span>tip ({sym})</span>
           <input value={tip} onChange={(e) => setTip(e.target.value)} inputMode="decimal" /></label>
-        <label className="field"><span>max fare (PAS)</span>
+        <label className="field"><span>max fare ({sym})</span>
           <input value={maxFare} onChange={(e) => setMaxFare(e.target.value)} inputMode="decimal" /></label>
       </div>
       <p className="hint">
-        {menuDriven
+        {isToken
+          ? `Escrowed in ${sym}. The private wallet mints its ${sym} escrow from the testnet faucet — no link to your main wallet.`
+          : useMenu
           ? "Cart total is escrowed for the venue; add a tip and set your delivery-fare ceiling."
           : "Order value 0 = pay the venue off-chain; the protocol then only escrows the delivery fare."}
       </p>
       <div className="btn-row">
         <button className="btn" disabled={busy || !session || !venueId || !pos}
           onClick={() => {
-            const v = venues.find((x: VenueRow) => String(x.id) === venueId);
-            const items = menuDriven
+            const items = useMenu
               ? menu!.items
                   .filter((it) => (cart[it.id] ?? 0) > 0)
                   .map((it) => ({ name: it.name, price: it.price, qty: cart[it.id] }))
               : [];
             const receipt: ReceiptData = {
               venueId, venueName: menu?.name || `Venue #${venueId}`, items,
-              orderValue: fmt(orderValueWei), tip, maxFare,
+              orderValue: fmtAsset(orderValueWei, escrowToken), tip, maxFare,
               rateUsd: cachedRate(), // capture the fiat rate at checkout (C2)
             };
             // Fresh per-order identity, funded from the faucet so it links to
             // nothing (docs/PRIVACY.md risk #3); persists a local receipt (B7).
             placeOrder({
-              venueId: BigInt(venueId), orderValueWei, tipWei: parse(tip), maxFareWei: parse(maxFare),
-              lat: pos!.lat, lon: pos!.lon, receipt, act, say,
+              venueId: BigInt(venueId), orderValueWei, tipWei, maxFareWei,
+              lat: pos!.lat, lon: pos!.lon, receipt, token: escrowToken, act, say,
             });
           }}>
           Open for bids
@@ -1176,7 +1238,10 @@ function OrderTracker({ o }: { o: OrderRow }) {
 // alongside PAS (the rate is fixed to the receipt, not the live one).
 function OrderReceipt({ o }: { o: OrderRow }) {
   const r = loadReceipt(o.dropCommit);
-  const rate = r?.rateUsd;
+  const isToken = assetOf(o.token).isToken;
+  // Fiat is only meaningful for a PAS order — a stablecoin order already reads in
+  // dollars. So show the captured-rate fiat only on native orders (C2/C3).
+  const rate = isToken ? undefined : r?.rateUsd;
   const total = o.orderValue + o.tip + o.fare;
   const fiat = (wei: bigint) => (rate ? formatUsd(pasToUsd(wei, rate)) : "");
   return (
@@ -1194,11 +1259,11 @@ function OrderReceipt({ o }: { o: OrderRow }) {
           ))}
         </>
       )}
-      <div className="kv"><span className="k">order value</span><span className="v mono">{fmt(o.orderValue)} PAS</span></div>
-      <div className="kv"><span className="k">tip</span><span className="v mono">{fmt(o.tip)} PAS</span></div>
-      {o.fare > 0n && <div className="kv"><span className="k">delivery fare</span><span className="v mono">{fmt(o.fare)} PAS</span></div>}
+      <div className="kv"><span className="k">order value</span><span className="v mono">{fmtAsset(o.orderValue, o.token)}</span></div>
+      <div className="kv"><span className="k">tip</span><span className="v mono">{fmtAsset(o.tip, o.token)}</span></div>
+      {o.fare > 0n && <div className="kv"><span className="k">delivery fare</span><span className="v mono">{fmtAsset(o.fare, o.token)}</span></div>}
       <div className="kv"><span className="k">total</span>
-        <span className="v amount">{rate ? `${fiat(total)} · ` : ""}{fmt(total)} PAS</span></div>
+        <span className="v amount">{rate ? `${fiat(total)} · ` : ""}{fmtAsset(total, o.token)}</span></div>
       {rate && <p className="hint">Fiat locked at checkout @ {formatUsd(rate)}/PAS.</p>}
       {!r && <p className="hint">No itemized breakdown on this device.</p>}
     </details>
@@ -1261,7 +1326,7 @@ function HistoryCard({ o, venues, act, busy, session, say }: any) {
     r.rateUsd = cachedRate(); // re-capture at reorder time (C2)
     await placeOrder({
       venueId: o.venueId, orderValueWei: o.orderValue, tipWei: o.tip, maxFareWei: o.maxFare,
-      lat, lon, receipt: r, act, say,
+      token: o.token, lat, lon, receipt: r, act, say,
     });
   }
   return (
@@ -1588,11 +1653,20 @@ function CustomerOrder({ o, venues, act, busy, session, say }: any) {
                 </span>
               </span>
               <span className="v">
-                <span className="amount">{fmt(b.amount)} PAS </span>
+                <span className="amount">{fmtAsset(b.amount, o.token)} </span>
                 <button className="btn small" disabled={busy || orphaned}
                   onClick={() => act("Accept bid", async () => {
                     // Value action → must go direct; ensure the order burner has
-                    // gas (+ the fare) first. Gasless actions skip this entirely.
+                    // gas first. Gasless actions skip this entirely.
+                    if (assetOf(o.token).isToken) {
+                      // Escrow the fare in the order's stablecoin: the burner
+                      // self-mints it (testnet faucet), approves, then accepts.
+                      await ensureGas(o.customer, parse("0.3"));
+                      const w = walletFor(o.customer)!;
+                      await mintStablecoin(w, o.customer, b.amount);
+                      await approveToken(w, o.token, ADDRESSES.orders, b.amount);
+                      return os!.orders.acceptBidERC20(o.id, b.addr);
+                    }
                     await ensureGas(o.customer, b.amount + parse("0.2"));
                     return os!.orders.acceptBid(o.id, b.addr, { value: b.amount });
                   })}>
@@ -1841,13 +1915,13 @@ function DriverBid({ o, venues, act, busy, signed, session, dist }: any) {
       </div>
       <OrderMeta o={o} venues={venues} />
       {myBid && (
-        <div className="kv"><span className="k">your bid</span><span className="v amount">{fmt(myBid.amount)} PAS</span></div>
+        <div className="kv"><span className="k">your bid</span><span className="v amount">{fmtAsset(myBid.amount, o.token)}</span></div>
       )}
       <div className="btn-row">
-        <input style={{ flex: 1, minWidth: 120 }} placeholder={`≤ ${fmt(o.maxFare)} PAS`}
+        <input style={{ flex: 1, minWidth: 120 }} placeholder={`≤ ${fmtAsset(o.maxFare, o.token)}`}
           value={amount} onChange={(e) => setAmount(e.target.value)} inputMode="decimal" />
         <button className="btn small" disabled={busy || !amount}
-          onClick={() => act("Place bid", () => relayForward("orders", signed.orders, "placeBid", [o.id, parse(amount)]))}>
+          onClick={() => act("Place bid", () => relayForward("orders", signed.orders, "placeBid", [o.id, parseAsset(amount, o.token)]))}>
           {myBid ? "Rebid" : "Bid"}
         </button>
         {myBid && (

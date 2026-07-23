@@ -221,9 +221,13 @@ Ordered roughly by leverage. Check off as landed.
   `FareVault` gains a per-token pull-payment ledger (`creditToken` / `withdrawToken`
   / `tokenBalanceOf`); owner-gated accepted-token allowlist; `MockUSDC` (6-dec)
   stands in for bridged USDC/USDT (`STABLECOIN_ADDRESS` env selects the real one on
-  mainnet). Deploy registers it; 8 tests in `test/stablecoin-escrow.test.ts` (full
-  USDC delivery, cancels/split, mode guards, accepted-token gate). PWA token-order
-  UI is the remaining surface (ABIs are wired).
+  mainnet). Deploy registers it; 9 tests in `test/stablecoin-escrow.test.ts` (full
+  USDC delivery, fare-only, cancels/split, mode guards, accepted-token gate).
+  **PWA UI done** (`web/src/token.ts` + App): a PAS/USDC pay-with selector on
+  checkout, token-decimal amounts everywhere (order/bid/fare/receipt), a
+  self-minting testnet stablecoin faucet on the per-order burner (no main-wallet
+  link), and a `withdrawToken` earnings path — all feature-gated on the address
+  book's `stablecoin` entry, so it appears only where a stablecoin is deployed.
 - [~] Shielded **funding path** for per-order burner wallets (C4, privacy mainnet
   gate) — **designed + seam in place**, blocked on external infra (no shielded pool
   on Paseo). `docs/SHIELDED-FUNDING.md` + `web/src/shield.ts` (ShieldedFunder
@@ -280,7 +284,7 @@ one wallet session + toast in `OpsApp.tsx`; only D5 (offline ceremony) remains.*
 | B7 | History / receipts / reorder | B | Customer view | ✅ done |
 | C1 | Gasless meta-tx relay | C | Infra + all views | ✅ done |
 | C2 | Fiat pricing (oracle) | C | Checkout | ✅ done (off-chain layer) |
-| C3 | Stablecoin escrow | C | Vault + checkout | ✅ done (rail + tests; PWA UI pending) |
+| C3 | Stablecoin escrow | C | Vault + checkout | ✅ done (rail + tests + PWA UI) |
 | C4 | Shielded burner funding | C | Infra | 🟡 designed + seam (blocked on infra) |
 | D1 | Arbiter console (`resolve`) | D | Ops app (`/ops`) | ✅ done |
 | D2 | Governance console | D | Ops app | ✅ done |
