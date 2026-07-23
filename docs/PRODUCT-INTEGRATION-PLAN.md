@@ -214,10 +214,22 @@ Ordered roughly by leverage. Check off as landed.
   cached, `usePasUsd` hook). Fiat shown on menu items, cart total and receipts; the
   rate is **captured at checkout** into the local receipt so its fiat value is
   locked. On-chain oracle binding at bid acceptance is the mainnet successor.
-- [ ] **Stablecoin escrow** (C3) — Asset Hub USDC/USDT via ERC-20 precompile; vault
-  ERC-20 variant. Invasive: `createOrder` is `payable` native, vault holds native.
-- [ ] Shielded **funding path** for per-order burner wallets (C4, privacy mainnet
-  gate) — blocked on external shielded-pool infra (none on Paseo).
+- [x] **Stablecoin escrow** (C3) — dual-mode ERC-20 escrow rail. Order carries an
+  escrow `token` (address(0) = native); `createOrderERC20` / `acceptBidERC20` /
+  `increaseTipERC20` pull value via `transferFrom`; every release/refund/split
+  goes through one asset-agnostic `_credit` (native value or ERC-20 approve+pull).
+  `FareVault` gains a per-token pull-payment ledger (`creditToken` / `withdrawToken`
+  / `tokenBalanceOf`); owner-gated accepted-token allowlist; `MockUSDC` (6-dec)
+  stands in for bridged USDC/USDT (`STABLECOIN_ADDRESS` env selects the real one on
+  mainnet). Deploy registers it; 8 tests in `test/stablecoin-escrow.test.ts` (full
+  USDC delivery, cancels/split, mode guards, accepted-token gate). PWA token-order
+  UI is the remaining surface (ABIs are wired).
+- [~] Shielded **funding path** for per-order burner wallets (C4, privacy mainnet
+  gate) — **designed + seam in place**, blocked on external infra (no shielded pool
+  on Paseo). `docs/SHIELDED-FUNDING.md` + `web/src/shield.ts` (ShieldedFunder
+  interface + registry) + `relay.ts fundBurner` guard: prefers the shielded path
+  when a backend is registered, falls back to today's sponsored drip. No working
+  transfer until a pool/confidential-asset primitive exists on the target chain.
 
 ### Group D — Ops / governance / trust (⚙️ console, not consumer app)
 *A separate app (`web/ops.html` → `/ops`, `web/src/ops/`) — shares the chain glue
@@ -268,8 +280,8 @@ one wallet session + toast in `OpsApp.tsx`; only D5 (offline ceremony) remains.*
 | B7 | History / receipts / reorder | B | Customer view | ✅ done |
 | C1 | Gasless meta-tx relay | C | Infra + all views | ✅ done |
 | C2 | Fiat pricing (oracle) | C | Checkout | ✅ done (off-chain layer) |
-| C3 | Stablecoin escrow | C | Vault + checkout | ☐ todo |
-| C4 | Shielded burner funding | C | Infra | ☐ todo |
+| C3 | Stablecoin escrow | C | Vault + checkout | ✅ done (rail + tests; PWA UI pending) |
+| C4 | Shielded burner funding | C | Infra | 🟡 designed + seam (blocked on infra) |
 | D1 | Arbiter console (`resolve`) | D | Ops app (`/ops`) | ✅ done |
 | D2 | Governance console | D | Ops app | ✅ done |
 | D3 | Guardian pause console | D | Ops app | ✅ done |

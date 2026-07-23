@@ -126,6 +126,12 @@ async function main() {
   const locationVerifier = await deployOrReuse("locationVerifier", "FareLocationVerifier");
   const ratings = await deployOrReuse("ratings", "FareRatings", [forwarder]);
 
+  // Stablecoin escrow (C3): use a configured real stablecoin (mainnet: the
+  // bridged USDC/USDT precompile) if given, else deploy a MockUSDC so the
+  // testnet demo has an accepted escrow token out of the box.
+  const stablecoin = process.env.STABLECOIN_ADDRESS
+    ?? (await deployOrReuse("stablecoin", "MockUSDC"));
+
   // ── 2. Wiring ──────────────────────────────────────────────────────────
   console.log("\n2. Wiring");
   const treasury = process.env.TREASURY_ADDRESS ?? deployer.address;
@@ -141,6 +147,13 @@ async function main() {
       ordersC.configure(vault, drivers, venues, settlement, disputes, treasury, { gasLimit: GAS_LIMIT })
     );
   } else console.log("  = orders already configured");
+
+  // Register the stablecoin as an accepted escrow token (C3).
+  if (!(await ordersC.acceptedToken(stablecoin))) {
+    await send("orders.setAcceptedToken(stablecoin)", () =>
+      ordersC.setAcceptedToken(stablecoin, true, { gasLimit: GAS_LIMIT })
+    );
+  } else console.log("  = stablecoin already accepted");
 
   if ((await settlementC.orders()) !== orders) {
     await send("settlement.configure", () =>

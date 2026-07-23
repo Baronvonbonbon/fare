@@ -5,6 +5,8 @@ import "@openzeppelin/contracts/access/Ownable2Step.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/utils/Context.sol";
 import "@openzeppelin/contracts/metatx/ERC2771Context.sol";
+import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "./interfaces/IFare.sol";
 import "./lib/FareUpgradable.sol";
 import "./lib/GeoLib.sol";
@@ -34,6 +36,8 @@ import "./lib/GeoLib.sol";
 ///           dropoff cosign → fare (minus protocol fee) + tip to driver
 ///         All value leaves through FareVault pull-payments.
 contract FareOrders is Ownable2Step, ReentrancyGuard, FareUpgradable, ERC2771Context, IFareOrders {
+    using SafeERC20 for IERC20;
+
     struct Order {
         address customer;
         uint64 venueId;
@@ -50,6 +54,9 @@ contract FareOrders is Ownable2Step, ReentrancyGuard, FareUpgradable, ERC2771Con
         uint64 deliveryWindowSecs;
         uint64 pickupDeadline; // set at assignment
         uint64 deliveryDeadline; // set at pickup
+        // Escrow asset (C3): address(0) = native PAS; otherwise an accepted
+        // ERC-20 stablecoin. Fixed at creation; fare/tip top-ups use the same one.
+        address token;
     }
 
     uint256 public nextOrderId = 1;
@@ -79,6 +86,11 @@ contract FareOrders is Ownable2Step, ReentrancyGuard, FareUpgradable, ERC2771Con
     uint64 public defaultPickupWindow = 45 minutes;
     uint64 public defaultDeliveryWindow = 90 minutes;
 
+    // Stablecoin escrow allowlist (C3): only owner-approved ERC-20s can back an
+    // order, so a malicious/rebasing token can never enter the escrow accounting.
+    // Empty by default — native-PAS orders need no entry here.
+    mapping(address => bool) public acceptedToken;
+
     event OrderCreated(
         uint256 indexed orderId,
         address indexed customer,
@@ -103,6 +115,7 @@ contract FareOrders is Ownable2Step, ReentrancyGuard, FareUpgradable, ERC2771Con
     event OrderDisputed(uint256 indexed orderId);
     event OrderResolved(uint256 indexed orderId, uint96 customerAmount, uint96 driverAmount);
     event ParamsSet(uint16 feeBps, uint16 assignedCancelBps, uint64 defaultPickupWindow, uint64 defaultDeliveryWindow);
+    event AcceptedTokenSet(address indexed token, bool accepted);
     /// Coarse pickup region (GeoLib.regionOf of the venue pin), indexed FIRST
     /// so clients can server-side filter open-order discovery by region.
     event OrderRegion(bytes32 indexed region, uint256 indexed orderId);
@@ -193,6 +206,15 @@ contract FareOrders is Ownable2Step, ReentrancyGuard, FareUpgradable, ERC2771Con
         emit RelayRebateSet(_bps);
     }
 
+    /// @notice Allow (or revoke) an ERC-20 as an escrow asset for stablecoin
+    ///         orders (C3). On mainnet this is the bridged USDC/USDT precompile;
+    ///         in tests/testnet, MockUSDC.
+    function setAcceptedToken(address token, bool accepted) external onlyOwner {
+        require(token != address(0), "zero-addr"); // address(0) is the native sentinel
+        acceptedToken[token] = accepted;
+        emit AcceptedTokenSet(token, accepted);
+    }
+
     // ---- customer: create / tip / cancel ----
 
     /// @param venueId       registered pickup venue
@@ -216,10 +238,46 @@ contract FareOrders is Ownable2Step, ReentrancyGuard, FareUpgradable, ERC2771Con
         uint64 pickupWindowSecs,
         uint64 deliveryWindowSecs
     ) external payable whenNotPaused whenNotFrozen returns (uint256 orderId) {
+        require(msg.value == uint256(orderValue) + tip, "bad-value");
+        orderId = _open(venueId, dropCommit, orderValue, tip, maxFare, pickupWindowSecs, deliveryWindowSecs, address(0));
+    }
+
+    /// @notice Stablecoin-escrowed order (C3): identical to `createOrder` but the
+    ///         escrow (orderValue + tip) is pulled in `token` via transferFrom
+    ///         instead of native value. Fare and tip top-ups use the same token.
+    ///         The customer must have approved this contract for the escrow.
+    function createOrderERC20(
+        address token,
+        uint64 venueId,
+        bytes32 dropCommit,
+        uint96 orderValue,
+        uint96 tip,
+        uint96 maxFare,
+        uint64 pickupWindowSecs,
+        uint64 deliveryWindowSecs
+    ) external whenNotPaused whenNotFrozen returns (uint256 orderId) {
+        require(acceptedToken[token], "token-not-accepted");
+        uint256 escrow = uint256(orderValue) + tip;
+        require(escrow > 0, "zero-escrow"); // a token order with nothing escrowed is a no-op
+        IERC20(token).safeTransferFrom(msg.sender, address(this), escrow);
+        orderId = _open(venueId, dropCommit, orderValue, tip, maxFare, pickupWindowSecs, deliveryWindowSecs, token);
+    }
+
+    /// @dev Shared order-open logic; the caller has already collected the escrow
+    ///      (native msg.value or an ERC-20 transferIn) equal to orderValue + tip.
+    function _open(
+        uint64 venueId,
+        bytes32 dropCommit,
+        uint96 orderValue,
+        uint96 tip,
+        uint96 maxFare,
+        uint64 pickupWindowSecs,
+        uint64 deliveryWindowSecs,
+        address token
+    ) internal returns (uint256 orderId) {
         require(venues.isActive(venueId), "venue-inactive");
         require(dropCommit != bytes32(0), "no-drop-commit");
         require(maxFare > 0, "no-max-fare");
-        require(msg.value == uint256(orderValue) + tip, "bad-value");
 
         uint64 pw = pickupWindowSecs == 0 ? defaultPickupWindow : pickupWindowSecs;
         uint64 dw = deliveryWindowSecs == 0 ? defaultDeliveryWindow : deliveryWindowSecs;
@@ -234,11 +292,12 @@ contract FareOrders is Ownable2Step, ReentrancyGuard, FareUpgradable, ERC2771Con
         o.orderValue = orderValue;
         o.tip = tip;
         o.maxFare = maxFare;
-        o.escrow = uint96(msg.value);
+        o.escrow = uint96(uint256(orderValue) + tip);
         o.dropCommit = dropCommit;
         o.createdAt = uint64(block.timestamp);
         o.pickupWindowSecs = pw;
         o.deliveryWindowSecs = dw;
+        o.token = token;
 
         emit OrderCreated(orderId, msg.sender, venueId, orderValue, tip, maxFare, dropCommit);
 
@@ -255,6 +314,7 @@ contract FareOrders is Ownable2Step, ReentrancyGuard, FareUpgradable, ERC2771Con
     function increaseTip(uint256 orderId) external payable whenNotFrozen {
         Order storage o = orders[orderId];
         require(msg.sender == o.customer, "not-customer");
+        require(o.token == address(0), "use-erc20-tip"); // native path only
         require(
             o.status == Status.Open || o.status == Status.Assigned || o.status == Status.PickedUp,
             "bad-status"
@@ -263,6 +323,23 @@ contract FareOrders is Ownable2Step, ReentrancyGuard, FareUpgradable, ERC2771Con
         o.tip += uint96(msg.value);
         o.escrow += uint96(msg.value);
         emit TipIncreased(orderId, uint96(msg.value), o.tip);
+    }
+
+    /// @notice Top up the tip of a stablecoin order (C3); `amount` pulled in the
+    ///         order's escrow token (customer must have approved this contract).
+    function increaseTipERC20(uint256 orderId, uint96 amount) external whenNotFrozen {
+        Order storage o = orders[orderId];
+        require(msg.sender == o.customer, "not-customer");
+        require(o.token != address(0), "use-native-tip"); // token path only
+        require(
+            o.status == Status.Open || o.status == Status.Assigned || o.status == Status.PickedUp,
+            "bad-status"
+        );
+        require(amount > 0, "zero-value");
+        IERC20(o.token).safeTransferFrom(msg.sender, address(this), amount);
+        o.tip += amount;
+        o.escrow += amount;
+        emit TipIncreased(orderId, amount, o.tip);
     }
 
     /// @notice Cancel an unassigned order. Full refund, never pause-gated —
@@ -274,7 +351,7 @@ contract FareOrders is Ownable2Step, ReentrancyGuard, FareUpgradable, ERC2771Con
         uint96 refund = o.escrow;
         o.escrow = 0;
         o.status = Status.Cancelled;
-        if (refund > 0) vault.credit{value: refund}(o.customer);
+        _credit(o, o.customer, refund);
         emit OrderCancelled(orderId, REASON_CUSTOMER_OPEN, refund, 0);
     }
 
@@ -293,13 +370,13 @@ contract FareOrders is Ownable2Step, ReentrancyGuard, FareUpgradable, ERC2771Con
 
         if (block.timestamp > o.pickupDeadline) {
             drivers.recordFailed(o.driver);
-            vault.credit{value: escrow}(o.customer);
+            _credit(o, o.customer, escrow);
             emit OrderCancelled(orderId, REASON_DRIVER_NO_SHOW, escrow, 0);
         } else {
             uint96 comp = uint96((uint256(o.fare) * assignedCancelBps) / 10_000);
             uint96 refund = escrow - comp;
-            if (comp > 0) vault.credit{value: comp}(o.driver);
-            if (refund > 0) vault.credit{value: refund}(o.customer);
+            _credit(o, o.driver, comp);
+            _credit(o, o.customer, refund);
             emit OrderCancelled(orderId, REASON_CUSTOMER_ASSIGNED, refund, comp);
         }
     }
@@ -315,7 +392,7 @@ contract FareOrders is Ownable2Step, ReentrancyGuard, FareUpgradable, ERC2771Con
         o.escrow = 0;
         o.status = Status.Cancelled;
         drivers.recordFailed(o.driver);
-        if (refund > 0) vault.credit{value: refund}(o.customer);
+        _credit(o, o.customer, refund);
         emit OrderCancelled(orderId, REASON_DRIVER_ABANDON, refund, 0);
     }
 
@@ -352,20 +429,58 @@ contract FareOrders is Ownable2Step, ReentrancyGuard, FareUpgradable, ERC2771Con
         nonReentrant
     {
         Order storage o = orders[orderId];
+        require(o.token == address(0), "use-erc20-accept"); // native path only
+        uint96 amount = _prepareAccept(o, orderId, driver);
+        require(msg.value == amount, "bad-value");
+        _assign(o, orderId, driver, amount);
+    }
+
+    /// @notice Accept a bid on a stablecoin order (C3): escrow the winning fare
+    ///         in the order's token (customer must have approved this contract).
+    function acceptBidERC20(uint256 orderId, address driver)
+        external
+        whenNotPaused
+        whenNotFrozen
+        nonReentrant
+    {
+        Order storage o = orders[orderId];
+        require(o.token != address(0), "use-native-accept"); // token path only
+        uint96 amount = _prepareAccept(o, orderId, driver);
+        IERC20(o.token).safeTransferFrom(msg.sender, address(this), amount);
+        _assign(o, orderId, driver, amount);
+    }
+
+    /// @dev Shared accept validation; returns the winning fare to escrow.
+    function _prepareAccept(Order storage o, uint256 orderId, address driver) internal view returns (uint96 amount) {
         require(msg.sender == o.customer, "not-customer");
         require(o.status == Status.Open, "bad-status");
-        uint96 amount = bidOf[orderId][driver];
+        amount = bidOf[orderId][driver];
         require(amount > 0, "no-bid");
         require(drivers.isEligible(driver), "driver-not-eligible");
-        require(msg.value == amount, "bad-value");
+    }
 
+    /// @dev Shared assignment write once the fare escrow has been collected.
+    function _assign(Order storage o, uint256 orderId, address driver, uint96 amount) internal {
         o.driver = driver;
         o.fare = amount;
         o.escrow += amount;
         o.status = Status.Assigned;
         o.pickupDeadline = uint64(block.timestamp) + o.pickupWindowSecs;
-
         emit OrderAssigned(orderId, driver, amount, o.pickupDeadline);
+    }
+
+    /// @dev Pay `amount` of the order's escrow asset to `to` through the vault —
+    ///      native value transfer, or an ERC-20 approve+pull per `o.token` (C3).
+    ///      One payout path, so every downstream release/refund/split is
+    ///      asset-agnostic. Skips zero to avoid the vault's zero-value guard.
+    function _credit(Order storage o, address to, uint96 amount) internal {
+        if (amount == 0) return;
+        if (o.token == address(0)) {
+            vault.credit{value: amount}(to);
+        } else {
+            IERC20(o.token).forceApprove(address(vault), amount);
+            vault.creditToken(o.token, to, amount);
+        }
     }
 
     // ---- settlement callbacks ----
@@ -390,7 +505,7 @@ contract FareOrders is Ownable2Step, ReentrancyGuard, FareUpgradable, ERC2771Con
         uint96 toVenue = o.orderValue;
         if (toVenue > 0) {
             o.escrow -= toVenue;
-            vault.credit{value: toVenue}(venues.payoutOf(o.venueId));
+            _credit(o, venues.payoutOf(o.venueId), toVenue);
         }
         venues.recordPickup(o.venueId);
         emit OrderPickedUp(orderId, o.deliveryDeadline);
@@ -414,9 +529,9 @@ contract FareOrders is Ownable2Step, ReentrancyGuard, FareUpgradable, ERC2771Con
         uint96 toDriver = o.fare - fee + o.tip;
         o.escrow -= (o.fare + o.tip); // == toDriver + toTreasury + rebate
 
-        if (toDriver > 0) vault.credit{value: toDriver}(o.driver);
-        if (toTreasury > 0) vault.credit{value: toTreasury}(treasury);
-        if (rebate > 0) vault.credit{value: rebate}(relayer);
+        _credit(o, o.driver, toDriver);
+        _credit(o, treasury, toTreasury);
+        _credit(o, relayer, rebate);
         drivers.recordDelivered(o.driver);
 
         emit OrderDelivered(orderId, toDriver, fee);
@@ -449,8 +564,8 @@ contract FareOrders is Ownable2Step, ReentrancyGuard, FareUpgradable, ERC2771Con
 
         uint96 customerAmt = uint96((uint256(escrow) * customerShareBps) / 10_000);
         uint96 driverAmt = escrow - customerAmt;
-        if (customerAmt > 0) vault.credit{value: customerAmt}(o.customer);
-        if (driverAmt > 0) vault.credit{value: driverAmt}(o.driver);
+        _credit(o, o.customer, customerAmt);
+        _credit(o, o.driver, driverAmt);
 
         emit OrderResolved(orderId, customerAmt, driverAmt);
     }

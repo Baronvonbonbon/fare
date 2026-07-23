@@ -3,7 +3,7 @@
 
 export const ORDERS_ABI = [
   "function nextOrderId() view returns (uint256)",
-  "function orders(uint256) view returns (address customer, uint64 venueId, uint8 status, address driver, uint96 orderValue, uint96 tip, uint96 fare, uint96 maxFare, uint96 escrow, bytes32 dropCommit, uint64 createdAt, uint64 pickupWindowSecs, uint64 deliveryWindowSecs, uint64 pickupDeadline, uint64 deliveryDeadline)",
+  "function orders(uint256) view returns (address customer, uint64 venueId, uint8 status, address driver, uint96 orderValue, uint96 tip, uint96 fare, uint96 maxFare, uint96 escrow, bytes32 dropCommit, uint64 createdAt, uint64 pickupWindowSecs, uint64 deliveryWindowSecs, uint64 pickupDeadline, uint64 deliveryDeadline, address token)",
   "function biddersOf(uint256) view returns (address[])",
   "function bidOf(uint256, address) view returns (uint96)",
   "function createOrder(uint64 venueId, bytes32 dropCommit, uint96 orderValue, uint96 tip, uint96 maxFare, uint64 pickupWindowSecs, uint64 deliveryWindowSecs) payable returns (uint256)",
@@ -11,6 +11,13 @@ export const ORDERS_ABI = [
   "function withdrawBid(uint256 orderId)",
   "function acceptBid(uint256 orderId, address driver) payable",
   "function increaseTip(uint256 orderId) payable",
+  // Stablecoin (ERC-20) escrow variants (C3). Value-in via transferFrom, so the
+  // customer must approve the orders contract first; escrow settles in `token`.
+  "function createOrderERC20(address token, uint64 venueId, bytes32 dropCommit, uint96 orderValue, uint96 tip, uint96 maxFare, uint64 pickupWindowSecs, uint64 deliveryWindowSecs) returns (uint256)",
+  "function acceptBidERC20(uint256 orderId, address driver)",
+  "function increaseTipERC20(uint256 orderId, uint96 amount)",
+  "function acceptedToken(address) view returns (bool)",
+  "function setAcceptedToken(address token, bool accepted)",
   "function cancelOpen(uint256 orderId)",
   "function cancelAssigned(uint256 orderId)",
   "function abandonOrder(uint256 orderId)",
@@ -90,6 +97,20 @@ export const VAULT_ABI = [
   "function withdrawFeeBps() view returns (uint16)",
   "function setWithdrawFeeBps(uint16 bps)",
   "function owner() view returns (address)",
+  // Stablecoin escrow (C3): per-token pull-payment balances.
+  "function tokenBalanceOf(address token, address account) view returns (uint256)",
+  "function withdrawToken(address token)",
+  "function withdrawTokenTo(address token, address recipient)",
+];
+
+// Minimal ERC-20 surface for stablecoin orders (C3): approve the orders
+// contract before createOrderERC20 / acceptBidERC20, read balances/decimals.
+export const ERC20_ABI = [
+  "function decimals() view returns (uint8)",
+  "function symbol() view returns (string)",
+  "function balanceOf(address) view returns (uint256)",
+  "function allowance(address owner, address spender) view returns (uint256)",
+  "function approve(address spender, uint256 amount) returns (bool)",
 ];
 
 export const PAUSE_ABI = [

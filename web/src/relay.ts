@@ -8,6 +8,7 @@
 import { ethers } from "ethers";
 import { requestDrip, sendProvider, readProvider, nativeBalance, CHAIN_ID, ADDRESSES, type DripResult } from "./chain";
 import { relayPool } from "./pool";
+import { shieldedFundingAvailable, fundViaShield } from "./shield";
 
 const ENV_RELAY_URL = ((import.meta as any).env?.VITE_RELAY_URL as string | undefined)?.replace(/\/$/, "");
 
@@ -100,6 +101,24 @@ export async function ensureGas(address: string, minWei: bigint): Promise<boolea
     if ((await nativeBalance(address).catch(() => before)) > before) return true;
   }
   return false; // submitted but not yet observed; caller may still proceed/retry
+}
+
+/// Fund a fresh per-order burner with `amountWei` (escrow + gas) for a value
+/// action. Prefers the shielded path (C4) when a funder is installed — no
+/// `main → burner` on-chain link — and falls back to the sponsored faucet/relay
+/// drip otherwise. Today no shielded funder is registered (see shield.ts +
+/// docs/SHIELDED-FUNDING.md), so this is exactly `ensureGas`; the C4 backend
+/// makes it un-linkable by dropping in behind this one seam.
+export async function fundBurner(address: string, amountWei: bigint): Promise<boolean> {
+  if (shieldedFundingAvailable()) {
+    try {
+      const r = await fundViaShield(address, amountWei);
+      if (r.funded) return true;
+    } catch {
+      /* shielded funder unusable → fall back to the sponsored drip */
+    }
+  }
+  return ensureGas(address, amountWei);
 }
 
 /// Sponsor gas for `address`: venue relay first, central faucet as fallback.

@@ -6,6 +6,10 @@ pragma solidity ^0.8.24;
 
 interface IFareVault {
     function credit(address to) external payable;
+    /// @notice ERC-20 analogue of `credit` for stablecoin-escrowed orders (C3).
+    ///         The authorized caller must have approved `amount` of `token` to
+    ///         the vault; the vault pulls it and attributes the balance to `to`.
+    function creditToken(address token, address to, uint256 amount) external;
 }
 
 /// @notice Groth16 verifier for the drop-proximity circuit (circuits/proximity.circom).
