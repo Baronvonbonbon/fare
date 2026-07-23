@@ -285,7 +285,7 @@ one wallet session + toast in `OpsApp.tsx`; only D5 (offline ceremony) remains.*
 | C1 | Gasless meta-tx relay | C | Infra + all views | ✅ done |
 | C2 | Fiat pricing (oracle) | C | Checkout | ✅ done (off-chain layer) |
 | C3 | Stablecoin escrow | C | Vault + checkout | ✅ done (rail + tests + PWA UI) |
-| C4 | Shielded burner funding | C | Infra | 🟡 designed + seam (blocked on infra) |
+| C4 | Shielded burner funding | C | Infra | 🟡 feasibility PROVEN on Paseo (Kusama Shield); see SHIELDED-POOL-INTEGRATION.md |
 | D1 | Arbiter console (`resolve`) | D | Ops app (`/ops`) | ✅ done |
 | D2 | Governance console | D | Ops app | ✅ done |
 | D3 | Guardian pause console | D | Ops app | ✅ done |
