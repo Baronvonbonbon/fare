@@ -1,0 +1,31 @@
+{
+  "scannedAt": "2026-07-23T16:10:08.987Z",
+  "txScanned": 15,
+  "unresolved": [
+    "confirmDropoffZK"
+  ],
+  "privateLeaks": 0,
+  "directFundingEdge": false,
+  "coords": {
+    "VENUE": {
+      "lat": 37774900,
+      "lon": -122419400
+    },
+    "DROP": {
+      "lat": 37784900,
+      "lon": -122419400
+    },
+    "DRIVER_DROPOFF": {
+      "lat": 37785200,
+      "lon": -122419400
+    },
+    "DRIVER_PICKUP_EXACT": {
+      "lat": 37775051,
+      "lon": -122419377
+    },
+    "DRIVER_PICKUP_COARSE": {
+      "lat": 37775100,
+      "lon": -122419500
+    }
+  }
+}
