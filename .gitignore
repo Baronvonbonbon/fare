@@ -26,3 +26,6 @@ circuits/build/sample-input.json
 # venue node relay secrets
 venue-node/.env
 venue-node/node_modules/
+
+# Kusama Shield probe scratch (ephemeral notes)
+scripts/shield/note.*.json
