@@ -6,13 +6,16 @@ export default defineConfig({
   plugins: [react()],
   server: { port: 5180 },
   // Two apps from one project: the consumer PWA (index.html) and the ops /
-  // governance console (ops.html → /ops), which shares the chain glue but has
-  // no shared nav and no service worker. See src/ops/.
+  // governance console (ops/index.html → served at a clean /ops), which shares
+  // the chain glue but has no shared nav and no service worker. Emitting the ops
+  // entry as ops/index.html (rather than ops.html) gives a directory-index route,
+  // so /ops resolves on Cloudflare Pages / any static host without relying on
+  // .html-extension stripping. See src/ops/.
   build: {
     rollupOptions: {
       input: {
         main: fileURLToPath(new URL("./index.html", import.meta.url)),
-        ops: fileURLToPath(new URL("./ops.html", import.meta.url)),
+        ops: fileURLToPath(new URL("./ops/index.html", import.meta.url)),
       },
     },
   },

@@ -121,9 +121,9 @@ infra/UI, spec'd in the linked design note.
 - 🔒 **C4 Shielded funding** for per-order burners — see §4.
 
 **Group D — ops / governance console** (⚙️ deliberately out of the consumer PWA)
-- ✅ **D1 Arbiter console** — **shipped.** A separate ops app (`web/ops.html` →
-  `/ops`, `web/src/ops/`) that shares the chain glue with the PWA but has no
-  shared nav and no service worker. Connect the arbiter wallet (badges whether it
+- ✅ **D1 Arbiter console** — **shipped.** A separate ops app (`web/ops/index.html`
+  → clean `/ops` route, `web/src/ops/`) that shares the chain glue with the PWA but
+  has no shared nav and no service worker. Connect the arbiter wallet (badges whether it
   matches the on-chain `arbiter`), see the queue of open disputes each with its
   order + driver context (frozen escrow, opener role, reputation, stake), and
   issue a ruling — `resolve(customerShareBps, openerWins, driverAtFault, slash)`
