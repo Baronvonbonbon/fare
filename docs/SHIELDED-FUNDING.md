@@ -1,9 +1,20 @@
 # Shielded burner funding (C4)
 
-Status: **designed, blocked on external infra.** This is the seam and the plan,
-not a working feature — no shielded pool exists on Paseo to build against. The
-interface (`web/src/shield.ts`) marks the integration point so the real
-implementation drops in without touching call sites.
+Status: **IMPLEMENTED against Kusama Shield on Paseo.** The concrete backend
+(`web/src/shieldpool.ts` engine + `KusamaShieldFunder` in `web/src/shield.ts`)
+funds burners through the live KS pool; the venue relay submits the withdrawal
+(`POST /shield-withdraw`). Proven end to end live — see
+[E2E-SHIELDED-DELIVERY-REPORT.md](E2E-SHIELDED-DELIVERY-REPORT.md) — and the
+general-case reconstruction is validated in `web/src/shieldpool.test.ts` +
+`scripts/shield/validate-general-withdraw.mjs`.
+
+> **Enable it:** set `VITE_SHIELD_POOL` in the web build (else the funder is not
+> registered and funding falls back to the faucet, unchanged). The relay reads
+> `SHIELD_POOL` / `SHIELD_FEE_PAS`. Mainnet still needs a real anonymity set +
+> the KS-side fixes below to be genuinely private — the mechanism is done, the
+> privacy strength is a usage property (see the e2e report §5).
+
+The original design and the seam it dropped into follow.
 
 ## The problem
 
@@ -87,15 +98,29 @@ Only two call sites change, both already funnel through helpers:
 until a pool/precompile exists, `shieldedFundingAvailable()` is `false` and every
 call falls back to today's behavior.
 
-## Why it's blocked
+## ~~Why it's blocked~~ → how it was unblocked
 
-There is **no shielded pool or confidential-transfer primitive on Paseo** to
-deploy against or call. Implementing C4 for real requires one of: a deployed
-mixer/pool contract (plus its trusted setup or a Poseidon-Merkle circuit — FARE
-already has a Groth16 toolchain from the dropoff proof, so a pool circuit is
-tractable), or a privacy-enabled target chain with a confidential asset. Both
-are external dependencies and mainnet-timed. The seam is in place; the
-implementation waits on the infrastructure.
+*(Historical: this section described the blocker. It is now resolved.)* A
+shielded pool **does** exist on Paseo — **Kusama Shield** (Tornado/Privacy-Pools
+lineage, Poseidon + LeanIMT + Groth16, with a PVM-native PoseidonT3 precompile).
+FARE integrates against it with **no contract changes** (`web/src/shieldpool.ts`
++ `shield.ts`, relay `/shield-withdraw`). Two KS-side gaps (undocumented genesis
+leaf; a 16-entry known-roots window) are handled **client-side** rather than
+waiting on upstream:
+
+- **Genesis leaf / incomplete logs (KS Issue 1):** we never read the genesis
+  value. At deposit we snapshot the note's immutable left-path (`sideNodes` at
+  bit-set levels); at withdraw we reconstruct only the right side from a bounded
+  post-deposit event scan. This gives **deposit-ahead / withdraw-later** for any
+  note — validated by withdrawing an *interior* leaf live.
+- **Known-roots eviction (KS Issue 4):** the relay returns HTTP 409 on
+  `"Unknown root"`; the client rebuilds the proof against a fresh root and
+  resubmits (`fundBurner` retry loop).
+
+What remains for **genuine mainnet privacy** is not code: a real KS anonymity
+set + time-decorrelation, and (ideally) the upstream fixes so we can drop the
+workarounds. See [KUSAMA-SHIELD-FINDINGS.md](KUSAMA-SHIELD-FINDINGS.md) and the
+e2e report §5.
 
 ## See also
 - [PRIVACY.md](PRIVACY.md) — the linkability threat model (risk #3)

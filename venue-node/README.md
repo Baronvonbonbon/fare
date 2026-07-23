@@ -41,7 +41,8 @@ by doing the two things that are safe to relay:
 | `POST /submit { method, args }` | **Relay a settlement call.** Only `confirmPickup` / `confirmDropoffZK` are allowlisted — they carry their own signatures / ZK proof and don't check `msg.sender`, so the relay submits them paying gas → those steps are fully gasless. |
 | `POST /forward { request }` | **Relay a gasless user action (F8).** Submits a user-signed EIP-2771 `ForwardRequest` through `FareForwarder`. Guarded: `value` must be 0 and `to` must be `FareOrders`/`FareRatings`, so the relay pays gas but never fronts a customer's escrow. |
 | `POST /withdraw { account, recipient, deadline, signature }` | **Relay a gasless withdrawal (F8).** Submits a driver-signed `FareVault.withdrawFor`; the relay is `msg.sender`, so a configured `withdrawFeeBps` reimburses its gas. Lets a driver pull earnings with zero gas held. |
-| `GET /health` | Relay address + gas balance + wired settlement + forwarder + vault. |
+| `POST /shield-withdraw { pA, pB, pC, pubSignals, recipient, burner? }` | **Fund a fresh burner through Kusama Shield (C4).** Submits a client-built `proxy_withdraw` on the KS pool. See the shielded-funding section below. |
+| `GET /health` | Relay address + gas balance + wired settlement + forwarder + vault + shield pool/mode. |
 
 ### Relay discovery (DATUM `relayUrl` pattern)
 
@@ -71,6 +72,48 @@ The relay holds a **funded venue account and pays gas only** — it can never mo
 user's funds. Worst case an abuser drains the relay's gas budget; it's
 balance-gated + rate-limited, and the operator refills. Run it behind a
 rate-limited reverse proxy / Cloudflare tunnel; never raw-expose it.
+
+> **One exception — shielded funding in *fee mode* (below).** There the pool pays
+> the *relay*, which must forward the net to the burner. For that window the relay
+> holds the withdrawal, so it *could* withhold it. **Sponsor mode** (the default,
+> `SHIELD_FEE_PAS=0`) has no such window — the pool pays the burner directly and
+> the relay only pays gas. Use fee mode only with a relay you'd trust to forward.
+
+### Shielded burner funding (`POST /shield-withdraw`, C4)
+
+Funds a fresh per-order burner through the **Kusama Shield** pool so there is no
+on-chain edge from the customer's wallet to the order (see
+[../docs/SHIELDED-POOL-INTEGRATION.md](../docs/SHIELDED-POOL-INTEGRATION.md)). The
+**client** builds the Groth16 withdrawal proof (recipient bound into the proof's
+`context`); the relay only **submits** it and pays gas.
+
+| Mode | `SHIELD_FEE_PAS` | Proof recipient | Who the pool pays | Relay economics |
+|---|---|---|---|---|
+| **sponsor** (default) | `0` | the **burner** | burner directly | relay eats gas (subsidy-budget gated); trustless |
+| **fee** | `> 0` | the **relay** | the relay → forwards `withdrawnValue − fee` to the burner | fee must clear `(submit+forward gas) × RELAY_MIN_MARGIN` |
+
+The relay recomputes `keccak256(recipient) mod r` and requires it to equal the
+proof's `context` signal, so it never submits a proof whose payout target it
+can't see. On **`"Unknown root"`** (KS Issue 4 — the proof's root fell out of the
+pool's 16-entry window before mining) it returns **HTTP 409 `{retry:true}`**; the
+client rebuilds the proof against a fresh root and resubmits (the relay can't fix
+a root baked into a proof). Config: `SHIELD_POOL`, `SHIELD_FEE_PAS`.
+
+> **Why a fee at all?** The KS `proxy_withdraw` has no on-chain relayer fee and
+> the Groth16 withdrawal verify costs ~0.77 PAS of gas on Paseo — so an
+> unreimbursed relay won't sponsor shielded funding at scale. Fee mode lets the
+> relay recoup that from the withdrawn amount (the customer still ultimately pays;
+> the relay breaks even). See the C4 e2e report's recommendation R2.
+
+### Gas sizing on Paseo (why some limits are 500 M and others aren't)
+
+At Paseo's ~1000 gwei, the **500 M weight limit** used for settlement/withdrawal
+calls reserves ~500 PAS *at submission* — fine for the funded relay, impossible
+for a lightly-funded burner. **User/burner transactions must use estimate-based
+gas** (`eth_estimateGas` returns sane low figures on this chain and the PWA relies
+on it); never bump a burner's gas limit to the weight-scale value or its funding
+tx will be rejected for the reservation. Receipts also leave `effectiveGasPrice`
+unset — price `gasUsed` at the observed 1000 gwei for accounting.
 
 ### Profitability guard (F6/F8 economics)
 

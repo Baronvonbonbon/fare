@@ -52,7 +52,8 @@ import {
   emptyMenu, newItemId, publishMenu, hasMenuURI,
 } from "./menu";
 import { proveProximity, positionCommit } from "./zk";
-import { sponsorGas, relaySettle, relayForward, relayWithdraw, ensureGas } from "./relay";
+import { sponsorGas, relaySettle, relayForward, relayWithdraw, ensureGas, activeRelayUrl } from "./relay";
+import { initShieldedFunder } from "./shield";
 import { usePasUsd, cachedRate, fiatOf, pasToUsd, formatUsd } from "./pricing";
 import {
   tokenOrdersEnabled, stablecoinAsset, assetOf, fmtAsset, parseAsset,
@@ -204,6 +205,12 @@ async function placeOrder(opts: {
 
 export default function App() {
   const [session, setSession] = useState<Session | null>(null);
+  // Latest session in a ref so the shielded funder's deposit signer never goes
+  // stale (C4). Registered once; funds burners privately when VITE_SHIELD_POOL
+  // is set, else the registry stays empty and funding falls back to the faucet.
+  const sessionRef = useRef<Session | null>(null);
+  useEffect(() => { sessionRef.current = session; }, [session]);
+  useEffect(() => { initShieldedFunder(() => (sessionRef.current?.signer as any) ?? null, activeRelayUrl); }, []);
   const [role, setRole] = useState<Role>(() => (localStorage.getItem("fare.role") as Role) || "customer");
   const [toast, setToast] = useState<{ msg: string; err?: boolean } | null>(null);
   const [orders, setOrders] = useState<OrderRow[]>([]);

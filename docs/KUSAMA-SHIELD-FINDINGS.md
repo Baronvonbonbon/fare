@@ -6,6 +6,21 @@ things blocked a general-purpose integration; we think both are easy fixes on
 your side and wanted to check whether you'd be open to addressing them. Thank
 you for building this — the relayer withdrawal path is exactly what we needed.*
 
+> **Update — we shipped client-side workarounds for Issues 1 & 4** so FARE isn't
+> blocked while you consider these, but they'd be simpler and more robust if
+> fixed upstream:
+> - **Issue 1:** instead of the genesis value, we snapshot each note's immutable
+>   left-path (`sideNodes` at its index's set bits) at deposit time and rebuild
+>   only the right side from a bounded post-deposit event scan. This gives
+>   general deposit-ahead/withdraw-later (validated by withdrawing an interior
+>   leaf). Publishing the genesis value / emitting an event on every insert would
+>   let integrators skip the snapshot dance.
+> - **Issue 4:** our relayer retries on `"Unknown root"` (rebuild against a fresh
+>   root), which narrows but can't close the race under load — a larger
+>   `ROOT_HISTORY_SIZE` still matters.
+>
+> Implementation: `web/src/shieldpool.ts`, `venue-node/relay.mjs` (`/shield-withdraw`).
+
 ---
 
 ## Deployment we tested against

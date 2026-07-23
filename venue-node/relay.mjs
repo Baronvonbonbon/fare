@@ -26,7 +26,7 @@
 import http from "node:http";
 import { readFileSync } from "node:fs";
 import { createHash } from "node:crypto";
-import { JsonRpcProvider, Wallet, Contract, Interface, parseEther, formatEther, isAddress } from "ethers";
+import { JsonRpcProvider, Wallet, Contract, Interface, parseEther, formatEther, isAddress, keccak256, solidityPacked } from "ethers";
 import { rebateWei, withdrawFeeWei, coversCost, withinBudget, windowSpent } from "./economics.mjs";
 
 const PORT = Number(process.env.RELAY_PORT || 8788);
@@ -40,6 +40,22 @@ const GAS_SETTLE = 500_000_000n; // Paseo weight-scale limit for a settlement ca
 const GAS_FUND = 100_000n; // a plain transfer; keeps the fee reservation small
 const RATE_WINDOW_MS = 60_000;
 const RATE_MAX = Number(process.env.RATE_MAX || 20); // requests / IP / window
+
+// ── Shielded funding (C4): relay a KS proxy_withdraw that funds a fresh burner ─
+// The client builds the withdrawal proof; the relay submits it and pays gas. Two
+// modes, selected by whether the proof's recipient is the relay or the burner:
+//   • sponsor mode (recipient = burner): the pool pays the burner directly; the
+//     relay eats gas (subsidy-budget gated). Trustless — the relay never touches
+//     the funds. Use when SHIELD_FEE_PAS = 0.
+//   • fee mode (recipient = relay): the pool pays the RELAY, which forwards
+//     (withdrawnValue − fee) to the burner and keeps the fee to cover its gas.
+//     Requires SHIELD_FEE_PAS > 0. Fee must clear gas × margin. Trust note: in
+//     fee mode the relay briefly holds the withdrawal, so it must be forwarded —
+//     a stronger trust assumption than sponsor mode (documented in the README).
+const SHIELD_POOL = process.env.SHIELD_POOL || "0x7d5a496bD61b631025A828d9049f6A68e007e0dC";
+const SHIELD_FEE = parseEther(process.env.SHIELD_FEE_PAS || "0"); // relayer fee (fee mode)
+const GAS_SHIELD = 8_000_000n; // proxy_withdraw is a Groth16 verify + tree insert
+const GAS_FORWARD_PAS = 100_000n; // plain transfer of the net to the burner
 
 // ── Profitability guard (F6/F8 economics) ────────────────────────────────────
 // The relay only sponsors what pays off: a reward-bearing action (dropoff
@@ -95,6 +111,17 @@ const VAULT_ABI = [
 ];
 const vault = vaultAddr ? new Contract(vaultAddr, VAULT_ABI, relay) : null;
 const GAS_WITHDRAW = 200_000n;
+
+// ── Kusama Shield pool (C4 shielded funding) ─────────────────────────────────
+const SHIELD_ABI = [
+  "function proxy_withdraw(uint[2] pA, uint[2][2] pB, uint[2] pC, uint[8] pubSignals, address recipient)",
+];
+const shieldPool = new Contract(SHIELD_POOL, SHIELD_ABI, relay);
+// context binds the recipient into the proof: context = pubSignals[5] =
+// keccak256(packed recipient address) mod r. The relay recomputes this to verify
+// who the pool will actually pay before it submits (defends fee mode).
+const BN254_R = 21888242871839275222246405745257275088548364400416034343698204186575808495617n;
+const contextFor = (addr) => BigInt(keccak256(solidityPacked(["address"], [addr]))) % BN254_R;
 
 // ── Reward reads + calldata decoding for the profitability guard ─────────────
 const ordersAddr = process.env.ORDERS_ADDRESS || addr.orders;
@@ -234,7 +261,7 @@ const server = http.createServer(async (req, res) => {
   try {
     if (req.method === "GET" && url.pathname === "/health") {
       const bal = await provider.getBalance(relay.address);
-      return send(res, 200, { ok: true, relay: relay.address, balance: formatEther(bal), settlement: settlementAddr, forwarder: forwarderAddr ?? null }, origin);
+      return send(res, 200, { ok: true, relay: relay.address, balance: formatEther(bal), settlement: settlementAddr, forwarder: forwarderAddr ?? null, shieldPool: SHIELD_POOL, shieldFeePAS: formatEther(SHIELD_FEE), shieldMode: SHIELD_FEE > 0n ? "fee" : "sponsor" }, origin);
     }
 
     // ── Message channel: fetch a thread (cheap read, not rate-limited) ───────
@@ -377,6 +404,69 @@ const server = http.createServer(async (req, res) => {
       return send(res, 200, { withdrawn: true, txHash: tx.hash, account }, origin);
     }
 
+    // ── Relay a shielded-pool withdrawal that funds a fresh burner (C4) ───────
+    // Body: { pA:[2], pB:[2][2], pC:[2], pubSignals:[8], recipient, burner? }
+    //   sponsor mode  (SHIELD_FEE==0): recipient must be the burner; pool pays it
+    //                  directly, relay eats gas (subsidy-budget gated).
+    //   fee mode      (SHIELD_FEE>0):  recipient must be the RELAY; pool pays the
+    //                  relay, which forwards (withdrawnValue − fee) to `burner`.
+    if (req.method === "POST" && url.pathname === "/shield-withdraw") {
+      const { pA, pB, pC, pubSignals, recipient, burner } = await readJson(req);
+      if (!Array.isArray(pA) || !Array.isArray(pB) || !Array.isArray(pC) || !Array.isArray(pubSignals) || pubSignals.length !== 8)
+        return send(res, 400, { error: "malformed proof" }, origin);
+      if (!isAddress(recipient)) return send(res, 400, { error: "bad recipient" }, origin);
+
+      // The proof binds the recipient via context; recompute and require it match
+      // pubSignals[5], so we never submit a proof whose payout target we can't see.
+      if (contextFor(recipient) !== BigInt(pubSignals[5]))
+        return send(res, 400, { error: "recipient does not match proof context" }, origin);
+
+      const feeMode = SHIELD_FEE > 0n;
+      const withdrawnValue = BigInt(pubSignals[3]);
+      if (feeMode) {
+        if (recipient.toLowerCase() !== relay.address.toLowerCase())
+          return send(res, 400, { error: "fee mode: proof recipient must be the relay" }, origin);
+        if (!isAddress(burner)) return send(res, 400, { error: "fee mode needs a burner destination" }, origin);
+        if (withdrawnValue <= SHIELD_FEE) return send(res, 400, { error: "withdrawnValue below fee" }, origin);
+      }
+
+      // Economics: fee mode must clear (submit+forward gas) × margin from the fee;
+      // sponsor mode is a loss-leader gated on the subsidy budget.
+      const submitCost = await estCostWei(() => shieldPool.proxy_withdraw.estimateGas(pA, pB, pC, pubSignals, recipient), GAS_SHIELD);
+      if (feeMode) {
+        const forwardCost = await estCostWei(async () => GAS_FORWARD_PAS, GAS_FORWARD_PAS);
+        if (PROFIT_GUARD && !coversCost(SHIELD_FEE, submitCost + forwardCost, MIN_MARGIN))
+          return decline(res, "shield fee below relayed cost", { action: "shield-withdraw", fee: formatEther(SHIELD_FEE), cost: formatEther(submitCost + forwardCost), margin: MIN_MARGIN }, origin);
+      } else if (PROFIT_GUARD && !budgetRoom(submitCost)) {
+        return decline(res, "subsidy budget exhausted", { action: "shield-withdraw" }, origin);
+      }
+
+      // Submit. On "Unknown root" (KS Issue 4: the proof's root fell out of the
+      // 16-entry window before mining) return 409 so the client rebuilds against
+      // a fresh root and resubmits — the relay can't fix a baked-in root itself.
+      let tx;
+      try {
+        tx = await serialize(async () => {
+          const nonce = await provider.getTransactionCount(relay.address);
+          return shieldPool.proxy_withdraw(pA, pB, pC, pubSignals, recipient, { gasLimit: GAS_SHIELD, nonce });
+        });
+      } catch (e) {
+        const msg = e?.shortMessage ?? e?.reason ?? e?.message ?? String(e);
+        if (/unknown root/i.test(msg)) return send(res, 409, { error: "unknown root", retry: true, detail: "root evicted (KS Issue 4) — rebuild proof against a fresh root" }, origin);
+        return send(res, 502, { error: msg }, origin);
+      }
+      await tx.wait?.().catch(() => {});
+      if (!feeMode) { recordBudget(submitCost); return send(res, 200, { submitted: true, txHash: tx.hash, mode: "sponsor", recipient }, origin); }
+
+      // Fee mode: forward (withdrawnValue − fee) to the burner; keep the fee.
+      const net = withdrawnValue - SHIELD_FEE;
+      const ftx = await serialize(async () => {
+        const nonce = await provider.getTransactionCount(relay.address);
+        return relay.sendTransaction({ to: burner, value: net, nonce, gasLimit: GAS_FORWARD_PAS });
+      });
+      return send(res, 200, { submitted: true, txHash: tx.hash, forwardTxHash: ftx.hash, mode: "fee", burner, net: formatEther(net), fee: formatEther(SHIELD_FEE) }, origin);
+    }
+
     return send(res, 404, { error: "not found" }, origin);
   } catch (e) {
     return send(res, 500, { error: e?.shortMessage ?? e?.message ?? String(e) }, origin);
@@ -390,5 +480,6 @@ server.listen(PORT, () => {
   console.log(`[relay] relayable:     ${[...RELAYABLE].join(", ")}`);
   console.log(`[relay] forwarder:     ${forwarderAddr ?? "(none — /forward disabled)"}`);
   console.log(`[relay] vault:         ${vaultAddr ?? "(none — /withdraw disabled)"}`);
+  console.log(`[relay] shield pool:   ${SHIELD_POOL}  (${SHIELD_FEE > 0n ? `fee mode, ${formatEther(SHIELD_FEE)} PAS` : "sponsor mode"})`);
   console.log(`[relay] profit guard:  ${PROFIT_GUARD ? `on (margin ${MIN_MARGIN}×, budget ${formatEther(GAS_BUDGET)} PAS / ${BUDGET_WINDOW_MS / 3_600_000}h)` : "OFF (sponsors everything)"}`);
 });

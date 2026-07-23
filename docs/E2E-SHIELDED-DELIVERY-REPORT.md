@@ -272,6 +272,24 @@ privacy is real.
 
 ---
 
+## 7b. Status of the recommendations (fixes applied 2026-07-23)
+
+| # | Recommendation | Status |
+|---|---|---|
+| R1 | Confirm by effect, not returned hash | ✅ `KusamaShieldFunder.fundBurner` polls the burner balance; `e2e-lib` prices `gasUsed` directly. Pine-rpc note documented. |
+| R2 | Relayer fee on the shielded withdrawal | ✅ relay `POST /shield-withdraw` fee mode (`SHIELD_FEE_PAS`): pool pays relay, forwards net to burner, keeps fee (gate: fee ≥ gas × margin). |
+| R3 | Move off the last-leaf pattern | ✅ **deposit-ahead/withdraw-later** now works via snapshot + right-scan reconstruction (`shieldpool.ts`), validated by an interior-leaf withdrawal + unit tests. (Strong *privacy* still needs a KS anonymity set.) |
+| R4 | Don't strand burner residual | ✅ `shieldedReturn` deposits the max safe residual back into the pool; gas reserve sized so the deposit doesn't revert. |
+| R5 | Document bimodal gas sizing | ✅ venue-node README "Gas sizing on Paseo". |
+| R6 | Distinct treasury; ceremony; KS fixes | ◑ **treasury set on-chain** to a distinct address (`0x6Db7…1FD1`, `configure` tx `0x0cece9…`). Trusted-setup ceremony + KS Issues 1/4 remain upstream (client workarounds shipped — see the findings doc). |
+
+Also added: KS Issue-1 & Issue-4 **client-side workarounds** (general tree
+reconstruction; unknown-root retry), a productionized `ShieldedFunder` wired into
+the PWA (`initShieldedFunder`, gated on `VITE_SHIELD_POOL`), and
+`web/src/shieldpool.test.ts` (reconstruction cross-checked against a full-tree
+proof). The general-case reconstruction is proven live in
+`scripts/shield/validate-general-withdraw.mjs`.
+
 ## 8. Reproduce
 
 ```bash
