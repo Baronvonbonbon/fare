@@ -203,12 +203,21 @@ Ordered roughly by leverage. Check off as landed.
       are device-local (survive-device-loss needs a backup/export — see identity note).
 
 ### Group C — Payments & economics (mainnet blockers)
-- 🟡 **Gasless** relay — venue-node relay shipped (`venue-node/`): gas sponsorship +
-  settlement relay (confirmPickup/confirmDropoffZK), no contract change. EIP-2771
-  forwarder for full meta-tx (createOrder/placeBid/…) is the next step.
-- [ ] **Fiat-denominated pricing** via oracle rate captured at acceptance
-- [ ] **Stablecoin escrow** (Asset Hub USDC/USDT via ERC-20 precompile; vault ERC-20 variant)
-- [ ] Shielded **funding path** for per-order burner wallets (privacy mainnet gate)
+- [x] **Gasless** (C1) — complete. Non-value user actions (placeBid / withdrawBid /
+  cancels / rate) go gasless via the EIP-2771 `FareForwarder` + venue-node
+  `/forward` relay (`relayForward` in `web/src/relay.ts`); value actions
+  (createOrder / acceptBid) use gas-sponsorship on the funded burner (`sponsorGas`
+  / `ensureGas`); settlement via `relaySettle`, earnings via `relayWithdraw`. By
+  design the relay never fronts escrow, so value actions can't be forwarded.
+- [x] **Fiat-denominated pricing** (C2) — off-chain display layer: `web/src/pricing.ts`
+  (PAS/USD rate — live endpoint `VITE_PRICE_URL` → static `VITE_PAS_USD` → default;
+  cached, `usePasUsd` hook). Fiat shown on menu items, cart total and receipts; the
+  rate is **captured at checkout** into the local receipt so its fiat value is
+  locked. On-chain oracle binding at bid acceptance is the mainnet successor.
+- [ ] **Stablecoin escrow** (C3) — Asset Hub USDC/USDT via ERC-20 precompile; vault
+  ERC-20 variant. Invasive: `createOrder` is `payable` native, vault holds native.
+- [ ] Shielded **funding path** for per-order burner wallets (C4, privacy mainnet
+  gate) — blocked on external shielded-pool infra (none on Paseo).
 
 ### Group D — Ops / governance / trust (⚙️ console, not consumer app)
 *A separate app (`web/ops.html` → `/ops`, `web/src/ops/`) — shares the chain glue
@@ -257,8 +266,8 @@ one wallet session + toast in `OpsApp.tsx`; only D5 (offline ceremony) remains.*
 | B5 | Ratings (stars) | B | Post-delivery | ✅ done |
 | B6 | Proof-of-delivery photo | B | Driver/Customer | ✅ done (capture→seal→store→E2E view) |
 | B7 | History / receipts / reorder | B | Customer view | ✅ done |
-| C1 | Gasless meta-tx relay | C | Infra + all views | 🟡 partial |
-| C2 | Fiat pricing (oracle) | C | Checkout | ☐ todo |
+| C1 | Gasless meta-tx relay | C | Infra + all views | ✅ done |
+| C2 | Fiat pricing (oracle) | C | Checkout | ✅ done (off-chain layer) |
 | C3 | Stablecoin escrow | C | Vault + checkout | ☐ todo |
 | C4 | Shielded burner funding | C | Infra | ☐ todo |
 | D1 | Arbiter console (`resolve`) | D | Ops app (`/ops`) | ✅ done |

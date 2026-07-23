@@ -53,6 +53,7 @@ import {
 } from "./menu";
 import { proveProximity, positionCommit } from "./zk";
 import { sponsorGas, relaySettle, relayForward, relayWithdraw, ensureGas } from "./relay";
+import { usePasUsd, cachedRate, fiatOf, pasToUsd, formatUsd } from "./pricing";
 import { MicroDeg, distanceMeters, fmtCoord, fmtDist, getPosition, snapToGrid } from "./geo";
 import { QRScan, QRShow } from "./qr";
 import { VenuePin, TrackMap } from "./map";
@@ -140,6 +141,7 @@ interface ReceiptData {
   tip: string;
   maxFare: string;
   placedAt?: number;
+  rateUsd?: number; // PAS/USD captured at checkout — locks the receipt's fiat value (C2)
 }
 function loadReceipt(commit: string): ReceiptData | null {
   try {
@@ -952,7 +954,7 @@ function CustomerView({ session, orders, venues, act, busy, signed, say, myLoc, 
   );
 }
 
-function MenuCart({ menu, cart, setCart }: { menu: Menu; cart: Cart; setCart: (c: Cart) => void }) {
+function MenuCart({ menu, cart, setCart, rate }: { menu: Menu; cart: Cart; setCart: (c: Cart) => void; rate: number }) {
   const add = (id: string, d: number) => {
     const q = Math.max(0, (cart[id] ?? 0) + d);
     const next = { ...cart };
@@ -961,6 +963,9 @@ function MenuCart({ menu, cart, setCart }: { menu: Menu; cart: Cart; setCart: (c
     setCart(next);
   };
   const avail = menu.items.filter((i) => i.available !== false);
+  const itemFiat = (price: string) => {
+    try { return fiatOf(parse(price || "0"), rate); } catch { return ""; }
+  };
   return (
     <div className="field">
       <span>menu — {menu.name || "items"} {cartCount(cart) > 0 ? `· ${cartCount(cart)} in cart` : ""}</span>
@@ -972,7 +977,8 @@ function MenuCart({ menu, cart, setCart }: { menu: Menu; cart: Cart; setCart: (c
             {item.desc ? <span className="hint"> · {item.desc}</span> : null}
           </span>
           <span className="v">
-            <span className="amount">{item.price} PAS </span>
+            <span className="amount">{itemFiat(item.price) || `${item.price} PAS`} </span>
+            {itemFiat(item.price) && <span className="hint">{item.price} PAS </span>}
             {(cart[item.id] ?? 0) > 0 && (
               <>
                 <button className="btn ghost small" type="button" onClick={() => add(item.id, -1)}>−</button>
@@ -997,6 +1003,7 @@ function CreateOrder({ session, venues, act, busy, say, myLoc, locateMe }: any) 
   const [menu, setMenu] = useState<Menu | null>(null);
   const [cart, setCart] = useState<Cart>({});
   const [menuLoading, setMenuLoading] = useState(false);
+  const { rate } = usePasUsd(); // fiat display rate (C2)
 
   // Fetch the selected venue's off-chain menu (IPFS via metadataURI).
   useEffect(() => {
@@ -1058,11 +1065,11 @@ function CreateOrder({ session, venues, act, busy, say, myLoc, locateMe }: any) 
         />
       )}
       {menuLoading && <p className="hint">Loading menu…</p>}
-      {menuDriven && <MenuCart menu={menu!} cart={cart} setCart={setCart} />}
+      {menuDriven && <MenuCart menu={menu!} cart={cart} setCart={setCart} rate={rate} />}
 
       <div className={menuDriven ? "row3" : "row3"}>
         {menuDriven ? (
-          <label className="field"><span>cart total</span>
+          <label className="field"><span>cart total{fiatOf(orderValueWei, rate) && ` · ${fiatOf(orderValueWei, rate)}`}</span>
             <input value={`${fmt(orderValueWei)} PAS`} readOnly /></label>
         ) : (
           <label className="field"><span>order value (PAS)</span>
@@ -1090,6 +1097,7 @@ function CreateOrder({ session, venues, act, busy, say, myLoc, locateMe }: any) 
             const receipt: ReceiptData = {
               venueId, venueName: menu?.name || `Venue #${venueId}`, items,
               orderValue: fmt(orderValueWei), tip, maxFare,
+              rateUsd: cachedRate(), // capture the fiat rate at checkout (C2)
             };
             // Fresh per-order identity, funded from the faucet so it links to
             // nothing (docs/PRIVACY.md risk #3); persists a local receipt (B7).
@@ -1164,8 +1172,13 @@ function OrderTracker({ o }: { o: OrderRow }) {
 }
 
 // B7 — itemized receipt (local cart snapshot + on-chain amounts).
+// C2 — when a fiat rate was captured at checkout, show the locked fiat value
+// alongside PAS (the rate is fixed to the receipt, not the live one).
 function OrderReceipt({ o }: { o: OrderRow }) {
   const r = loadReceipt(o.dropCommit);
+  const rate = r?.rateUsd;
+  const total = o.orderValue + o.tip + o.fare;
+  const fiat = (wei: bigint) => (rate ? formatUsd(pasToUsd(wei, rate)) : "");
   return (
     <details className="payload-details">
       <summary>receipt</summary>
@@ -1184,7 +1197,9 @@ function OrderReceipt({ o }: { o: OrderRow }) {
       <div className="kv"><span className="k">order value</span><span className="v mono">{fmt(o.orderValue)} PAS</span></div>
       <div className="kv"><span className="k">tip</span><span className="v mono">{fmt(o.tip)} PAS</span></div>
       {o.fare > 0n && <div className="kv"><span className="k">delivery fare</span><span className="v mono">{fmt(o.fare)} PAS</span></div>}
-      <div className="kv"><span className="k">total</span><span className="v amount">{fmt(o.orderValue + o.tip + o.fare)} PAS</span></div>
+      <div className="kv"><span className="k">total</span>
+        <span className="v amount">{rate ? `${fiat(total)} · ` : ""}{fmt(total)} PAS</span></div>
+      {rate && <p className="hint">Fiat locked at checkout @ {formatUsd(rate)}/PAS.</p>}
       {!r && <p className="hint">No itemized breakdown on this device.</p>}
     </details>
   );
@@ -1243,6 +1258,7 @@ function HistoryCard({ o, venues, act, busy, session, say }: any) {
       venueId: String(o.venueId), venueName: `Venue #${o.venueId}`, items: [],
       orderValue: fmt(o.orderValue), tip: fmt(o.tip), maxFare: fmt(o.maxFare),
     };
+    r.rateUsd = cachedRate(); // re-capture at reorder time (C2)
     await placeOrder({
       venueId: o.venueId, orderValueWei: o.orderValue, tipWei: o.tip, maxFareWei: o.maxFare,
       lat, lon, receipt: r, act, say,
