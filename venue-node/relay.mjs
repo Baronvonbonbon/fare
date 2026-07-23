@@ -30,7 +30,11 @@ import { JsonRpcProvider, Wallet, Contract, Interface, parseEther, formatEther, 
 import { rebateWei, withdrawFeeWei, coversCost, withinBudget, windowSpent } from "./economics.mjs";
 
 const PORT = Number(process.env.RELAY_PORT || 8788);
-const RPC = process.env.RELAY_RPC_URL || "https://eth-rpc-testnet.polkadot.io/";
+// A single-signer relay keeps ONE provider (nonce safety — no fallback quorum on
+// getTransactionCount), but prefers a local pine light client when present for
+// trust-minimized reads, else the first of a comma-separated RELAY_RPC_URL list.
+const RPC = (process.env.PINE_RPC?.trim())
+  || (process.env.RELAY_RPC_URL || "https://eth-rpc-testnet.polkadot.io/").split(",")[0].trim();
 const KEY = process.env.RELAY_PRIVATE_KEY;
 const FUND_AMOUNT = parseEther(process.env.FUND_AMOUNT_PAS || "5");
 const FUND_MIN = parseEther(process.env.FUND_MIN_PAS || "2");
@@ -56,6 +60,28 @@ const SHIELD_POOL = process.env.SHIELD_POOL || "0x7d5a496bD61b631025A828d9049f6A
 const SHIELD_FEE = parseEther(process.env.SHIELD_FEE_PAS || "0"); // relayer fee (fee mode)
 const GAS_SHIELD = 8_000_000n; // proxy_withdraw is a Groth16 verify + tree insert
 const GAS_FORWARD_PAS = 100_000n; // plain transfer of the net to the burner
+
+// ── Sponsored onboarding (POST /onboard) — seed a fresh driver/venue wallet ──
+// Opt-in (OFF by default): registration reads msg.sender and isn't meta-
+// forwardable, so a region relay can instead SEED a fresh wallet with existential
+// deposit + register gas so a new driver/venue can register and immediately begin
+// earning. Loss-leader → subsidy-budget + rate-limit + one-per-address gated, and
+// (for venues) region-scoped. See docs/RELAY-SPONSORSHIP.md (Route A).
+const ONBOARD_ENABLED = (process.env.ONBOARD_ENABLED || "off").toLowerCase() === "on";
+const ONBOARD_SEED = parseEther(process.env.ONBOARD_SEED_PAS || "2"); // ≥ ED + register gas
+const ONBOARD_LAT = process.env.ONBOARD_LAT ? Number(process.env.ONBOARD_LAT) : null; // µdeg
+const ONBOARD_LON = process.env.ONBOARD_LON ? Number(process.env.ONBOARD_LON) : null;
+const ONBOARD_RADIUS_KM = Number(process.env.ONBOARD_RADIUS_KM || 60);
+const GAS_ONBOARD = 100_000n; // a plain seed transfer
+const onboarded = new Set(); // one sponsored seed per address (process-local)
+
+// Haversine (µdeg → meters) for the venue region gate.
+function distMeters(latA, lonA, latB, lonB) {
+  const R = 6_371_000, rad = Math.PI / 180e6; // µdeg → rad
+  const dLat = (latB - latA) * rad, dLon = (lonB - lonA) * rad;
+  const a = Math.sin(dLat / 2) ** 2 + Math.cos(latA * rad) * Math.cos(latB * rad) * Math.sin(dLon / 2) ** 2;
+  return 2 * R * Math.asin(Math.min(1, Math.sqrt(a)));
+}
 
 // ── Profitability guard (F6/F8 economics) ────────────────────────────────────
 // The relay only sponsors what pays off: a reward-bearing action (dropoff
@@ -117,6 +143,10 @@ const SHIELD_ABI = [
   "function proxy_withdraw(uint[2] pA, uint[2][2] pB, uint[2] pC, uint[8] pubSignals, address recipient)",
 ];
 const shieldPool = new Contract(SHIELD_POOL, SHIELD_ABI, relay);
+
+// Registry reads for the onboarding anti-double-seed check.
+const driversAddr = addr.drivers;
+const drivers = driversAddr ? new Contract(driversAddr, ["function drivers(address) view returns (bool registered, bool banned, uint96 stake, uint64 unstakeRequestedAt, uint32 delivered, uint32 failed, string metadataURI)"], provider) : null;
 // context binds the recipient into the proof: context = pubSignals[5] =
 // keccak256(packed recipient address) mod r. The relay recomputes this to verify
 // who the pool will actually pay before it submits (defends fee mode).
@@ -261,7 +291,7 @@ const server = http.createServer(async (req, res) => {
   try {
     if (req.method === "GET" && url.pathname === "/health") {
       const bal = await provider.getBalance(relay.address);
-      return send(res, 200, { ok: true, relay: relay.address, balance: formatEther(bal), settlement: settlementAddr, forwarder: forwarderAddr ?? null, shieldPool: SHIELD_POOL, shieldFeePAS: formatEther(SHIELD_FEE), shieldMode: SHIELD_FEE > 0n ? "fee" : "sponsor" }, origin);
+      return send(res, 200, { ok: true, relay: relay.address, balance: formatEther(bal), settlement: settlementAddr, forwarder: forwarderAddr ?? null, shieldPool: SHIELD_POOL, shieldFeePAS: formatEther(SHIELD_FEE), shieldMode: SHIELD_FEE > 0n ? "fee" : "sponsor", onboarding: ONBOARD_ENABLED ? { seedPAS: formatEther(ONBOARD_SEED), region: ONBOARD_LAT != null ? { lat: ONBOARD_LAT, lon: ONBOARD_LON, radiusKm: ONBOARD_RADIUS_KM } : null } : null }, origin);
     }
 
     // ── Message channel: fetch a thread (cheap read, not rate-limited) ───────
@@ -327,6 +357,41 @@ const server = http.createServer(async (req, res) => {
       });
       recordBudget(cost);
       return send(res, 200, { funded: true, txHash: tx.hash, amount: formatEther(FUND_AMOUNT) }, origin);
+    }
+
+    // ── Sponsored onboarding: seed a fresh driver/venue wallet (Route A) ──────
+    if (req.method === "POST" && url.pathname === "/onboard") {
+      if (!ONBOARD_ENABLED) return send(res, 503, { error: "onboarding sponsorship disabled (set ONBOARD_ENABLED=on)" }, origin);
+      const { address, role, lat, lon } = await readJson(req);
+      if (!isAddress(address)) return send(res, 400, { error: "invalid address" }, origin);
+      if (role !== "driver" && role !== "venue") return send(res, 400, { error: "role must be driver|venue" }, origin);
+      // One sponsored seed per address (process-local) + never seed an address
+      // that already has funds (a fresh onboarding wallet starts empty).
+      if (onboarded.has(address.toLowerCase())) return send(res, 429, { error: "already onboarded this address" }, origin);
+      const bal = await provider.getBalance(address);
+      if (bal >= ONBOARD_SEED) return send(res, 200, { seeded: false, reason: "already funded", balance: formatEther(bal) }, origin);
+      // Don't re-seed an already-registered driver.
+      if (role === "driver" && drivers) {
+        try { if ((await drivers.drivers(address))[0]) return send(res, 409, { error: "driver already registered" }, origin); } catch { /* read failed → allow */ }
+      }
+      // Region gate for venues (if the relay declares a home region).
+      if (role === "venue" && ONBOARD_LAT != null && ONBOARD_LON != null) {
+        if (typeof lat !== "number" || typeof lon !== "number") return send(res, 400, { error: "venue onboarding needs lat/lon (µdeg)" }, origin);
+        const d = distMeters(ONBOARD_LAT, ONBOARD_LON, lat, lon);
+        if (d > ONBOARD_RADIUS_KM * 1000) return send(res, 403, { error: `outside sponsored region (${Math.round(d / 1000)} km > ${ONBOARD_RADIUS_KM} km)` }, origin);
+      }
+      // Loss-leader → subsidy-budget gated.
+      const relayBal = await provider.getBalance(relay.address);
+      if (relayBal < ONBOARD_SEED) return send(res, 503, { error: "relay out of onboarding budget — operator refill" }, origin);
+      const cost = await estCostWei(() => provider.estimateGas({ from: relay.address, to: address, value: ONBOARD_SEED }), GAS_ONBOARD);
+      if (PROFIT_GUARD && !budgetRoom(cost + ONBOARD_SEED)) return decline(res, "onboarding budget exhausted", { action: "onboard" }, origin);
+      const tx = await serialize(async () => {
+        const nonce = await provider.getTransactionCount(relay.address);
+        return relay.sendTransaction({ to: address, value: ONBOARD_SEED, nonce, gasLimit: GAS_ONBOARD });
+      });
+      onboarded.add(address.toLowerCase());
+      recordBudget(cost + ONBOARD_SEED); // the seed itself is the subsidy, not just gas
+      return send(res, 200, { seeded: true, txHash: tx.hash, amount: formatEther(ONBOARD_SEED), role }, origin);
     }
 
     // ── Relay a settlement call (gasless for the user) ───────────────────────
@@ -481,5 +546,6 @@ server.listen(PORT, () => {
   console.log(`[relay] forwarder:     ${forwarderAddr ?? "(none — /forward disabled)"}`);
   console.log(`[relay] vault:         ${vaultAddr ?? "(none — /withdraw disabled)"}`);
   console.log(`[relay] shield pool:   ${SHIELD_POOL}  (${SHIELD_FEE > 0n ? `fee mode, ${formatEther(SHIELD_FEE)} PAS` : "sponsor mode"})`);
+  console.log(`[relay] onboarding:    ${ONBOARD_ENABLED ? `on (seed ${formatEther(ONBOARD_SEED)} PAS${ONBOARD_LAT != null ? `, region ${ONBOARD_RADIUS_KM}km` : ""})` : "off"}`);
   console.log(`[relay] profit guard:  ${PROFIT_GUARD ? `on (margin ${MIN_MARGIN}×, budget ${formatEther(GAS_BUDGET)} PAS / ${BUDGET_WINDOW_MS / 3_600_000}h)` : "OFF (sponsors everything)"}`);
 });

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ADDRESSES,
+  readProvider,
   RPC_URL,
   Session,
   SignerMode,
@@ -52,7 +53,7 @@ import {
   emptyMenu, newItemId, publishMenu, hasMenuURI,
 } from "./menu";
 import { proveProximity, positionCommit } from "./zk";
-import { sponsorGas, relaySettle, relayForward, relayWithdraw, ensureGas, activeRelayUrl } from "./relay";
+import { sponsorGas, relaySettle, relayForward, relayWithdraw, ensureGas, activeRelayUrl, sponsorOnboarding } from "./relay";
 import { initShieldedFunder } from "./shield";
 import { usePasUsd, cachedRate, fiatOf, pasToUsd, formatUsd } from "./pricing";
 import {
@@ -444,10 +445,33 @@ export default function App() {
     }
   }, [session, role, myLoc, radiusKm]);
 
+  // Event-driven refresh. The Paseo eth-rpc has no `eth_newFilter`, so we can't
+  // hold a log subscription; instead we watch new BLOCKS (getBlockNumber polling,
+  // which the RPC does support) and only run the full refresh when the orders
+  // contract actually emitted in the new range (create / bid / assign / pickup /
+  // deliver / cancel — FareOrders emits the whole lifecycle). Idle chain ⇒ cheap
+  // empty getLogs, no refresh; activity ⇒ prompt refresh. A slow interval is the
+  // safety net if block events stall.
   useEffect(() => {
     refresh();
-    const t = setInterval(refresh, 8000);
-    return () => clearInterval(t);
+    let last = 0;
+    let debounce: ReturnType<typeof setTimeout> | undefined;
+    const onBlock = async (bn: number) => {
+      const from = last === 0 ? bn : last + 1;
+      last = bn;
+      if (from > bn) return;
+      try {
+        const logs = await readProvider.getLogs({ address: ADDRESSES.orders, fromBlock: from, toBlock: bn });
+        if (logs.length) { if (debounce) clearTimeout(debounce); debounce = setTimeout(refresh, 800); }
+      } catch { /* transient RPC hiccup → the fallback interval still covers it */ }
+    };
+    readProvider.on("block", onBlock);
+    const fallback = setInterval(refresh, 30000); // safety net only
+    return () => {
+      if (debounce) clearTimeout(debounce);
+      clearInterval(fallback);
+      readProvider.off("block", onBlock);
+    };
   }, [refresh]);
 
   useEffect(() => localStorage.setItem("fare.role", role), [role]);
@@ -1857,7 +1881,13 @@ function DriverRegister({ act, busy, signed }: any) {
         <input value={stake} onChange={(e) => setStake(e.target.value)} inputMode="decimal" /></label>
       <div className="btn-row">
         <button className="btn" disabled={busy}
-          onClick={() => act("Register", () => signed.drivers.register(`demo://${name || "driver"}`, { value: parse(stake) }))}>
+          onClick={() => act("Register", async () => {
+            // Sponsored onboarding (Route A): a region relay seeds gas so a fresh
+            // wallet can register with no PAS. No-op if onboarding isn't offered.
+            const addr = await signed.drivers.runner.getAddress();
+            await sponsorOnboarding(addr, "driver").catch(() => {});
+            return signed.drivers.register(`demo://${name || "driver"}`, { value: parse(stake) });
+          })}>
           Register
         </button>
       </div>

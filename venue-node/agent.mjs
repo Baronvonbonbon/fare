@@ -23,8 +23,11 @@
 
 import http from "node:http";
 import { readFileSync } from "node:fs";
-import { JsonRpcProvider, Contract, AbiCoder, keccak256 } from "ethers";
+import { Contract, AbiCoder, keccak256 } from "ethers";
+import { buildReadPool } from "./rpc.mjs";
 
+// AGENT_RPC_URL may be a comma-separated failover list; PINE_RPC (a local
+// light client) is prepended automatically. See rpc.mjs / docs F4.
 const RPC = process.env.AGENT_RPC_URL || process.env.RELAY_RPC_URL || "https://eth-rpc-testnet.polkadot.io/";
 const KUBO = (process.env.KUBO_API_URL || "http://127.0.0.1:5001").replace(/\/$/, "");
 const ADDRESS_BOOK = process.env.ADDRESS_BOOK || "../deployed-addresses.json";
@@ -74,7 +77,7 @@ const VENUES_ABI = [
   "function venues(uint64) view returns (address operator, address signer, address payout, int32 lat, int32 lon, bool active, uint32 pickups, string metadataURI)",
 ];
 
-const provider = new JsonRpcProvider(RPC, undefined, { staticNetwork: true });
+const provider = buildReadPool(RPC, "agent");
 const venues = new Contract(venuesAddr, VENUES_ABI, provider);
 
 // ── region math — MUST match GeoLib.regionOf / web/src/chain.ts exactly ───────

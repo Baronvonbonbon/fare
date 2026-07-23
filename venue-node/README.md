@@ -12,9 +12,35 @@ menu, replicating its region's, providing chain access, and relaying gas.
 | **Push service** | `push.mjs` | B4 | Watches order events → sends Web Push (VAPID) **by region** to subscribed devices. |
 | **Appliance** | `docker-compose.yml` | F2 | Kubo (IPFS) + agent + relay behind a Caddy reverse proxy. |
 
-> The in-app **smoldot light client** is the primary chain-access path (F4); the
-> appliance's agent reads over RPC for now, and an optional `pine-rpc` light-client
-> container as a fallback pool is deferred to F4.
+> The in-app **smoldot light client** is the primary chain-access path (F4). The
+> appliance's agent/relay now read through a **failover RPC pool** (`rpc.mjs`):
+> `AGENT_RPC_URL`/`RELAY_RPC_URL` accept a comma-separated list, and an optional
+> local **pine-rpc** light client (`PINE_RPC`, run via `docker compose --profile
+> pine up`) is used first for trust-minimized, Merkle-proof-verified reads. See
+> "RPC resilience" below.
+
+## RPC resilience (F4)
+
+The public Paseo eth-rpc is load-balanced and inconsistent (it dropped a tx
+receipt in the C4 e2e; `getLogs` misses events). So chain reads go through a
+**failover pool** (`rpc.mjs`):
+
+- `AGENT_RPC_URL` / `RELAY_RPC_URL` may be a **comma-separated list**; the agent
+  builds an ethers `FallbackProvider` (quorum 1 → first healthy response wins,
+  live failover). The relay keeps a single *send* provider for nonce safety but
+  prefers a local endpoint for reads.
+- Set **`PINE_RPC`** to a local **pine/smoldot light client** and it's used
+  **first** (highest priority) — trust-minimized state, and it sidesteps the
+  public RPC's inconsistency entirely. Run one with the opt-in compose profile:
+
+  ```bash
+  # supply a real pine-rpc image + sync command, then:
+  PINE_IMAGE=<image> PINE_CMD='pine --chain paseo-asset-hub --rpc-external' \
+    docker compose --profile pine up -d
+  # and in .env: PINE_RPC=http://pine:9944
+  ```
+
+  Without the profile, nothing changes — the node uses the RPC list as before.
 
 ## Quick start — the whole appliance (F2)
 
@@ -38,6 +64,7 @@ by doing the two things that are safe to relay:
 | Endpoint | Does |
 |---|---|
 | `POST /fund { address }` | **Sponsor gas** — top up a burner below `FUND_MIN_PAS` up to `FUND_AMOUNT_PAS` (a region-local, decentralized `/api/drip`). |
+| `POST /onboard { address, role, lat?, lon? }` | **Sponsored onboarding (Route A)** — seed a fresh driver/venue wallet (ED + register gas) so it can register and immediately earn. Opt-in (`ONBOARD_ENABLED=on`), one-per-address, budget-gated, venues region-gated. See [../docs/RELAY-SPONSORSHIP.md](../docs/RELAY-SPONSORSHIP.md). |
 | `POST /submit { method, args }` | **Relay a settlement call.** Only `confirmPickup` / `confirmDropoffZK` are allowlisted — they carry their own signatures / ZK proof and don't check `msg.sender`, so the relay submits them paying gas → those steps are fully gasless. |
 | `POST /forward { request }` | **Relay a gasless user action (F8).** Submits a user-signed EIP-2771 `ForwardRequest` through `FareForwarder`. Guarded: `value` must be 0 and `to` must be `FareOrders`/`FareRatings`, so the relay pays gas but never fronts a customer's escrow. |
 | `POST /withdraw { account, recipient, deadline, signature }` | **Relay a gasless withdrawal (F8).** Submits a driver-signed `FareVault.withdrawFor`; the relay is `msg.sender`, so a configured `withdrawFeeBps` reimburses its gas. Lets a driver pull earnings with zero gas held. |

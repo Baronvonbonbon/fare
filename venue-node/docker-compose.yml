@@ -70,6 +70,23 @@ services:
       - ../deployed-addresses.json:/deployed-addresses.json:ro
     networks: [venue]
 
+  # ── pine-rpc light client (F4): trust-minimized, self-hosted chain reads ─────
+  # OPT-IN — only runs under `docker compose --profile pine up`. Gives the node a
+  # local smoldot/pine JSON-RPC (Merkle-proof-verified state) so agent/relay reads
+  # don't depend on the flaky public RPC. Point them at it by setting, in .env:
+  #     PINE_RPC=http://pine:9944
+  # rpc.mjs then prepends it (highest priority) to the failover pool. The operator
+  # supplies the image + chain-sync command (this line is intentionally generic):
+  #     PINE_IMAGE=<pine-rpc image>   PINE_CMD='pine --chain paseo-asset-hub --rpc-external'
+  pine:
+    profiles: ["pine"]
+    image: ${PINE_IMAGE:-alpine}
+    command: ${PINE_CMD:-sh -c "echo 'set PINE_IMAGE + PINE_CMD to run a real pine-rpc light client'; sleep infinity"}
+    restart: unless-stopped
+    volumes:
+      - pine-data:/data
+    networks: [venue]
+
   # ── Reverse proxy: the ONLY public surface. Rate-limited, read-only routes. ──
   caddy:
     image: caddy:2-alpine
@@ -88,3 +105,4 @@ networks:
 volumes:
   ipfs-data:
   caddy-data:
+  pine-data:

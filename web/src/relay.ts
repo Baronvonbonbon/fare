@@ -136,6 +136,40 @@ export async function sponsorGas(address: string): Promise<DripResult> {
   return requestDrip(address);
 }
 
+/// Sponsored onboarding (Route A): ask the region relay to SEED a fresh
+/// driver/venue wallet (existential deposit + register gas) so a new participant
+/// can register and immediately begin earning — no "buy PAS first". Best-effort:
+/// if no relay, onboarding is disabled, or it declines, the caller's normal
+/// gas-ensure path still runs. Polls until the seed lands so the subsequent
+/// register can pay its own gas. Returns true if the wallet ended up funded.
+export async function sponsorOnboarding(
+  address: string,
+  role: "driver" | "venue",
+  coords?: { lat: number; lon: number }
+): Promise<boolean> {
+  const url = activeRelayUrl();
+  if (!url) return false;
+  try {
+    const res = await fetch(`${url}/onboard`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ address, role, ...(coords ?? {}) }),
+    });
+    if (!res.ok) return false; // disabled (503) / out-of-region (403) / dup (429) → caller falls back
+    const j = await res.json();
+    if (!j.seeded && j.reason !== "already funded") return false;
+  } catch {
+    return false;
+  }
+  // Confirm by effect: wait for the seed to reflect on-chain (~24s).
+  const before = 0n;
+  for (let i = 0; i < 12; i++) {
+    if ((await nativeBalance(address).catch(() => before)) > before) return true;
+    await new Promise((r) => setTimeout(r, 2000));
+  }
+  return true; // submitted; balance not yet observed
+}
+
 /// Submit a settlement call through the relay (gasless) when configured, else
 /// directly from the user's wallet. Only confirmPickup / confirmDropoffZK are
 /// relayable. Returns a tx-like object with .wait() so it drops into act(). On a
