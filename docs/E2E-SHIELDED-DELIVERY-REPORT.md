@@ -290,6 +290,11 @@ the PWA (`initShieldedFunder`, gated on `VITE_SHIELD_POOL`), and
 proof). The general-case reconstruction is proven live in
 `scripts/shield/validate-general-withdraw.mjs`.
 
+**Live validation of the new relay endpoint** (`scripts/shield/test-relay-endpoint.mjs`):
+both modes funded a fresh burner through the venue node — **sponsor** (pool → burner,
+tx `0x1b9a72…`, 0.5 PAS) and **fee** (pool → relay → burner net 0.4 PAS, relay kept
+the 0.1 fee; tx `0x16b3de…` + forward `0xcf5a7f…`).
+
 ## 8. Reproduce
 
 ```bash
