@@ -104,6 +104,13 @@ a cheaper gas price is the **ratio**: the rebate is ~0.5% of relay cost, and
 
 ## 6. Levers (what a production system needs)
 
+**Validated live (guard ON, Paseo):** with `FareOrders` v2 at
+`0xba2df454…` and `relayServiceFee(USDC)=4.25`, a fresh order settled **without
+the profit guard declining** and the relay collected the **4.25 USDC** fee. Relay
+net per order flipped **−3.39 → +0.83 USDC-equiv** (earned 4.25, paid ~0.85 PAS ≈
+3.42) — profitable at last. Splits: venue 3 · driver 1.9625 · treasury 0.0375 ·
+**relay 4.25** (Σ 9.25).
+
 **Implemented (this PR):**
 - ✅ **Flat all-in relay service fee in USDC** — `FareOrders.relayServiceFee[token]`,
   a governance-set flat amount the customer escrows on top of orderValue+tip and

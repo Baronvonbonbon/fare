@@ -162,7 +162,7 @@ async function setup() {
   saveState(st);
   console.log(`\n✅ setup done. venueId=${st.venueId}. Now launch the relay:\n`);
   console.log(`   RELAY_PRIVATE_KEY=${st.wallets.relay.privateKey} \\`);
-  console.log(`   RELAY_RPC_URL=${RPC} RELAY_PROFIT_GUARD=off RELAY_TOKEN_PRICE=0.2496 \\`);
+  console.log(`   RELAY_RPC_URL=${RPC} RELAY_TOKEN_PRICE=0.2496 \\  # guard ON: the 4.25 USDC service fee covers gas`);
   console.log(`   SHIELD_POOL=${KS_POOL} SHIELD_FEE_PAS=0 \\`);
   console.log(`   node venue-node/relay.mjs\n   then: node scripts/e2e-fresh-shielded.mjs deliver`);
 }
@@ -192,8 +192,14 @@ async function deliver() {
     "function createOrderERC20(address,uint64,bytes32,uint96,uint96,uint96,uint64,uint64) returns(uint256)",
     "function placeBid(uint256,uint96)", "function acceptBidERC20(uint256,address)",
     "function statusOf(uint256) view returns(uint8)", "function treasury() view returns(address)",
+    "function relayServiceFee(address) view returns(uint96)",
     "event OrderCreated(uint256 indexed orderId, address indexed customer, uint64 indexed venueId, uint96 orderValue, uint96 tip, uint96 maxFare, bytes32 dropCommit)",
   ], prov);
+  // The flat relay service fee (F6-flat) is escrowed on top of orderValue+tip, so
+  // the burner must swap for it too. Read it live so the e2e tracks governance.
+  const serviceFee = await orders.relayServiceFee(USDC_1337);
+  const need = NEED_USDC + serviceFee; // orderValue + tip + fare + serviceFee
+  console.log(`relay service fee (F6-flat): ${fmt6(serviceFee)} USDC → burner escrows ${fmt6(need)} total`);
   const vault = new ethers.Contract(b.vault, ["function tokenBalanceOf(address,address) view returns(uint256)", "function withdrawToken(address)"], prov);
 
   try {
@@ -223,20 +229,20 @@ async function deliver() {
     console.log(`   burner PAS: ${fmtP(await prov.getBalance(burner.address))} (shielded, unlinked to main)`);
 
     // ── 3. burner coverage-swaps PAS → USDC(1337) via the swap.mjs rail ───────
-    console.log(`\n3. coverage swap: burner PAS → ${fmt6(NEED_USDC)} USDC (RUNTIME_PALLETS_ADDR)`);
+    console.log(`\n3. coverage swap: burner PAS → ${fmt6(need)} USDC (RUNTIME_PALLETS_ADDR)`);
     const price = await priceNativePerToken(1337, 6, { api });
-    const plan = planCoverage({ haveNativeWei: await prov.getBalance(burner.address), needTokenWei: NEED_USDC, gasReserveNativeWei: ethers.parseEther("3"), tokenDecimals: 6, nativeDecimals: 18, price });
+    const plan = planCoverage({ haveNativeWei: await prov.getBalance(burner.address), needTokenWei: need, gasReserveNativeWei: ethers.parseEther("3"), tokenDecimals: 6, nativeDecimals: 18, price });
     if (!plan?.ok) throw new Error(`coverage plan failed: ${JSON.stringify(plan)}`);
     const swres = await executeSwap(plan, { signer: burner, assetId: 1337, api, gasLimit: 2_000_000n });
-    await rec(prov, "burner", "coverageSwap PAS→USDC", swres.txHash, { usdc: NEED_USDC });
+    await rec(prov, "burner", "coverageSwap PAS→USDC", swres.txHash, { usdc: need });
     console.log(`   burner USDC: ${fmt6(await USDC.balanceOf(burner.address))}  PAS: ${fmtP(await prov.getBalance(burner.address))}`);
 
     // ── 4. burner approves Orders for USDC (direct; gas from shielded PAS) ────
     // Approve the exact escrow total: the asset-1337 ERC20 precompile is backed by
     // pallet-assets, whose approval amount is a u128 — MaxUint256 overflows it and
     // reverts. createOrder pulls orderValue+tip, acceptBid pulls fare → NEED_USDC.
-    console.log(`\n4. burner approve(Orders) ${fmt6(NEED_USDC)} USDC`);
-    const ap = await USDC.connect(burner).approve(b.orders, NEED_USDC, { gasLimit: 500_000n });
+    console.log(`\n4. burner approve(Orders) ${fmt6(need)} USDC`);
+    const ap = await USDC.connect(burner).approve(b.orders, need, { gasLimit: 500_000n });
     const aprc = await rec(prov, "burner", "USDC.approve(orders)", ap.hash);
     if (aprc.status !== 1) throw new Error("approve reverted");
 
