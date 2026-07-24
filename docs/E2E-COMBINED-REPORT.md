@@ -63,7 +63,12 @@ ways to close it:
 2. **Mainnet:** real USDC needs an unlinked source — a **USDC-shielding path**
    (a multi-asset KS deposit, or a confidential-transfer asset). Native-PAS KS
    shields the gas but not the value. This is the one genuinely-new mainnet gap
-   the combined flow exposes.
+   the combined flow exposes. → **Closed without a new pool** by the
+   asset-conversion coverage layer (`venue-node/swap.mjs`): shield **PAS**, then
+   have the burner swap PAS→USDC locally for the escrow, so the USDC's source is a
+   burner-side swap of shielded PAS, not `main`. Residual: the swap **amount** still
+   reveals the fare value (identity hidden). See
+   [RELAY-TREASURY.md](RELAY-TREASURY.md) "Asset-conversion coverage layer".
 
 **Same caveats as the native shielded run** ([E2E-SHIELDED-DELIVERY-REPORT.md](E2E-SHIELDED-DELIVERY-REPORT.md) §5):
 the gas shielding used the last-leaf immediate deposit→withdraw pattern
