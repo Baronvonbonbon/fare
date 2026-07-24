@@ -22,9 +22,29 @@ export function withdrawFeeWei(balanceWei, withdrawFeeBps) {
 
 /// reward ≥ cost × margin, evaluated in integer wei (margin is a float like
 /// 1.25; scaled by 1000 so we never do float math on wei).
+///
+/// IMPORTANT: `reward` and `cost` must be in the SAME currency. For a TOKEN
+/// order the F6 rebate is in the order token (e.g. USDC, 6-dp) while gas is in
+/// native (PAS, 18-dp) — convert the rebate with `tokenToNativeWei` first, else
+/// the comparison is meaningless (different currency AND decimals).
 export function coversCost(rewardWei, costWei, margin) {
   const m = BigInt(Math.round(margin * 1000));
   return BigInt(rewardWei) * 1000n >= BigInt(costWei) * m;
+}
+
+/// Value a token amount (in the token's smallest units) in NATIVE wei, given the
+/// price of 1 whole token in native as a fraction (priceNum/priceDen) and both
+/// decimals. This is what lets the relay compare a USDC-denominated rebate
+/// against PAS gas: the price comes from a Hydration/Paraspell quote (or a
+/// configured fallback rate) — see treasury.mjs. Pure integer math.
+///   nativeWei = tokenWei · (priceNum/priceDen) · 10^(nativeDecimals − tokenDecimals)
+export function tokenToNativeWei(tokenWei, tokenDecimals, nativeDecimals, priceNum, priceDen) {
+  let n = BigInt(tokenWei) * BigInt(priceNum);
+  let d = BigInt(priceDen);
+  const shift = BigInt(nativeDecimals) - BigInt(tokenDecimals);
+  if (shift >= 0n) n *= 10n ** shift;
+  else d *= 10n ** -shift;
+  return d === 0n ? 0n : n / d;
 }
 
 /// Rolling-window subsidy budget: does `costWei` still fit under `budgetWei`

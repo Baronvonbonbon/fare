@@ -28,6 +28,7 @@ import { readFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { JsonRpcProvider, Wallet, Contract, Interface, parseEther, formatEther, isAddress, keccak256, solidityPacked } from "ethers";
 import { rebateWei, withdrawFeeWei, coversCost, withinBudget, windowSpent } from "./economics.mjs";
+import { rebateInNative } from "./treasury.mjs";
 
 const PORT = Number(process.env.RELAY_PORT || 8788);
 // A single-signer relay keeps ONE provider (nonce safety — no fallback quorum on
@@ -156,7 +157,7 @@ const contextFor = (addr) => BigInt(keccak256(solidityPacked(["address"], [addr]
 // ── Reward reads + calldata decoding for the profitability guard ─────────────
 const ordersAddr = process.env.ORDERS_ADDRESS || addr.orders;
 const ORDERS_READ_ABI = [
-  "function orders(uint256) view returns (address customer, uint64 venueId, uint8 status, address driver, uint96 orderValue, uint96 tip, uint96 fare, uint96 maxFare, uint96 escrow, bytes32 dropCommit, uint64 createdAt, uint64 pickupWindowSecs, uint64 deliveryWindowSecs, uint64 pickupDeadline, uint64 deliveryDeadline)",
+  "function orders(uint256) view returns (address customer, uint64 venueId, uint8 status, address driver, uint96 orderValue, uint96 tip, uint96 fare, uint96 maxFare, uint96 escrow, bytes32 dropCommit, uint64 createdAt, uint64 pickupWindowSecs, uint64 deliveryWindowSecs, uint64 pickupDeadline, uint64 deliveryDeadline, address token)",
   "function feeBps() view returns (uint16)",
   "function relayRebateBps() view returns (uint16)",
   // forwardable order actions — used to decode a /forward request's orderId
@@ -218,11 +219,29 @@ async function estCostWei(estimateFn, fallbackGas) {
   try { gas = await estimateFn(); } catch { gas = fallbackGas; }
   return gas * (await feePerGasWei());
 }
+// token decimals cache (for currency-aware rebate valuation)
+const ZERO = "0x0000000000000000000000000000000000000000";
+const NATIVE_DECIMALS = 18;
+const _dec = new Map();
+async function tokenDecimals(token) {
+  if (_dec.has(token)) return _dec.get(token);
+  let d = 18;
+  try { d = Number(await new Contract(token, ["function decimals() view returns (uint8)"], provider).decimals()); } catch {}
+  _dec.set(token, d); return d;
+}
+/// The relay's F6 rebate for settling an order, valued in NATIVE wei (so it can
+/// be compared to native gas). Native orders: rebate already native. TOKEN orders
+/// (gasless): the rebate is in the token — value it in native via the swap price
+/// (RELAY_TOKEN_PRICE / a live Hydration quote). Returns null when a token order
+/// has no price → the caller must DECLINE (it can't prove the fee covers gas).
 async function rebateForOrder(orderId) {
   if (!orders) return 0n;
   try {
     const [o, feeBps, rebBps] = await Promise.all([orders.orders(orderId), orders.feeBps(), orders.relayRebateBps()]);
-    return rebateWei(o.fare, feeBps, rebBps);
+    const rebate = rebateWei(o.fare, feeBps, rebBps);
+    if (!o.token || o.token === ZERO) return rebate; // native — same currency as gas
+    const dec = await tokenDecimals(o.token);
+    return rebateInNative(rebate, dec, NATIVE_DECIMALS, null); // null price → config RELAY_TOKEN_PRICE
   } catch { return 0n; }
 }
 async function withdrawFeeForAccount(account) {
@@ -427,7 +446,12 @@ const server = http.createServer(async (req, res) => {
         // Reward-bearing: the F6 rebate must cover the fare's CUMULATIVE relayed
         // gas (pickup + bids already recorded, + this dropoff) × margin.
         const cumulative = (gasSpent.get(String(orderId)) ?? 0n) + cost;
-        const rebate = await rebateForOrder(orderId);
+        const rebate = await rebateForOrder(orderId); // valued in NATIVE (null = token order w/ no price)
+        if (PROFIT_GUARD && rebate === null) {
+          return decline(res, "no price to value the token rebate in native", {
+            action: "settle", hint: "set RELAY_TOKEN_PRICE (native per token) or enable Hydration swaps (SWAP_ENABLED)",
+          }, origin);
+        }
         if (PROFIT_GUARD && !coversCost(rebate, cumulative, MIN_MARGIN)) {
           return decline(res, "fare reward below relayed cost", {
             action: "settle", rebate: formatEther(rebate), cost: formatEther(cumulative), margin: MIN_MARGIN,

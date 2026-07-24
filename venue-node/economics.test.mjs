@@ -1,9 +1,22 @@
 // Relay profitability-guard math (F6/F8). Run: npm test (node --test, no deps).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { rebateWei, withdrawFeeWei, coversCost, withinBudget, windowSpent } from "./economics.mjs";
+import { rebateWei, withdrawFeeWei, coversCost, withinBudget, windowSpent, tokenToNativeWei } from "./economics.mjs";
 
 const PAS = (n) => BigInt(Math.round(n * 1e6)) * (10n ** 12n); // n PAS → wei (18dp)
+const USDC = (n) => BigInt(Math.round(n * 1e6)); // n USDC → wei (6dp)
+
+test("tokenToNativeWei: value a USDC rebate in PAS at a price (the currency fix)", () => {
+  // 1 USDC = 0.5 PAS.  0.01875 USDC → 0.009375 PAS.
+  assert.equal(tokenToNativeWei(USDC(0.01875), 6, 18, 1n, 2n), PAS(0.009375));
+  // 1 USDC = 4 PAS.  1 USDC → 4 PAS (decimals bridged 6→18).
+  assert.equal(tokenToNativeWei(USDC(1), 6, 18, 4n, 1n), PAS(4));
+  // same decimals, price 1 → identity
+  assert.equal(tokenToNativeWei(1000n, 18, 18, 1n, 1n), 1000n);
+  // this is what the guard now compares: a token rebate valued in native vs gas.
+  // 0.01875 USDC @ 1 USDC=0.5 PAS = 0.009375 PAS; against ~0.088 PAS gas → does NOT cover.
+  assert.equal(coversCost(tokenToNativeWei(USDC(0.01875), 6, 18, 1n, 2n), PAS(0.088), 1.0), false);
+});
 
 test("rebateWei: fare · feeBps · relayRebateBps / 1e8 (deployed 250/2000)", () => {
   // 0.4 PAS fare, 2.5% fee, 20% rebate → 0.4 · 0.025 · 0.20 = 0.002 PAS
