@@ -70,6 +70,20 @@ live swap needs the accepted stablecoin swapped to a genuine Asset Hub asset
 throws an explicit error (it never silently no-ops moving money), the pricing +
 planning run and are tested, and `RELAY_TOKEN_PRICE` feeds the guard.
 
+**Progress (2026-07-24):** real Asset Hub USDC (**asset 1337**, ERC-20 precompile
+`0x0000053900000000000000000000000001200000`, 6-dp) is **accepted** as a FARE
+escrow token on the upgraded orders — it exists on Passet Hub (~250M supply) and,
+being a real pallet-assets asset, is **XCM-transferable** (unlike MockUSDC). USDt
+(asset 1984) `0x000007C000000000000000000000000001200000` is also present. Two
+caveats found: (a) the precompile is a **bare IERC20 — no `permit()`** even on
+mainnet, so real-asset gasless orders use the **approve path**, not
+`createOrderERC20WithPermit`; (b) **no open faucet** on Passet Hub (deployer
+balance 0) — sourcing a balance needs the Hydration Discord faucet (`/drip`, on
+Hydration's testnet) or a PAS→stablecoin swap. `scripts/hydration-swap.mjs` is the
+test script for the latter (Paraspell XCM Router; quote mode is read-only, swap
+mode needs a funded substrate sr25519 signer). Note: Paraspell's Hydration
+exchange needs `@galacticcouncil/api-augment` + deduped `@polkadot/types`.
+
 **To go live:** (1) accept a real Asset Hub asset as the FARE stablecoin;
 (2) `npm i @paraspell/xcm-router` (+ its Wasm/augment deps) in `venue-node`;
 (3) verify the Asset Hub XCM-precompile interface + wire `executeSwap` to build
