@@ -90,6 +90,38 @@ exchange needs `@galacticcouncil/api-augment` + deduped `@polkadot/types`.
 via Paraspell and submit via the precompile from the relay account; (4) set
 `SWAP_ENABLED=on` + the gas thresholds.
 
+## Better path found: swap LOCALLY on Asset Hub's native DEX (no XCM)
+
+Investigating "run the swap through Paseo" surfaced a simpler answer than the
+Hydration/XCM round-trip:
+
+- **FARE's chain (chainId 420420417) IS Paseo Asset Hub** — Paraspell's
+  `AssetHubPaseo` (by mid-2026 Paseo Asset Hub runs pallet-revive; the earlier
+  "Passet Hub is a separate isolated chain" worry was wrong). So it's a fully
+  XCM-/DEX-routable chain, not an island.
+- **Paseo Asset Hub has a NATIVE DEX** — Paraspell lists `AssetHubPaseoDex` (the
+  `asset-conversion` pallet). So **PAS ↔ USDC can swap on FARE's own chain, with
+  no XCM, no Hydration, and no mod-gated Discord.** This is the cleanest
+  fee-recovery *and* balance-sourcing path, and it's the mainnet answer too
+  (Polkadot Asset Hub has `asset-conversion`).
+- **The XCM precompile** (for the cross-chain fallback) is at
+  `0x00000000000000000000000000000000000a0000` — `execute(bytes,Weight)` /
+  `send(bytes,bytes)` / `weighMessage(bytes)`, SCALE-encoded messages.
+- **The Paseo faucet is OPEN** (Matrix/web, per-parachain target) — unlike
+  Hydration's Discord `/drip` (mod-gated). It funds PAS, which the local DEX then
+  swaps to USDC.
+
+**Recommended pivot:** target the **local `asset-conversion` DEX** for PAS↔USDC
+instead of Hydration/XCM. Two things to confirm/build: (1) a PAS↔USDC pool with
+liquidity on the Paseo AH `asset-conversion` DEX (Paraspell's live calls hang on
+testnet RPC — query the pallet directly with polkadot-api, or the DEX precompile
+if one is exposed); (2) execution — an `asset-conversion` precompile callable from
+the EVM relay (local swap, no XCM precompile needed) if it exists, else a
+Paseo-faucet-funded substrate signer. `scripts/hydration-swap.mjs` keeps the
+Hydration route as the cross-chain fallback (identifiers: `AssetHubPaseo`,
+exchange `HydrationDex`; needs `@galacticcouncil/api-augment` + a `@polkadot/types`
+dedupe, and the Hydration testnet RPC is flaky).
+
 ## Config (`venue-node/.env`)
 
 | Var | Meaning |
