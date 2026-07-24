@@ -14,6 +14,7 @@ export const ORDERS_ABI = [
   // Stablecoin (ERC-20) escrow variants (C3). Value-in via transferFrom, so the
   // customer must approve the orders contract first; escrow settles in `token`.
   "function createOrderERC20(address token, uint64 venueId, bytes32 dropCommit, uint96 orderValue, uint96 tip, uint96 maxFare, uint64 pickupWindowSecs, uint64 deliveryWindowSecs) returns (uint256)",
+  "function createOrderERC20WithPermit(address token, uint64 venueId, bytes32 dropCommit, uint96 orderValue, uint96 tip, uint96 maxFare, uint64 pickupWindowSecs, uint64 deliveryWindowSecs, uint256 permitValue, uint256 permitDeadline, uint8 v, bytes32 r, bytes32 s) returns (uint256)",
   "function acceptBidERC20(uint256 orderId, address driver)",
   "function increaseTipERC20(uint256 orderId, uint96 amount)",
   "function acceptedToken(address) view returns (bool)",

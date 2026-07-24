@@ -53,12 +53,12 @@ import {
   emptyMenu, newItemId, publishMenu, hasMenuURI,
 } from "./menu";
 import { proveProximity, positionCommit } from "./zk";
-import { sponsorGas, relaySettle, relayForward, relayWithdraw, ensureGas, activeRelayUrl, sponsorOnboarding } from "./relay";
+import { sponsorGas, relaySettle, relayForward, relayWithdraw, ensureGas, activeRelayUrl, sponsorOnboarding, fundBurner, forwarderAvailable } from "./relay";
 import { initShieldedFunder } from "./shield";
 import { usePasUsd, cachedRate, fiatOf, pasToUsd, formatUsd } from "./pricing";
 import {
   tokenOrdersEnabled, stablecoinAsset, assetOf, fmtAsset, parseAsset,
-  mintStablecoin, approveToken, stablecoinBalance,
+  mintStablecoin, approveToken, stablecoinBalance, gaslessCreateOrderERC20,
 } from "./token";
 import { MicroDeg, distanceMeters, fmtCoord, fmtDist, getPosition, snapToGrid } from "./geo";
 import { QRScan, QRShow } from "./qr";
@@ -183,21 +183,28 @@ async function placeOrder(opts: {
   const isToken = !!token && token !== ZeroAddress;
   return act("Create order", async () => {
     const w = newOrderWallet();
-    say("New private wallet — funding from faucet…");
-    await sponsorGas(w.address);
+    // KS-ONLY funding: the burner is funded solely through the Kusama Shield pool
+    // (no faucet), so no non-shielded on-chain edge re-links it to the customer.
+    // `fundBurner` throws if shielded funding isn't configured — there is no
+    // faucet fallback anymore.
+    say("Funding the private wallet through the shielded pool…");
     if (isToken) {
-      // Token order: the burner only needs gas from the faucet; it self-mints
-      // its stablecoin escrow (testnet MockUSDC), then approves + creates. No
-      // link to the customer's main wallet (mainnet: shielded funding, C4).
-      await waitForFunding(w.address, parse("0.3"));
+      // Token order: the burner needs only a little gas (for the stablecoin mint);
+      // the order itself is GASLESS (Option C) — permit + forwarded creation, the
+      // relay pays. Escrow value is the stablecoin.
+      await fundBurner(w.address, parse("0.5"));
       say("Minting stablecoin escrow to the private wallet…");
       await mintStablecoin(w, w.address, escrow);
+      if (forwarderAvailable()) {
+        return gaslessCreateOrderERC20(contracts(w).orders, token!, {
+          venueId, dropCommit: commit, orderValue: orderValueWei, tip: tipWei, maxFare: maxFareWei,
+        });
+      }
+      // No forwarder → the (KS-funded) burner pays its own gas the direct way.
       await approveToken(w, token!, ADDRESSES.orders, escrow);
-      return contracts(w).orders.createOrderERC20(
-        token!, venueId, commit, orderValueWei, tipWei, maxFareWei, 0, 0
-      );
+      return contracts(w).orders.createOrderERC20(token!, venueId, commit, orderValueWei, tipWei, maxFareWei, 0, 0);
     }
-    await waitForFunding(w.address, escrow + parse("0.2"));
+    await fundBurner(w.address, escrow + parse("0.2"));
     return contracts(w).orders.createOrder(
       venueId, commit, orderValueWei, tipWei, maxFareWei, 0, 0, { value: escrow }
     );

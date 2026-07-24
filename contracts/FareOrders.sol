@@ -6,6 +6,7 @@ import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/utils/Context.sol";
 import "@openzeppelin/contracts/metatx/ERC2771Context.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "@openzeppelin/contracts/token/ERC20/extensions/IERC20Permit.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "./interfaces/IFare.sol";
 import "./lib/FareUpgradable.sol";
@@ -239,7 +240,9 @@ contract FareOrders is Ownable2Step, ReentrancyGuard, FareUpgradable, ERC2771Con
         uint64 deliveryWindowSecs
     ) external payable whenNotPaused whenNotFrozen returns (uint256 orderId) {
         require(msg.value == uint256(orderValue) + tip, "bad-value");
-        orderId = _open(venueId, dropCommit, orderValue, tip, maxFare, pickupWindowSecs, deliveryWindowSecs, address(0));
+        // Native value function: read msg.sender directly (a relay must never
+        // front msg.value), so this stays on the gas-sponsored funded path.
+        orderId = _open(msg.sender, venueId, dropCommit, orderValue, tip, maxFare, pickupWindowSecs, deliveryWindowSecs, address(0));
     }
 
     /// @notice Stablecoin-escrowed order (C3): identical to `createOrder` but the
@@ -256,17 +259,63 @@ contract FareOrders is Ownable2Step, ReentrancyGuard, FareUpgradable, ERC2771Con
         uint64 pickupWindowSecs,
         uint64 deliveryWindowSecs
     ) external whenNotPaused whenNotFrozen returns (uint256 orderId) {
+        // Token value function: escrow is pulled via transferFrom from the
+        // customer's OWN balance, so a relay forwarding this never fronts value —
+        // hence it reads _msgSender() and IS gaslessly meta-forwardable (Option C).
+        orderId = _openERC20(_msgSender(), token, venueId, dropCommit, orderValue, tip, maxFare, pickupWindowSecs, deliveryWindowSecs);
+    }
+
+    /// @notice Gasless stablecoin order (Option C): identical to createOrderERC20
+    ///         but carries an EIP-2612 permit so the customer never needs a
+    ///         separate approve tx — sign the permit off-chain, the relay forwards
+    ///         this, and the whole order is gas-free for the customer. Permit is
+    ///         best-effort (try/catch): a front-run permit that already set the
+    ///         allowance doesn't brick the order. Set `permitValue` high (e.g.
+    ///         type(uint256).max) so it also covers the later acceptBidERC20/tips.
+    function createOrderERC20WithPermit(
+        address token,
+        uint64 venueId,
+        bytes32 dropCommit,
+        uint96 orderValue,
+        uint96 tip,
+        uint96 maxFare,
+        uint64 pickupWindowSecs,
+        uint64 deliveryWindowSecs,
+        uint256 permitValue,
+        uint256 permitDeadline,
+        uint8 v,
+        bytes32 r,
+        bytes32 s
+    ) external whenNotPaused whenNotFrozen returns (uint256 orderId) {
+        address customer = _msgSender();
+        try IERC20Permit(token).permit(customer, address(this), permitValue, permitDeadline, v, r, s) {} catch {}
+        orderId = _openERC20(customer, token, venueId, dropCommit, orderValue, tip, maxFare, pickupWindowSecs, deliveryWindowSecs);
+    }
+
+    /// @dev Shared ERC-20 open: pull escrow from `customer` and record the order.
+    function _openERC20(
+        address customer,
+        address token,
+        uint64 venueId,
+        bytes32 dropCommit,
+        uint96 orderValue,
+        uint96 tip,
+        uint96 maxFare,
+        uint64 pickupWindowSecs,
+        uint64 deliveryWindowSecs
+    ) internal returns (uint256 orderId) {
         require(acceptedToken[token], "token-not-accepted");
-        // orderValue + tip may be 0 for a fare-only order (paid off-chain / no
-        // tip) — the fare is escrowed in-token later at acceptBidERC20.
+        // orderValue + tip may be 0 for a fare-only order — the fare is escrowed
+        // in-token later at acceptBidERC20.
         uint256 escrow = uint256(orderValue) + tip;
-        if (escrow > 0) IERC20(token).safeTransferFrom(msg.sender, address(this), escrow);
-        orderId = _open(venueId, dropCommit, orderValue, tip, maxFare, pickupWindowSecs, deliveryWindowSecs, token);
+        if (escrow > 0) IERC20(token).safeTransferFrom(customer, address(this), escrow);
+        orderId = _open(customer, venueId, dropCommit, orderValue, tip, maxFare, pickupWindowSecs, deliveryWindowSecs, token);
     }
 
     /// @dev Shared order-open logic; the caller has already collected the escrow
     ///      (native msg.value or an ERC-20 transferIn) equal to orderValue + tip.
     function _open(
+        address customer,
         uint64 venueId,
         bytes32 dropCommit,
         uint96 orderValue,
@@ -287,7 +336,7 @@ contract FareOrders is Ownable2Step, ReentrancyGuard, FareUpgradable, ERC2771Con
 
         orderId = nextOrderId++;
         Order storage o = orders[orderId];
-        o.customer = msg.sender;
+        o.customer = customer;
         o.venueId = venueId;
         o.status = Status.Open;
         o.orderValue = orderValue;
@@ -300,7 +349,7 @@ contract FareOrders is Ownable2Step, ReentrancyGuard, FareUpgradable, ERC2771Con
         o.deliveryWindowSecs = dw;
         o.token = token;
 
-        emit OrderCreated(orderId, msg.sender, venueId, orderValue, tip, maxFare, dropCommit);
+        emit OrderCreated(orderId, customer, venueId, orderValue, tip, maxFare, dropCommit);
 
         // Localized discovery: region is the LEADING indexed topic so clients
         // can server-side filter by it (Paseo's eth-rpc can't filter a
@@ -330,14 +379,15 @@ contract FareOrders is Ownable2Step, ReentrancyGuard, FareUpgradable, ERC2771Con
     ///         order's escrow token (customer must have approved this contract).
     function increaseTipERC20(uint256 orderId, uint96 amount) external whenNotFrozen {
         Order storage o = orders[orderId];
-        require(msg.sender == o.customer, "not-customer");
+        address customer = _msgSender(); // gaslessly forwardable (Option C)
+        require(customer == o.customer, "not-customer");
         require(o.token != address(0), "use-native-tip"); // token path only
         require(
             o.status == Status.Open || o.status == Status.Assigned || o.status == Status.PickedUp,
             "bad-status"
         );
         require(amount > 0, "zero-value");
-        IERC20(o.token).safeTransferFrom(msg.sender, address(this), amount);
+        IERC20(o.token).safeTransferFrom(customer, address(this), amount);
         o.tip += amount;
         o.escrow += amount;
         emit TipIncreased(orderId, amount, o.tip);
@@ -431,7 +481,7 @@ contract FareOrders is Ownable2Step, ReentrancyGuard, FareUpgradable, ERC2771Con
     {
         Order storage o = orders[orderId];
         require(o.token == address(0), "use-erc20-accept"); // native path only
-        uint96 amount = _prepareAccept(o, orderId, driver);
+        uint96 amount = _prepareAccept(o, orderId, driver, msg.sender);
         require(msg.value == amount, "bad-value");
         _assign(o, orderId, driver, amount);
     }
@@ -446,14 +496,17 @@ contract FareOrders is Ownable2Step, ReentrancyGuard, FareUpgradable, ERC2771Con
     {
         Order storage o = orders[orderId];
         require(o.token != address(0), "use-native-accept"); // token path only
-        uint96 amount = _prepareAccept(o, orderId, driver);
-        IERC20(o.token).safeTransferFrom(msg.sender, address(this), amount);
+        // Gaslessly forwardable (Option C): transferFrom pulls the fare from the
+        // customer's own balance, so the relay never fronts value.
+        address customer = _msgSender();
+        uint96 amount = _prepareAccept(o, orderId, driver, customer);
+        IERC20(o.token).safeTransferFrom(customer, address(this), amount);
         _assign(o, orderId, driver, amount);
     }
 
     /// @dev Shared accept validation; returns the winning fare to escrow.
-    function _prepareAccept(Order storage o, uint256 orderId, address driver) internal view returns (uint96 amount) {
-        require(msg.sender == o.customer, "not-customer");
+    function _prepareAccept(Order storage o, uint256 orderId, address driver, address caller) internal view returns (uint96 amount) {
+        require(caller == o.customer, "not-customer");
         require(o.status == Status.Open, "bad-status");
         amount = bidOf[orderId][driver];
         require(amount > 0, "no-bid");
@@ -606,7 +659,12 @@ contract FareOrders is Ownable2Step, ReentrancyGuard, FareUpgradable, ERC2771Con
     // ---- EIP-2771 context (F8) ----
     // Context is inherited via both Ownable and ERC2771Context; resolve to the
     // 2771 versions so `_msgSender()` unwraps the appended sender on a forwarded
-    // call. Value functions above deliberately still read `msg.sender` directly.
+    // call. NATIVE value functions (createOrder/acceptBid/increaseTip) read
+    // `msg.sender` directly — a relay must never front `msg.value`. The TOKEN
+    // value functions (createOrderERC20[WithPermit]/acceptBidERC20/increaseTipERC20)
+    // read `_msgSender()`: their escrow is a `transferFrom` from the customer's own
+    // balance, so a forwarding relay never fronts value → they are gaslessly
+    // meta-forwardable (Option C).
 
     function _msgSender() internal view override(Context, ERC2771Context) returns (address) {
         return ERC2771Context._msgSender();

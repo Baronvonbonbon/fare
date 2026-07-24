@@ -30,3 +30,4 @@ venue-node/node_modules/
 # Kusama Shield probe scratch (ephemeral notes)
 scripts/shield/note.*.json
 scripts/shield/validate-noteB.json
+e2e-runs/

@@ -35,7 +35,7 @@ const snap = (v) => Math.round(v / 300) * 300;
 const positionCommit = (lat, lon, salt) => b32(poseidon3([encLat(lat), encLon(lon), BigInt(salt)]));
 const commitmentOf = (n) => poseidon2([poseidon2([n.value, 0n]), poseidon2([n.nullifier, n.secret])]);
 
-const OUT = path.join(ROOT, "artifacts", "e2e-combined");
+const OUT = path.join(ROOT, "e2e-runs", "e2e-combined");
 const LEDGER = path.join(OUT, "ledger.json");
 const SCRATCH = process.env.E2E_SCRATCH || "/tmp/claude-1000/-home-k-Documents-fare/b72267a7-e6ed-4ea1-a42c-ce13603eacaa/scratchpad";
 const STATE = path.join(SCRATCH, "e2e-combined-state.json");

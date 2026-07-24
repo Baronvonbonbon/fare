@@ -16,6 +16,38 @@ general-case reconstruction is validated in `web/src/shieldpool.test.ts` +
 
 The original design and the seam it dropped into follow.
 
+## Gasless stablecoin orders (Option C) + KS-only funding — IMPLEMENTED
+
+The shielded **closed loop** for a stablecoin order needs the burner to hold no
+native gas and no faucet crutch. Built + tested (contracts hardhat-tested, relay
++ web tsc/unit-tested; live upgrade pending):
+
+- **Gasless token orders (contracts).** `createOrderERC20` / `acceptBidERC20` /
+  `increaseTipERC20` now read **`_msgSender()`** (their escrow is a `transferFrom`
+  from the customer's own balance, so a forwarding relay never fronts value → safe
+  to meta-forward), and **`createOrderERC20WithPermit`** carries an EIP-2612
+  permit so there's no separate approve tx. A customer with **zero native
+  balance** places and funds a token order entirely by signatures; the relay pays
+  all gas. NATIVE `createOrder`/`acceptBid` still read `msg.sender` (a relay must
+  never front `msg.value`). Proven in `test/gasless-erc20.test.ts`.
+- **Relay economics (reuse F6).** The relay forwards the token-order actions and
+  **attributes their gas to the order** (creation gas via the `OrderCreated`
+  event) into the existing per-order cumulative; its profitability guard then
+  requires the **F6 dropoff rebate to cover that cumulative × margin** before it
+  settles. So the relay is compensated *from the order* — raise `relayRebateBps`
+  to size it. No new order field.
+- **KS-only funding (web).** The `/api/drip` + relay `/fund` faucet **fallback is
+  removed**: `fundBurner` funds a burner **solely** through the shielded pool
+  (throws if unconfigured — no faucet). `placeOrder` funds the burner via KS and
+  places the token order **gaslessly** (`gaslessCreateOrderERC20` = permit +
+  forwarder) when a relay is available.
+
+**Single tx for stable + gas?** No — a KS note is single-asset (the asset is
+bound in the commitment), so one `proxy_withdraw` pays one asset. You don't need
+to shield the gas though: shield the **USDC** (one withdrawal) and let the relay
+absorb gas (gasless order + optional bundled top-up). Shielding *both* assets
+means two notes/withdrawals. See the design discussion in the commit history.
+
 ## The problem
 
 FARE's customer privacy rests on **per-order burner wallets** (`web/src/wallets.ts`,

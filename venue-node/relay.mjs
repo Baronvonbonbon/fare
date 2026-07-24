@@ -165,10 +165,31 @@ const ORDERS_READ_ABI = [
   "function cancelOpen(uint256 orderId)",
   "function cancelAssigned(uint256 orderId)",
   "function abandonOrder(uint256 orderId)",
+  // gasless TOKEN value actions (Option C) — safe to forward (transferFrom pulls
+  // from the customer's own balance, relay never fronts value)
+  "function createOrderERC20(address token, uint64 venueId, bytes32 dropCommit, uint96 orderValue, uint96 tip, uint96 maxFare, uint64 pw, uint64 dw)",
+  "function createOrderERC20WithPermit(address token, uint64 venueId, bytes32 dropCommit, uint96 orderValue, uint96 tip, uint96 maxFare, uint64 pw, uint64 dw, uint256 permitValue, uint256 permitDeadline, uint8 v, bytes32 r, bytes32 s)",
+  "function acceptBidERC20(uint256 orderId, address driver)",
+  "function increaseTipERC20(uint256 orderId, uint96 amount)",
+  "event OrderCreated(uint256 indexed orderId, address indexed customer, uint64 indexed venueId, uint96 orderValue, uint96 tip, uint96 maxFare, bytes32 dropCommit)",
 ];
 const orders = ordersAddr ? new Contract(ordersAddr, ORDERS_READ_ABI, provider) : null;
 const ordersIface = new Interface(ORDERS_READ_ABI);
-const ORDER_ACTIONS = new Set(["placeBid", "withdrawBid", "cancelOpen", "cancelAssigned", "abandonOrder"]);
+// Actions whose orderId is arg[0] (known at forward time).
+const ORDER_ACTIONS = new Set(["placeBid", "withdrawBid", "cancelOpen", "cancelAssigned", "abandonOrder", "acceptBidERC20", "increaseTipERC20"]);
+// Create actions have NO orderId yet — attributed to the order after the tx
+// mines, by parsing OrderCreated (so the relay's per-order P&L covers the
+// gasless-order creation gas too → the F6 rebate must cover it before settling).
+const CREATE_ACTIONS = new Set(["createOrderERC20", "createOrderERC20WithPermit"]);
+function forwardFnName(request) {
+  try { return ordersIface.parseTransaction({ data: request.data })?.name ?? null; } catch { return null; }
+}
+function orderIdFromReceipt(rc) {
+  for (const log of rc?.logs ?? []) {
+    try { const p = ordersIface.parseLog(log); if (p?.name === "OrderCreated") return p.args[0]; } catch { /* not ours */ }
+  }
+  return null;
+}
 
 // ── tx serialization: chain all sends so concurrent requests don't collide on
 //    the relay account's nonce ──────────────────────────────────────────────
@@ -435,7 +456,9 @@ const server = http.createServer(async (req, res) => {
       if (BigInt(request.value ?? 0) !== 0n) return send(res, 400, { error: "value must be 0 (relay never fronts escrow)" }, origin);
       if (!FORWARD_TARGETS.has(String(request.to).toLowerCase())) return send(res, 400, { error: "target not allowlisted" }, origin);
       // No-reward action → subsidy-budget gated; track per-order so the eventual
-      // dropoff P&L accounts for it (bids/cancels; rate isn't an order action).
+      // dropoff P&L accounts for it (bids/cancels/accept/tip; rate isn't an order
+      // action; a create's order id is learned from the receipt below).
+      const fnName = forwardFnName(request);
       const orderId = forwardOrderId(request);
       const cost = await estCostWei(() => forwarder.execute.estimateGas(request), GAS_FORWARD);
       if (PROFIT_GUARD && !budgetRoom(cost)) return decline(res, "subsidy budget exhausted", { action: "forward" }, origin);
@@ -444,8 +467,12 @@ const server = http.createServer(async (req, res) => {
         return forwarder.execute(request, { gasLimit: GAS_FORWARD, nonce });
       });
       recordBudget(cost);
-      recordOrderGas(orderId, cost);
-      return send(res, 200, { forwarded: true, txHash: tx.hash, from: request.from }, origin);
+      if (orderId != null) recordOrderGas(orderId, cost);
+      else if (CREATE_ACTIONS.has(fnName)) {
+        // attribute the creation gas once the order id is known (non-blocking)
+        tx.wait?.().then((rc) => recordOrderGas(orderIdFromReceipt(rc), cost)).catch(() => {});
+      }
+      return send(res, 200, { forwarded: true, txHash: tx.hash, from: request.from, fn: fnName }, origin);
     }
 
     // ── Relay a gasless withdrawal (F8) ──────────────────────────────────────

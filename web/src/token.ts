@@ -9,8 +9,9 @@
 // additive-contract pattern as ratings.
 
 import { Contract, ethers } from "ethers";
-import { ADDRESSES, readProvider } from "./chain";
+import { ADDRESSES, readProvider, CHAIN_ID } from "./chain";
 import { ERC20_ABI } from "./abi";
+import { relayForward } from "./relay";
 
 export interface Asset {
   address: string; // address(0) for native
@@ -91,6 +92,53 @@ export async function approveToken(
   const c = new Contract(token, ERC20_ABI, signer);
   const tx = await c.approve(spender, amount);
   await tx.wait();
+}
+
+/// Sign an EIP-2612 permit (owner → spender) for a token, so no separate approve
+/// tx is needed. Returns the split signature + deadline for a *WithPermit call.
+export async function signTokenPermit(
+  signer: ethers.Signer,
+  token: string,
+  spender: string,
+  value: bigint,
+  ttlSecs = 3600
+): Promise<{ v: number; r: string; s: string; deadline: bigint; value: bigint }> {
+  const c = new Contract(token, [
+    "function name() view returns (string)",
+    "function nonces(address) view returns (uint256)",
+  ], readProvider);
+  const owner = await signer.getAddress();
+  const [name, nonce] = await Promise.all([c.name(), c.nonces(owner)]);
+  const deadline = BigInt(Math.floor(Date.now() / 1000) + ttlSecs);
+  const sig = await (signer as any).signTypedData(
+    { name, version: "1", chainId: CHAIN_ID, verifyingContract: token },
+    { Permit: [
+      { name: "owner", type: "address" }, { name: "spender", type: "address" },
+      { name: "value", type: "uint256" }, { name: "nonce", type: "uint256" }, { name: "deadline", type: "uint256" },
+    ] },
+    { owner, spender, value, nonce, deadline }
+  );
+  const { v, r, s } = ethers.Signature.from(sig);
+  return { v, r, s, deadline, value };
+}
+
+/// Gasless stablecoin order (Option C): the customer signs a permit + a
+/// ForwardRequest and the relay pays ALL gas — no native PAS needed. `orders` is
+/// the burner-signer-bound FareOrders handle. Returns a tx-like object (.wait()).
+export async function gaslessCreateOrderERC20(
+  orders: any,
+  token: string,
+  p: { venueId: bigint; dropCommit: string; orderValue: bigint; tip: bigint; maxFare: bigint; pickupWindowSecs?: number; deliveryWindowSecs?: number }
+): Promise<{ hash?: string; wait: () => Promise<any> }> {
+  const permit = await signTokenPermit(orders.runner, token, ADDRESSES.orders, ethers.MaxUint256);
+  const args = [
+    token, p.venueId, p.dropCommit, p.orderValue, p.tip, p.maxFare,
+    p.pickupWindowSecs ?? 0, p.deliveryWindowSecs ?? 0,
+    permit.value, permit.deadline, permit.v, permit.r, permit.s,
+  ];
+  // relayForward encodes + signs the ForwardRequest and posts /forward; the relay
+  // pays gas. (Falls back to a direct call only if no forwarder is configured.)
+  return relayForward("orders", orders, "createOrderERC20WithPermit", args);
 }
 
 /// A signer-bound stablecoin balance read.

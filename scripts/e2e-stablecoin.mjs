@@ -30,7 +30,7 @@ const DRIVER_DROPOFF = { lat: 37_785_200, lon: -122_419_400 };
 const snap = (v) => Math.round(v / 300) * 300;
 const positionCommit = (lat, lon, salt) => b32(poseidon3([encLat(lat), encLon(lon), BigInt(salt)]));
 
-const OUT = path.join(ROOT, "artifacts", "e2e-stablecoin");
+const OUT = path.join(ROOT, "e2e-runs", "e2e-stablecoin");
 const LEDGER = path.join(OUT, "ledger.json");
 const STATE = path.join(process.env.E2E_SCRATCH || "/tmp/claude-1000/-home-k-Documents-fare/b72267a7-e6ed-4ea1-a42c-ce13603eacaa/scratchpad", "e2e-stablecoin-state.json");
 const loadSt = () => (fs.existsSync(STATE) ? JSON.parse(fs.readFileSync(STATE, "utf8")) : {});

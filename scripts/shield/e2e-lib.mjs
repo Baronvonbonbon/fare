@@ -10,7 +10,7 @@ export const ROOT = path.join(__dirname, "..", "..");
 export const SCRATCH =
   process.env.E2E_SCRATCH ||
   "/tmp/claude-1000/-home-k-Documents-fare/b72267a7-e6ed-4ea1-a42c-ce13603eacaa/scratchpad";
-export const OUT = path.join(ROOT, "artifacts", "e2e-live");
+export const OUT = path.join(ROOT, "e2e-runs", "e2e-live");
 export const STATE_FILE = path.join(SCRATCH, "e2e-state.json");
 export const LEDGER_FILE = path.join(OUT, "ledger.json");
 

@@ -6,7 +6,7 @@
 // the central faucet + direct submission, so nothing breaks without a relay.
 
 import { ethers } from "ethers";
-import { requestDrip, sendProvider, readProvider, nativeBalance, CHAIN_ID, ADDRESSES, type DripResult } from "./chain";
+import { sendProvider, readProvider, nativeBalance, CHAIN_ID, ADDRESSES, type DripResult } from "./chain";
 import { relayPool } from "./pool";
 import { shieldedFundingAvailable, fundViaShield } from "./shield";
 
@@ -103,37 +103,35 @@ export async function ensureGas(address: string, minWei: bigint): Promise<boolea
   return false; // submitted but not yet observed; caller may still proceed/retry
 }
 
-/// Fund a fresh per-order burner with `amountWei` (escrow + gas) for a value
-/// action. Prefers the shielded path (C4) when a funder is installed — no
-/// `main → burner` on-chain link — and falls back to the sponsored faucet/relay
-/// drip otherwise. Today no shielded funder is registered (see shield.ts +
-/// docs/SHIELDED-FUNDING.md), so this is exactly `ensureGas`; the C4 backend
-/// makes it un-linkable by dropping in behind this one seam.
+/// Fund a fresh per-order burner with `amountWei` through the SHIELDED pool ONLY
+/// (C4). The non-KS faucet fallback has been removed: a burner is fundable solely
+/// via Kusama Shield, so there is never a non-shielded on-chain funding edge to
+/// re-link it to the customer. Throws if no shielded funder is installed — the
+/// caller must deposit into the pool first (there is no faucet to fall back to).
 export async function fundBurner(address: string, amountWei: bigint): Promise<boolean> {
-  if (shieldedFundingAvailable()) {
-    try {
-      const r = await fundViaShield(address, amountWei);
-      if (r.funded) return true;
-    } catch {
-      /* shielded funder unusable → fall back to the sponsored drip */
-    }
+  if (!shieldedFundingAvailable()) {
+    throw new Error(
+      "shielded funding unavailable — burner funding is KS-only (the faucet path was removed). Deposit into the shielded pool first."
+    );
   }
-  return ensureGas(address, amountWei);
+  const r = await fundViaShield(address, amountWei);
+  return !!r.funded;
 }
 
-/// Sponsor gas for `address`: venue relay first, central faucet as fallback.
-/// Returns the same shape as requestDrip so existing call sites are unchanged.
+/// Sponsor GAS (not escrow) for `address` via the region relay's `/fund`. The
+/// central `/api/drip` faucet has been removed (KS-only funding); and with
+/// gasless token orders (Option C) a burner needs no native gas at all. Returns
+/// an unfunded result if no region relay is reachable — there is no faucet.
 export async function sponsorGas(address: string): Promise<DripResult> {
   if (activeRelayUrl()) {
     try {
       const r = await relayFund(address);
-      // A definitive answer (funded / already-sufficient) short-circuits the faucet.
       if (r.funded || r.reason === "sufficient") return r;
     } catch {
-      /* relay unreachable → fall back */
+      /* relay unreachable */
     }
   }
-  return requestDrip(address);
+  return { funded: false, reason: "no-faucet (KS-only funding)" };
 }
 
 /// Sponsored onboarding (Route A): ask the region relay to SEED a fresh
