@@ -122,6 +122,48 @@ Hydration route as the cross-chain fallback (identifiers: `AssetHubPaseo`,
 exchange `HydrationDex`; needs `@galacticcouncil/api-augment` + a `@polkadot/types`
 dedupe, and the Hydration testnet RPC is flaky).
 
+## Sufficient assets + the local DEX — VALIDATED on-chain (2026-07-24)
+
+Queried Paseo Asset Hub directly (`@polkadot/api`, WSS `asset-hub-paseo-rpc.n.dwellir.com`):
+
+- **USDC (1337) and USDt (1984) are `isSufficient = true`** (minBalance 0.07). A
+  sufficient asset can **instantiate an account and (via `asset-conversion`) pay
+  fees with no native token**. → a FARE burner can hold **only USDC**, no PAS ED.
+- **PAS↔USDC and PAS↔USDt pools exist** on the native `asset-conversion` DEX
+  (lpTokens 9 and 5 of 20 pools). `quotePriceExactTokensForTokens` returns a live
+  price: **1 USDC = 0.2496 PAS** (1 PAS = 3.98 USDC; PAS is 10-dp on substrate).
+  Wired as `treasury.assetConversionQuote(assetId)` — the recommended price source
+  (replaces the flaky Hydration quote), read-only, no signer.
+
+### Coverage verdict — at the REAL price, the current fee does NOT cover gas
+The gasless order: relay spent ~0.088 PAS gas (≈ **0.35 USDC**) and earned
+**0.01875 USDC** (5000-bps rebate on the tiny fare). So the fee covers **~5% of
+gas** — the relay is deeply underwater on small orders. A percentage rebate on a
+sub-dollar fare can't cover a fixed-ish gas cost. **Fix the fee model**, not just
+the price: a **flat/minimum relay fee** per order (in USDC), or eliminate the
+relay-gas problem entirely (next point).
+
+### The bigger lever: sufficient-asset fee payment (verify for EVM)
+Because USDC is sufficient, `asset-conversion` can charge **fees in USDC**,
+auto-converting to native. If **pallet-revive EVM txs** support this
+(`ChargeAssetTxPayment` / a paymaster over `eth_transact`) then a burner **pays
+its own gas in USDC** and the relay/forwarder + fee-recovery swap are **unnecessary
+for the currency problem**. The docs are silent on EVM fee-in-asset — this is the
+single most valuable thing to confirm (pallet-revive runtime config). If it works,
+FARE's gasless model simplifies dramatically.
+
+### Recommendations (priority order)
+1. **Verify EVM fee-in-asset** (sufficient-asset paymaster over pallet-revive). If
+   yes → burners pay gas in USDC; drop the relay-gas machinery.
+2. **If not** → keep the relay, but **price the rebate at the live pool rate**
+   (`assetConversionQuote`) and switch to a **flat/minimum relay fee** so it
+   actually covers gas; recover fees via the **local `asset-conversion` swap**
+   (execution: an asset-conversion precompile from EVM if one exists — TBD probe —
+   else a Paseo-faucet-funded substrate signer). No XCM/Hydration/Discord.
+3. **Broaden payments**: accept **USDt (1984)** too (also sufficient; pool exists)
+   — a one-line `setAcceptedToken`.
+4. Drop the Hydration/XCM path to a documented fallback (cross-chain only).
+
 ## Config (`venue-node/.env`)
 
 | Var | Meaning |

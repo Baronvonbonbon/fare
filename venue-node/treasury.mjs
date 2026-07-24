@@ -79,6 +79,31 @@ export function planSwap({ gasWei, feeTokenWei, tokenDecimals, nativeDecimals, p
   return { swapTokenWei, wantNativeWei: tokenToNativeWei(swapTokenWei, tokenDecimals, nativeDecimals, price.num, price.den) };
 }
 
+// ── LOCAL price/swap: Paseo Asset Hub asset-conversion DEX (recommended) ─────
+// FARE's chain IS Paseo Asset Hub, which has a native asset-conversion DEX with
+// live PAS↔USDC / PAS↔USDt pools — so pricing AND fee-recovery happen ON-CHAIN,
+// no XCM, no Hydration, no Discord. Verified: USDC(1337)/USDt(1984) are sufficient
+// assets, pools exist, and quotePriceExactTokensForTokens returns ~0.25 PAS/USDC.
+export const AH_WSS = process.env.AH_WSS || "wss://asset-hub-paseo-rpc.n.dwellir.com";
+const ahXcmAsset = (assetId) => ({ parents: 0, interior: { X2: [{ PalletInstance: 50 }, { GeneralIndex: assetId }] } });
+const AH_NATIVE = { parents: 1, interior: "Here" };
+
+/// Live price from the local asset-conversion pool: native (PAS) per 1 whole
+/// token, as a {num,den} fraction for the economics guard (feeds
+/// economics.tokenToNativeWei). Read-only, no signer. Lazy-imports @polkadot/api.
+export async function assetConversionQuote(assetId, tokenDecimals = 6) {
+  const { ApiPromise, WsProvider } = await import("@polkadot/api"); // npm i @polkadot/api
+  const api = await ApiPromise.create({ provider: new WsProvider(AH_WSS, 3000) });
+  try {
+    const nativeDec = api.registry.chainDecimals[0]; // PAS = 10 on substrate
+    const oneToken = (10n ** BigInt(tokenDecimals)).toString();
+    const out = await api.call.assetConversionApi.quotePriceExactTokensForTokens(ahXcmAsset(assetId), AH_NATIVE, oneToken, true);
+    const nativeOut = BigInt(out.toJSON() ?? 0); // PAS (substrate units) for 1 whole token
+    if (nativeOut <= 0n) return null; // no pool / no liquidity
+    return { num: nativeOut, den: 10n ** BigInt(nativeDec) }; // = whole native per whole token
+  } finally { await api.disconnect().catch(() => {}); }
+}
+
 // ── swap execution (live path — gated + lazy) ────────────────────────────────
 /// Get a live native-per-whole-token quote from Hydration via Paraspell's XCM
 /// Router (best amount out), as a {num,den} fraction. Lazy-imports Paraspell so
@@ -105,9 +130,12 @@ export async function hydrationQuote({ feeToken, feeTokenSymbol, nativeSymbol, s
 export async function executeSwap(_plan, _ctx) {
   if (!SWAP_ENABLED) throw new Error("swaps disabled (set SWAP_ENABLED=on)");
   throw new Error(
-    "executeSwap: live Hydration swap not wired for the current fee token. " +
-    "Prereqs: (1) the fee token must be a real Asset Hub asset (pallet-assets, ERC-20 precompile) — MockUSDC is EVM-only and not XCM-transferable; " +
-    "(2) submit via the Asset Hub XCM precompile from the relay EVM account (Paraspell builds the route, precompile sends). See docs/RELAY-TREASURY.md."
+    "executeSwap: not wired. RECOMMENDED path (local, no XCM): call " +
+    "assetConversion.swapExactTokensForTokens on Paseo Asset Hub (USDC→PAS) — the " +
+    "pool exists and quotePriceExactTokensForTokens works (see assetConversionQuote). " +
+    "Execution needs either an asset-conversion precompile callable from the EVM " +
+    "relay (TBD — probe the precompiles) or a substrate signer (fund via the OPEN " +
+    "Paseo faucet). See docs/RELAY-TREASURY.md. Cross-chain Hydration is the fallback."
   );
 }
 
