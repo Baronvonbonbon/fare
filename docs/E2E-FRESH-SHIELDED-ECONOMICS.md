@@ -104,18 +104,30 @@ a cheaper gas price is the **ratio**: the rebate is ~0.5% of relay cost, and
 
 ## 6. Levers (what a production system needs)
 
-- **Flat / minimum relay fee in USDC**, sized to cover real gas at the live pool
-  rate — replace `relayRebateBps` as the settlement gate. (RELAY-TREASURY rec #2.)
+**Implemented (this PR):**
+- ✅ **Flat all-in relay service fee in USDC** — `FareOrders.relayServiceFee[token]`,
+  a governance-set flat amount the customer escrows on top of orderValue+tip and
+  that is paid in full to the settling relay (refunded if no relay settles). Sized
+  (off-chain) to cover the whole per-order cost + margin, because a percentage
+  rebate can't. Snapshotted per order.
+- ✅ **Guard gates on it** — the relay's settlement guard now values
+  `serviceFee + rebate` in native and requires it to clear cumulative gas × margin
+  (`relayCompForOrder` in `relay.mjs`).
+- ✅ **Fee-recovery wired** — when the relay's gas dips below the floor it sweeps
+  its accrued vault USDC and swaps USDC→PAS on the local DEX via the sentinel rail
+  (`swap.executeRecoverySwap` + the `RELAY_FEE_RECOVERY` loop), self-refilling.
+
+**Still open:**
+- **Deploy + tune:** promote the new `FareOrders` (freeze-and-drain) and
+  `setRelayServiceFee` to a value that covers gas at the live pool rate + margin.
 - **Price the privacy:** charge the shielded-withdrawal in fee mode
-  (`SHIELD_FEE_PAS>0`) so the customer pays for their own unlinkable funding
-  instead of the relay subsidising it.
-- **Wire fee-recovery** (USDC→PAS via `swap.mjs`) into the relay's top-up loop so
-  its PAS balance is self-refilling.
-- **Cut the reservation:** make `GAS_SETTLE`/`GAS_SHIELD` configurable and set them
-  near real usage, freeing the ~1000 PAS lock-up.
+  (`SHIELD_FEE_PAS>0`) so the customer pays for their own unlinkable funding —
+  or fold it into the flat service fee (the "all-in" intent).
+- **Cut the reservation:** make `GAS_SETTLE`/`GAS_SHIELD` configurable near real
+  usage, freeing the ~1000 PAS lock-up.
 - **Amortise shielding:** one deposit funds many withdrawals; withdraw only
   `escrow + gas headroom` (not a fixed 10 PAS); auto shield-return the remainder.
-- **Batch settlement** or move to a cheaper verify to shrink the per-order sink.
+- **Batch settlement** or a cheaper verify to shrink the per-order sink.
 
 ## Reproduce the accounting
 ```bash

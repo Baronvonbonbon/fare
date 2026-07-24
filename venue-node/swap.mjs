@@ -215,3 +215,50 @@ export async function executeSwap(plan, ctx = {}) {
     return { txHash: tx.hash, sendTo, amountOut: plan.amountOut.toString(), amountInMax: plan.amountInMax.toString() };
   } finally { if (!ctx.api) await api.disconnect().catch(() => {}); }
 }
+
+// ── RELAY fee-recovery: token → native (USDC → PAS), the reverse direction ────
+// The relay accrues its comp in USDC (service fee + rebate) but burns PAS for gas.
+// This sells a known USDC amount for PAS on the same DEX, via the same sentinel
+// rail, so its gas balance self-refills. EXACT-IN (`swapExactTokensForTokens`):
+// sell `swapTokenWei` USDC, require at least `wantNativeWei` PAS out (slippage
+// floor). `plan` is treasury.planSwap's output { swapTokenWei, wantNativeWei }.
+
+/// SCALE-encode assetConversion.swapExactTokensForTokens (token→PAS). `amountOutMin`
+/// is the plan's native target (EVM decimals) minus slippage, rescaled DOWN to the
+/// chain's native decimals (it's a floor — never round it up). Returns 0x calldata.
+export function encodeRecoverySwapCall(api, plan, { assetId, sendTo, nativeDecimals = 18, slippageBps = 100 }) {
+  if (!plan?.swapTokenWei) throw new Error("encodeRecoverySwapCall: bad plan");
+  const subNativeDec = api.registry.chainDecimals[0];
+  const floor = (BigInt(plan.wantNativeWei) * BigInt(10_000 - slippageBps)) / 10_000n;
+  const amountOutMin = scaleAmount(floor, nativeDecimals, subNativeDec, false); // round DOWN
+  const call = api.tx.assetConversion.swapExactTokensForTokens(
+    [assetLoc(assetId), NATIVE_LOC], // token → PAS
+    BigInt(plan.swapTokenWei).toString(),
+    amountOutMin.toString(),
+    sendTo,
+    false,
+  );
+  return call.method.toHex();
+}
+
+/// Execute the fee-recovery swap FROM the relay's EVM key (same sentinel rail as
+/// executeSwap). The relay's accrued USDC must already be in its own balance
+/// (withdraw it from the vault first). PAS lands at `sendTo` (default the relay's
+/// fallback account) — refuelling its gas. ctx: { signer, assetId, api?, sendTo?,
+/// nativeDecimals?, slippageBps?, gasLimit? }.
+export async function executeRecoverySwap(plan, ctx = {}) {
+  if (!plan?.swapTokenWei) throw new Error("executeRecoverySwap: bad plan (see treasury.planSwap)");
+  const { signer, assetId } = ctx;
+  if (!signer || typeof signer.sendTransaction !== "function") throw new Error("executeRecoverySwap: ctx.signer required");
+  if (assetId == null) throw new Error("executeRecoverySwap: ctx.assetId required");
+
+  const relay = await signer.getAddress();
+  const sendTo = ctx.sendTo ?? fallbackAccountId(relay);
+  const api = ctx.api ?? await connect();
+  try {
+    const data = encodeRecoverySwapCall(api, plan, { assetId, sendTo, nativeDecimals: ctx.nativeDecimals ?? 18, slippageBps: ctx.slippageBps ?? 100 });
+    const tx = await signer.sendTransaction({ to: RUNTIME_PALLETS_ADDR, data, value: 0n, ...(ctx.gasLimit ? { gasLimit: ctx.gasLimit } : {}) });
+    await tx.wait();
+    return { txHash: tx.hash, sendTo, amountIn: plan.swapTokenWei.toString() };
+  } finally { if (!ctx.api) await api.disconnect().catch(() => {}); }
+}

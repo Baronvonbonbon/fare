@@ -1,7 +1,7 @@
 // Asset-conversion coverage-swap planning (pure logic). Run: npm test.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { planCoverage, buildSwapDescriptor, assetLoc, NATIVE_LOC, fallbackAccountId, RUNTIME_PALLETS_ADDR, scaleAmount } from "./swap.mjs";
+import { planCoverage, buildSwapDescriptor, assetLoc, NATIVE_LOC, fallbackAccountId, RUNTIME_PALLETS_ADDR, scaleAmount, encodeRecoverySwapCall, executeRecoverySwap } from "./swap.mjs";
 
 const PAS = (n) => BigInt(Math.round(n * 1e6)) * (10n ** 12n); // 18dp (EVM view)
 const USDC = (n) => BigInt(Math.round(n * 1e6));               // 6dp
@@ -62,6 +62,14 @@ test("buildSwapDescriptor: PAS→token exact-out call for the mapped burner", ()
 
 test("buildSwapDescriptor: refuses a non-ok plan", () => {
   assert.throws(() => buildSwapDescriptor({ ok: false }, { assetId: 1337, sendTo: "x" }), /plan not ok/);
+});
+
+test("recovery swap: encode/execute reject a bad plan (need swapTokenWei)", () => {
+  assert.throws(() => encodeRecoverySwapCall({}, {}, { assetId: 1337, sendTo: "x" }), /bad plan/);
+});
+test("recovery swap: execute requires signer + assetId", async () => {
+  await assert.rejects(executeRecoverySwap({ swapTokenWei: 1n }, { assetId: 1337 }), /signer required/);
+  await assert.rejects(executeRecoverySwap({ swapTokenWei: 1n }, { signer: { sendTransaction() {} } }), /assetId required/);
 });
 
 test("scaleAmount: EVM 18-dp native → substrate 10-dp (round up bounds)", () => {

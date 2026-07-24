@@ -125,6 +125,73 @@ describe("FARE — stablecoin escrow (C3)", () => {
     const pubSignals = [orderId, BigInt(dropCommit(DROP_LAT, DROP_LON, DROP_SALT)), BigInt(posCommit), radius, BigInt(nullifierOf(orderId, DROP_SALT))];
     return f.settlement.confirmDropoffZK(dAtt, await signCommit(driver, f.domain, dAtt), DUMMY_PROOF, pubSignals);
   }
+  // dropoff submitted by a specific relayer (its account is credited the fee)
+  async function confirmDropoffBy(f: Awaited<ReturnType<typeof deployAll>>, orderId: bigint, driver: HardhatEthersSigner, relayer: HardhatEthersSigner) {
+    const now = await time.latest();
+    const posCommit = driverCommit(orderId);
+    const dAtt = { orderId, phase: 2, actor: driver.address, posCommit, timestamp: now };
+    const radius = await f.settlement.dropoffRadiusMeters();
+    const pubSignals = [orderId, BigInt(dropCommit(DROP_LAT, DROP_LON, DROP_SALT)), BigInt(posCommit), radius, BigInt(nullifierOf(orderId, DROP_SALT))];
+    return f.settlement.connect(relayer).confirmDropoffZK(dAtt, await signCommit(driver, f.domain, dAtt), DUMMY_PROOF, pubSignals);
+  }
+
+  describe("relay service fee (F6-flat)", () => {
+    const SVC = USDC(0.5); // flat relay fee, on top of orderValue+tip
+
+    it("escrows the flat fee on top and pays it in full to the settling relayer", async () => {
+      const f = await loadFixture(deployAll);
+      await f.orders.setRelayServiceFee(f.usdc.target, SVC);
+      const relayer = f.stranger;
+      const before = await f.usdc.balanceOf(f.customer.address);
+
+      const { orderId } = await createTokenOrderAndAssign(f); // pulls orderValue+tip+SVC, then fare
+      expect(before - (await f.usdc.balanceOf(f.customer.address))).to.equal(ORDER_VALUE + TIP + SVC + FARE);
+      expect((await f.orders.orders(orderId)).serviceFee).to.equal(SVC);
+
+      await confirmPickup(f, orderId, f.driver2);
+      await expect(confirmDropoffBy(f, orderId, f.driver2, relayer))
+        .to.emit(f.orders, "RelayServiceFeePaid").withArgs(orderId, relayer.address, SVC);
+
+      const fee = (FARE * 250n) / 10_000n;
+      expect(await f.vault.tokenBalanceOf(f.usdc.target, relayer.address)).to.equal(SVC); // relayer gets the flat fee
+      expect(await f.vault.tokenBalanceOf(f.usdc.target, f.driver2.address)).to.equal(FARE - fee + TIP); // unchanged
+      expect(await f.vault.tokenBalanceOf(f.usdc.target, f.treasury.address)).to.equal(fee); // unchanged
+      expect(await f.vault.tokenBalanceOf(f.usdc.target, f.venueOp.address)).to.equal(ORDER_VALUE); // unchanged
+      expect((await f.orders.orders(orderId)).escrow).to.equal(0n); // conservation: nothing trapped
+    });
+
+    it("refunds the fee to the customer when no relay settles (relayer = treasury)", async () => {
+      const f = await loadFixture(deployAll);
+      await f.orders.setRelayServiceFee(f.usdc.target, SVC);
+      const { orderId } = await createTokenOrderAndAssign(f);
+      await confirmPickup(f, orderId, f.driver2);
+      await confirmDropoffBy(f, orderId, f.driver2, f.treasury); // treasury == "no relay" sentinel
+      expect(await f.vault.tokenBalanceOf(f.usdc.target, f.customer.address)).to.equal(SVC); // refunded
+      expect((await f.orders.orders(orderId)).escrow).to.equal(0n);
+    });
+
+    it("native order: msg.value must include the flat fee", async () => {
+      const f = await loadFixture(deployAll);
+      const SVC_N = ethers.parseEther("0.2");
+      await f.orders.setRelayServiceFee(ethers.ZeroAddress, SVC_N);
+      const commit = dropCommit(DROP_LAT, DROP_LON, DROP_SALT);
+      await expect(
+        f.orders.connect(f.customer).createOrder(f.venueId, commit, ORDER_VALUE, TIP, MAX_FARE, 0, 0, { value: ORDER_VALUE + TIP })
+      ).to.be.revertedWith("bad-value");
+      await f.orders.connect(f.customer).createOrder(f.venueId, commit, ORDER_VALUE, TIP, MAX_FARE, 0, 0, { value: ORDER_VALUE + TIP + SVC_N });
+      expect((await f.orders.orders(1n)).serviceFee).to.equal(SVC_N);
+    });
+
+    it("is owner-gated and snapshots per order (a later change doesn't touch in-flight)", async () => {
+      const f = await loadFixture(deployAll);
+      await expect(f.orders.connect(f.stranger).setRelayServiceFee(f.usdc.target, SVC)).to.be.reverted;
+      await f.orders.setRelayServiceFee(f.usdc.target, SVC);
+      const commit = dropCommit(DROP_LAT, DROP_LON, DROP_SALT);
+      await f.orders.connect(f.customer).createOrderERC20(f.usdc.target, f.venueId, commit, ORDER_VALUE, TIP, MAX_FARE, 0, 0); // order 1 @ SVC
+      await f.orders.setRelayServiceFee(f.usdc.target, USDC(2)); // change
+      expect((await f.orders.orders(1n)).serviceFee).to.equal(SVC); // order 1 keeps its snapshot
+    });
+  });
 
   it("full happy path: create → bid → accept → pickup → dropoff, all in USDC", async () => {
     const f = await loadFixture(deployAll);
