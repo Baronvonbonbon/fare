@@ -8,8 +8,9 @@ limit — Paseo caps a transaction at 2 pool deposits, which (before phase 2)
 capped the anonymity set at 2. Phase 2 decoupled sealing from depositing, and the
 second run reaches an **8-ticket anonymity set on the same chain** (§5).
 
-Deployed a **standalone** `FareVault` (`0x2dFc1730fc233F0A45FCC1490f65bA102FC10306`).
-The demo deployment was not touched — no migration, no re-pointing.
+Each run deploys its own **standalone** `FareVault` — `0x2dFc1730fc233F0A45FCC1490f65bA102FC10306`
+(run 1, §1) and `0xF6a9753B9B5e752eA81D7edee685c78dED8eD5E5` (run 2, §5). The demo
+deployment was not touched: no migration, no re-pointing of live consumers.
 
 ---
 
@@ -105,7 +106,7 @@ unrecoverable, and the vault has no admin drain **by design** — `reclaimShield
 requires the ticket's owner, whose key is gone.
 
 Testnet funds, and the deployer holds ~12.4 k PAS, so the cost is nil. The lesson
-is not: `live-e2e.mjs` now writes `artifacts/privacy-live/notes.json` **before**
+is not: `live-e2e.mjs` now writes `e2e-runs/privacy-live/notes.json` **before**
 any transaction can spend a ticket against a commitment. On mainnet that ordering
 is the difference between a recoverable retry and destroyed earnings.
 
@@ -133,12 +134,15 @@ already moved the tree.
 
 - Only `withdrawnValue == bucket` (full spend). Partial spends re-insert a change
   note whose path the payee must track — untested here.
-- One payee spent; the other three notes remain unspent in the pool.
+- One payee spent per run; the remaining notes sit unspent in the pool.
 - The relay's `/shield-queue` and `/shield-claim` endpoints were not exercised —
   the script calls the vault and keeper module directly. The HTTP layer between
   them is still only unit-tested.
 - No concurrent keeper, and no foreign deposit landed mid-run, so the log-derived
   index recovery ran only on its happy path here (the race is covered locally).
+- A **seal still names its accounts**, so the anonymity set is the seal size.
+  Making it *unbounded* — no on-chain link between a payee and any batch — is the
+  phase-3 ZK authorization, not this.
 
 ## See also
 
