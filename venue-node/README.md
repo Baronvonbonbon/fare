@@ -69,6 +69,8 @@ by doing the two things that are safe to relay:
 | `POST /forward { request }` | **Relay a gasless user action (F8).** Submits a user-signed EIP-2771 `ForwardRequest` through `FareForwarder`. Guarded: `value` must be 0 and `to` must be `FareOrders`/`FareRatings`, so the relay pays gas but never fronts a customer's escrow. |
 | `POST /withdraw { account, recipient, deadline, signature }` | **Relay a gasless withdrawal (F8).** Submits a driver-signed `FareVault.withdrawFor`; the relay is `msg.sender`, so a configured `withdrawFeeBps` reimburses its gas. Lets a driver pull earnings with zero gas held. |
 | `POST /shield-withdraw { pA, pB, pC, pubSignals, recipient, burner? }` | **Fund a fresh burner through Kusama Shield (C4).** Submits a client-built `proxy_withdraw` on the KS pool. See the shielded-funding section below. |
+| `POST /shield-queue { account, bucket, deadline, signature, commitment }` | **Queue a shielded payout (privacy phase 1).** Submits a driver-signed `FareVault.queueShieldCreditFor` and holds the note's commitment off-chain for a later batch. See the shielded-payouts section below. |
+| `GET /shield-claim?commitment=0x…` | Where a queued payout landed: the batch's pre-deposit tree state, so the recipient can derive its own note path. Public chain state only. |
 | `GET /health` | Relay address + gas balance + wired settlement + forwarder + vault + shield pool/mode. |
 
 ### Relay discovery (DATUM `relayUrl` pattern)
@@ -131,6 +133,48 @@ a root baked into a proof). Config: `SHIELD_POOL`, `SHIELD_FEE_PAS`.
 > unreimbursed relay won't sponsor shielded funding at scale. Fee mode lets the
 > relay recoup that from the withdrawn amount (the customer still ultimately pays;
 > the relay breaks even). See the C4 e2e report's recommendation R2.
+
+### Shielded payouts (`POST /shield-queue`, privacy phase 1)
+
+Shielded *funding* (above) protects the customer. Shielded **payouts** protect the
+other side: driver and venue earnings otherwise leave `FareVault` at a persistent
+address, so anyone with an indexer holds a complete revenue graph.
+
+Set `SHIELD_KEEPER=1` to run this relay as a batch keeper. It then plays two
+roles, deliberately split so **no transaction ever carries both an account and a
+pool commitment** — the failure that makes the obvious one-shot design useless
+(see [../docs/PRIVACY-TIERS.md](../docs/PRIVACY-TIERS.md) §3):
+
+1. `POST /shield-queue` submits the payee's EIP-712 authorization. The commitment
+   arrives in the request **body** and is stored off-chain; it must never reach
+   that transaction's calldata, which is as public and permanent as storage.
+2. The keeper tick deposits held commitments once a bucket has `shieldMinBatch`
+   of them and the oldest ticket has cleared `shieldMinDwell` — one transaction,
+   N equal deposits, no account named.
+
+| Var | Default | Meaning |
+|---|---|---|
+| `SHIELD_KEEPER` | off | `1` runs the batch keeper (endpoints 503 otherwise) |
+| `SHIELD_KEEPER_STORE` | `./shield-keeper.json` | Pending commitments + batch receipts |
+| `SHIELD_KEEPER_POLL_MS` | `60000` | How often to try to batch |
+
+> **Trust — read this before enabling.** The keeper is the only party holding the
+> account↔commitment pairing, and the vault *cannot* check that a batched
+> commitment belongs to a ticket holder — knowing that is exactly the pairing the
+> design destroys. **An authorized keeper can substitute its own commitments and
+> keep the notes.** Governance gates who may execute (`setShieldKeeper`); theft is
+> immediately visible to the payees; exposure is capped by the queue depth.
+> Do not enable a keeper you would not trust with the queued balance. Phase 3's
+> ZK authorization is what removes the concession.
+
+> The store is **load-bearing**: a keeper that forgets a commitment after its
+> ticket is consumed has destroyed that payout — the ticket is spent and nothing
+> on-chain records who was owed a note. It is written through on every mutation
+> via write-then-rename; back it up like a key.
+
+Relaying `/shield-queue` earns nothing (the vault takes no fee on queueing), so
+it draws on the same subsidy budget as sponsor-mode shielded funding and declines
+when that budget is exhausted.
 
 ### Gas sizing on Paseo (why some limits are 500 M and others aren't)
 

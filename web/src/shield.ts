@@ -95,6 +95,16 @@ function pickSpendable(minValueWei: bigint): NoteRecord | null {
   return loadNotes().filter((r) => !r.spent && BigInt(r.value) >= minValueWei).sort((a, b) => (BigInt(a.value) < BigInt(b.value) ? -1 : 1))[0] ?? null;
 }
 
+/// Adopt a note this device owns but did not deposit itself — a batched
+/// shielded PAYOUT (shieldpayout.ts), where the vault's keeper made the deposit
+/// and the recipient derived the tree position afterwards. Same store as
+/// customer-side notes, so a driver's shielded earnings are spendable through
+/// the exact path a customer's shielded funding already uses.
+export function adoptShieldedNote(rec: NoteRecord): void {
+  if (loadNotes().some((n) => n.nullifier === rec.nullifier)) return; // claim is idempotent
+  upsertNote(rec);
+}
+
 class KusamaShieldFunder implements ShieldedFunder {
   constructor(
     private poolAddr: string,

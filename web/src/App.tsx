@@ -43,7 +43,7 @@ import {
   sweepToMain,
 } from "./wallets";
 import { isAddress, ZeroAddress } from "ethers";
-import { OrderThread, type ChatMsg, type LocUpdate } from "./channel";
+import { OrderThread, fetchCapsules, type ChatMsg, type LocUpdate } from "./channel";
 import { newPhotoKey, sealPhoto, openPhoto } from "./photo";
 import { notify, notifyPermission, enableNotifications, type NotifyPermission } from "./notify";
 import { pushConfigured, pushSubscribed, subscribePush, syncWatched } from "./push";
@@ -55,6 +55,14 @@ import {
 import { proveProximity, positionCommit } from "./zk";
 import { sponsorGas, relaySettle, relayForward, relayWithdraw, ensureGas, activeRelayUrl, sponsorOnboarding, fundBurner, forwarderAvailable } from "./relay";
 import { initShieldedFunder } from "./shield";
+import {
+  shieldBuckets, planShielding, queueShieldedPayout, claimShieldedPayouts, pendingShieldedPayouts,
+} from "./shieldpayout";
+import {
+  commitProfile, isCommitted, describeProfile, saveSelfProfile, loadSelfProfile,
+  profilePayload, verifyPayload, type DriverProfile,
+} from "./regmeta";
+import { escrowCapsule, evidenceURI } from "./disclosure";
 import { usePasUsd, cachedRate, fiatOf, pasToUsd, formatUsd } from "./pricing";
 import {
   tokenOrdersEnabled, stablecoinAsset, assetOf, fmtAsset, parseAsset,
@@ -661,6 +669,10 @@ export default function App() {
         <VaultStrip {...{ vaultBal, vaultTokenBal, pendingDust, busy, act, signed, say }} />
       )}
 
+      {session && role !== "customer" && (
+        <ShieldEarningsStrip {...{ vaultBal, busy, signed, say, refresh }} />
+      )}
+
       {role === "customer" && (
         <CustomerView {...{ session, orders, venues, act, busy, signed, say, myLoc, locateMe }} />
       )}
@@ -909,12 +921,25 @@ function DisputeControl({ o, handle, busy, act }: any) {
     );
   }
   if (o.status !== 2 && o.status !== 3) return null;
+
+  /// Anchor the escrowed disclosure capsules in the evidence field (§7). Without
+  /// the anchor the transport could swap a capsule after the fact, and the
+  /// fail-closed rule would punish whichever party was honest.
+  async function openWithAnchor() {
+    let uri = evidence;
+    try {
+      const capsules = (await fetchCapsules(o.id)).map((c) => c.capsule);
+      if (capsules.length > 0) uri = evidenceURI(capsules, evidence || undefined);
+    } catch { /* transport down — open the dispute anyway, unanchored */ }
+    return handle.disputes.openDispute(o.id, uri, { value: bond });
+  }
+
   return (
     <div className="btn-row" style={{ flexWrap: "wrap", marginTop: 8 }}>
       <input style={{ flex: 1, minWidth: 120 }} placeholder="evidence URI / note (optional)"
         value={evidence} onChange={(e) => setEvidence(e.target.value)} />
       <button className="btn ghost small" disabled={busy || !handle}
-        onClick={() => act("Open dispute", () => handle.disputes.openDispute(o.id, evidence, { value: bond }))}>
+        onClick={() => act("Open dispute", openWithAnchor)}>
         Dispute{bond > 0n ? ` · ${fmt(bond)} PAS bond` : ""}
       </button>
     </div>
@@ -960,6 +985,79 @@ function VaultStrip({ vaultBal, vaultTokenBal, pendingDust, busy, act, signed, s
         )}
         <input style={{ flex: 1, minWidth: 150 }} placeholder="cold wallet 0x… (optional)"
           value={cold} onChange={(e) => setCold(e.target.value)} />
+      </div>
+    </div>
+  );
+}
+
+/// Shielded earnings (docs/PRIVACY-TIERS.md §4). A driver's or venue's payouts
+/// otherwise leave the vault at a persistent address, publishing their whole
+/// revenue history. This routes them into the shielded pool instead — queue a
+/// fixed denomination now, a relay keeper deposits it in a batch with other
+/// people's, and the resulting note spends like any other.
+///
+/// Hidden entirely when no pool/keeper is configured: there is nothing honest to
+/// offer without one.
+function ShieldEarningsStrip({ vaultBal, busy, signed, say, refresh }: any) {
+  const [buckets, setBuckets] = useState<bigint[]>([]);
+  const [pending, setPending] = useState(() => pendingShieldedPayouts());
+  const [working, setWorking] = useState(false);
+  const relay = activeRelayUrl();
+
+  useEffect(() => { shieldBuckets().then(setBuckets).catch(() => setBuckets([])); }, []);
+
+  // Deposited payouts only become spendable once this device replays the batch,
+  // so sweep for claimable ones on mount rather than making it a manual step.
+  useEffect(() => {
+    if (!relay) return;
+    claimShieldedPayouts(relay)
+      .then((n) => { if (n > 0) { setPending(pendingShieldedPayouts()); say(`${n} shielded payout${n > 1 ? "s" : ""} now spendable`); } })
+      .catch(() => {});
+  }, [relay]);
+
+  const plan = useMemo(() => planShielding(vaultBal, buckets), [vaultBal, buckets]);
+  if (!relay || buckets.length === 0) return null;
+
+  const shieldable = plan.reduce((a, b) => a + b, 0n);
+  const queued = pending.reduce((a, p) => a + BigInt(p.bucketWei), 0n);
+
+  async function shieldAll() {
+    if (!signed) return say("Connect a wallet first", true);
+    setWorking(true);
+    try {
+      for (const bucket of plan) {
+        await queueShieldedPayout(signed.vault.runner, relay!, bucket);
+        setPending(pendingShieldedPayouts());
+      }
+      say(`Queued ${fmt(shieldable)} PAS — deposited once the batch fills`);
+      await refresh();
+    } catch (e: any) {
+      say(e?.reason ?? e?.shortMessage ?? e?.message ?? String(e), true);
+    } finally {
+      setWorking(false);
+    }
+  }
+
+  return (
+    <div className="vault-strip">
+      <div>
+        <div className="lbl">shield earnings — unlink payouts from your address</div>
+        <div className="amt">{fmt(shieldable)} PAS shieldable</div>
+        {queued > 0n && (
+          <div className="hint">
+            {fmt(queued)} PAS queued in {pending.length} note{pending.length > 1 ? "s" : ""} — waiting for the batch to fill
+          </div>
+        )}
+        {shieldable === 0n && queued === 0n && (
+          <div className="hint">
+            below the smallest denomination ({fmt(buckets[0])} PAS) — earn a little more to shield
+          </div>
+        )}
+      </div>
+      <div className="btn-row" style={{ flexWrap: "wrap" }}>
+        <button className="btn small" disabled={busy || working || shieldable === 0n} onClick={shieldAll}>
+          {working ? "Shielding…" : `Shield ${fmt(shieldable)} PAS`}
+        </button>
       </div>
     </div>
   );
@@ -1389,26 +1487,40 @@ function HistoryCard({ o, venues, act, busy, session, say }: any) {
 /// End-to-end encrypted order chat (B3). Content is sealed client-side (msg.ts)
 /// and moved over the relay channel (channel.ts); the relay never sees plaintext.
 /// Needs a local-key wallet for ECDH, so it no-ops for injected wallets.
-function ChatPanel({ orderId, myPriv, myAddr, peerAddr }: { orderId: bigint; myPriv?: string | null; myAddr?: string; peerAddr?: string }) {
+function ChatPanel({ orderId, myPriv, myAddr, peerAddr, peerRegistryURI }: { orderId: bigint; myPriv?: string | null; myAddr?: string; peerAddr?: string; peerRegistryURI?: string }) {
   const [msgs, setMsgs] = useState<ChatMsg[]>([]);
   const [text, setText] = useState("");
   const [note, setNote] = useState("");
   const [open, setOpen] = useState(false);
+  // The counterparty's registration details (§5), once they reveal them AND the
+  // plaintext hashes to their on-chain commitment. Never rendered unverified.
+  const [peerProfile, setPeerProfile] = useState<DriverProfile | null>(null);
   const threadRef = useRef<OrderThread | null>(null);
+  const selfProfile = loadSelfProfile();
 
   useEffect(() => {
     if (!open || !myPriv || !myAddr || !peerAddr || !isAddress(peerAddr)) return;
-    const t = new OrderThread(orderId, myPriv, myAddr, peerAddr);
+    const onProfile = (json: string) => {
+      if (!peerRegistryURI) return;
+      const p = verifyPayload(json, peerRegistryURI);
+      if (p) setPeerProfile(p);
+      else setNote("the other party sent a profile that doesn't match their on-chain commitment");
+    };
+    const t = new OrderThread(orderId, myPriv, myAddr, peerAddr, undefined, undefined, onProfile);
     threadRef.current = t;
     let alive = true;
     t.open().catch(() => {});
+    // Escrow a disclosure capsule (§7): normal operation never opens it, but a
+    // dispute has to be resolvable. Silent no-op when no arbiter key is
+    // configured — an unverifiable key must never be encrypted to.
+    escrowCapsule(orderId, myPriv, myAddr, peerAddr).catch(() => {});
     const tick = async () => {
       try { const nu = await t.poll(); if (alive && nu.length) setMsgs((m) => [...m, ...nu]); } catch { /* transient */ }
     };
     tick();
     const iv = setInterval(tick, 4000);
     return () => { alive = false; clearInterval(iv); threadRef.current = null; };
-  }, [open, String(orderId), myPriv, myAddr, peerAddr]);
+  }, [open, String(orderId), myPriv, myAddr, peerAddr, peerRegistryURI]);
 
   if (!myPriv || !peerAddr || !isAddress(peerAddr)) return null;
 
@@ -1418,6 +1530,15 @@ function ChatPanel({ orderId, myPriv, myAddr, peerAddr }: { orderId: bigint; myP
     if (!t || !body) return;
     try { const mine = await t.send(body); setMsgs((m) => [...m, mine]); setText(""); setNote(""); }
     catch (e: any) { setNote(e?.message ?? "couldn't send"); }
+  };
+
+  /// Reveal our committed registration profile to this order's counterparty
+  /// (§5). Order-scoped, so revealing on two orders can't tie them together.
+  const shareProfile = async () => {
+    const t = threadRef.current;
+    if (!t || !selfProfile) return;
+    const ok = await t.sendProfile(profilePayload(selfProfile));
+    setNote(ok ? "profile shared with this order's counterparty" : "waiting for the other party to open the chat…");
   };
 
   return (
@@ -1435,11 +1556,22 @@ function ChatPanel({ orderId, myPriv, myAddr, peerAddr }: { orderId: bigint; myP
               </div>
             ))}
           </div>
+          {peerProfile && (
+            <div className="hint" style={{ marginTop: 6, color: "var(--cyan)" }}>
+              ✓ verified: {[peerProfile.name, peerProfile.vehicle, peerProfile.plate, peerProfile.contact]
+                .filter(Boolean).join(" · ")}
+            </div>
+          )}
           <div className="btn-row" style={{ marginTop: 6 }}>
             <input style={{ flex: 1 }} value={text} onChange={(e) => setText(e.target.value)}
               onKeyDown={(e) => { if (e.key === "Enter") send(); }} placeholder="message… (E2E)" />
             <button className="btn small" onClick={send} disabled={!text.trim()}>Send</button>
           </div>
+          {selfProfile && (
+            <div className="btn-row" style={{ marginTop: 4 }}>
+              <button className="btn ghost small" onClick={shareProfile}>Share my profile</button>
+            </div>
+          )}
           {note && <div className="hint" style={{ marginTop: 4 }}>{note}</div>}
         </div>
       )}
@@ -1600,6 +1732,16 @@ function TrackPanel({ orderId, myPriv, myAddr, peerAddr, drop, venue }: { orderI
 function CustomerOrder({ o, venues, act, busy, session, say }: any) {
   const [payload, setPayload] = useState("");
   const [scanning, setScanning] = useState(false);
+  // The assigned driver's registry entry. With a private profile (§5) this is a
+  // commitment, and it is what a revealed profile must hash to before the app
+  // shows it as verified.
+  const [driverURI, setDriverURI] = useState<string>("");
+  useEffect(() => {
+    if (!o.driver || o.driver === ZeroAddress) return;
+    contracts().drivers.drivers(o.driver)
+      .then((d: any) => setDriverURI(d.metadataURI))
+      .catch(() => {});
+  }, [o.driver]);
   // Every action on this order (cancel, tip, accept, confirm) must come from the
   // per-order wallet that created it — the contract checks msg.sender == customer.
   const os = contractsForOrder(o.customer);
@@ -1758,7 +1900,8 @@ function CustomerOrder({ o, venues, act, busy, session, say }: any) {
         </>
       )}
       {(o.status === 2 || o.status === 3) && (
-        <ChatPanel orderId={o.id} myPriv={walletFor(o.customer)?.privateKey} myAddr={o.customer} peerAddr={o.driver} />
+        <ChatPanel orderId={o.id} myPriv={walletFor(o.customer)?.privateKey} myAddr={o.customer}
+          peerAddr={o.driver} peerRegistryURI={driverURI} />
       )}
       {(o.status === 2 || o.status === 3) && (() => {
         // The customer knows their own drop (stored locally at order creation);
@@ -1878,12 +2021,25 @@ function DriverView({ session, orders, venues, act, busy, signed, say, myLoc, ra
 
 function DriverRegister({ act, busy, signed }: any) {
   const [name, setName] = useState("");
+  const [vehicle, setVehicle] = useState("");
+  const [contact, setContact] = useState("");
   const [stake, setStake] = useState("0");
+  // Private by default: a tier only a handful of people opt into is itself an
+  // identifying signal (docs/PRIVACY-TIERS.md §7).
+  const [priv, setPriv] = useState(true);
   return (
     <div className="card">
       <h2>Register as a driver <span className="tag">one-time</span></h2>
-      <label className="field"><span>profile (name / vehicle)</span>
-        <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Dana · e-bike" /></label>
+      <label className="field"><span>name</span>
+        <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Dana" /></label>
+      <label className="field"><span>vehicle</span>
+        <input value={vehicle} onChange={(e) => setVehicle(e.target.value)} placeholder="e-bike · plate 4KLM90" /></label>
+      <label className="field"><span>contact (shared with your customer at assignment)</span>
+        <input value={contact} onChange={(e) => setContact(e.target.value)} placeholder="signal:@dana" /></label>
+      <label className="field row" style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+        <input type="checkbox" checked={priv} onChange={(e) => setPriv(e.target.checked)} style={{ width: "auto" }} />
+        <span>keep my profile private (publish only a commitment; reveal to each customer at assignment)</span>
+      </label>
       <label className="field"><span>stake (PAS, optional — builds trust, slashable on fraud)</span>
         <input value={stake} onChange={(e) => setStake(e.target.value)} inputMode="decimal" /></label>
       <div className="btn-row">
@@ -1893,7 +2049,12 @@ function DriverRegister({ act, busy, signed }: any) {
             // wallet can register with no PAS. No-op if onboarding isn't offered.
             const addr = await signed.drivers.runner.getAddress();
             await sponsorOnboarding(addr, "driver").catch(() => {});
-            return signed.drivers.register(`demo://${name || "driver"}`, { value: parse(stake) });
+            const profile: DriverProfile = { name: name || "driver", vehicle, contact };
+            // Private mode publishes keccak256(profile) and keeps the plaintext
+            // here — the chain holds a hash, so this device is the only copy.
+            if (priv) saveSelfProfile(profile);
+            const uri = priv ? commitProfile(profile) : `demo://${name || "driver"}`;
+            return signed.drivers.register(uri, { value: parse(stake) });
           })}>
           Register
         </button>
@@ -1935,11 +2096,27 @@ function DriverAccount({ me, act, busy, signed, say }: any) {
             onClick={() => act("Withdraw stake", () => signed.drivers.withdrawStake())}>Withdraw stake</button>
         )}
       </div>
+      <div className="kv"><span className="k">profile</span>
+        <span className="v">{describeProfile(me.metadataURI)}</span></div>
+      {isCommitted(me.metadataURI) && !loadSelfProfile() && (
+        <div className="hint" style={{ color: "var(--warn, #f90)" }}>
+          This device doesn't hold the plaintext for your committed profile — save it again below,
+          or customers can't verify what you show them.
+        </div>
+      )}
       <div className="btn-row" style={{ flexWrap: "wrap" }}>
-        <input style={{ flex: 1, minWidth: 120 }} placeholder="update profile (name / vehicle)"
+        <input style={{ flex: 1, minWidth: 120 }} placeholder="update profile (name · vehicle · contact)"
           value={profile} onChange={(e) => setProfile(e.target.value)} />
         <button className="btn ghost small" disabled={busy || !profile}
-          onClick={() => act("Update profile", () => signed.drivers.setMetadata(`demo://${profile}`))}>Save</button>
+          onClick={() => act("Update profile", () => {
+            // Same split as registration: a commitment on-chain, the details here.
+            const [name, vehicle, contact] = profile.split("·").map((x) => x.trim());
+            const p: DriverProfile = { name: name || "driver", vehicle, contact };
+            saveSelfProfile(p);
+            return signed.drivers.setMetadata(commitProfile(p));
+          })}>Save private</button>
+        <button className="btn ghost small" disabled={busy || !profile}
+          onClick={() => act("Update profile", () => signed.drivers.setMetadata(`demo://${profile}`))}>Save public</button>
       </div>
     </div>
   );

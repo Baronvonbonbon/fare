@@ -25,7 +25,7 @@ export function topicOf(orderId: string | bigint): string {
 export interface Envelope {
   from: string;
   seq: number;
-  kind: "hello" | "chat" | "loc" | "photo";
+  kind: "hello" | "chat" | "loc" | "photo" | "profile" | "capsule";
   ts: number;
   pub?: string;
   iv?: string;
@@ -54,7 +54,7 @@ async function post(topic: string, msg: Envelope): Promise<boolean> {
   return false;
 }
 
-async function fetchThread(topic: string): Promise<Envelope[]> {
+export async function fetchThread(topic: string): Promise<Envelope[]> {
   for (const base of endpoints()) {
     try {
       const url = `${base}${base.includes("?") ? "&" : "?"}topic=${topic}&since=0`;
@@ -98,6 +98,31 @@ export interface PhotoRef {
 /// `myPriv` is the sender's per-order/session private key (needed for ECDH — so
 /// chat requires a local-key wallet, not an injected one); `peerAddr` is the
 /// on-chain counterparty used to authenticate the peer's pubkey.
+/// Every disclosure capsule escrowed on an order's thread, for the arbiter — who
+/// holds no account in the thread and only needs what is already encrypted to
+/// them. Returns the posting address alongside each capsule so the fail-closed
+/// rule can be applied per party.
+export async function fetchCapsules(
+  orderId: string | bigint
+): Promise<{ from: string; capsule: { epk: string; iv: string; ct: string } }[]> {
+  const thread = await fetchThread(topicOf(orderId));
+  return thread
+    .filter((e) => e.kind === "capsule" && e.pub && e.iv && e.ct)
+    .map((e) => ({ from: e.from, capsule: { epk: e.pub!, iv: e.iv!, ct: e.ct! } }));
+}
+
+/// The sealed chat envelopes on an order's thread, for an arbiter opening a
+/// dispute with a capsule key.
+export async function fetchSealedChat(
+  orderId: string | bigint
+): Promise<{ from: string; ts: number; iv: string; ct: string }[]> {
+  const thread = await fetchThread(topicOf(orderId));
+  return thread
+    .filter((e) => e.kind === "chat" && e.iv && e.ct)
+    .map((e) => ({ from: e.from, ts: e.ts, iv: e.iv!, ct: e.ct! }))
+    .sort((a, b) => a.ts - b.ts);
+}
+
 export class OrderThread {
   private topic: string;
   private peerPub: string | null = null;
@@ -106,6 +131,7 @@ export class OrderThread {
 
   private lastLocTs = 0;
   private lastPhotoTs = 0;
+  private lastProfileTs = 0;
 
   constructor(
     private orderId: string | bigint,
@@ -113,7 +139,8 @@ export class OrderThread {
     private myAddr: string,
     private peerAddr: string,
     private onLoc?: (loc: LocUpdate) => void, // B2: called with each new peer location
-    private onPhoto?: (p: PhotoRef) => void // B6: called with a proof-of-delivery photo pointer
+    private onPhoto?: (p: PhotoRef) => void, // B6: called with a proof-of-delivery photo pointer
+    private onProfile?: (canonicalJson: string) => void // §5: peer's committed profile, revealed at assignment
   ) {
     this.topic = topicOf(orderId);
   }
@@ -165,6 +192,33 @@ export class OrderThread {
     }
     const sealed = await sealMessage(this.myPriv, this.peerPub, this.orderId, JSON.stringify({ key: photoKey, id }));
     await post(this.topic, { from: this.myAddr, seq: 0, kind: "photo", ts: Date.now(), iv: sealed.iv, ct: sealed.ct });
+    return true;
+  }
+
+  /// Escrow a disclosure capsule for this order (PRIVACY-TIERS §7). Posted in
+  /// the clear as far as the transport is concerned — it is already encrypted to
+  /// the arbiter, and only the arbiter can open it. Idempotent by design: posting
+  /// again simply supersedes, since the arbiter reads every capsule on the thread.
+  async sendCapsule(capsule: { epk: string; iv: string; ct: string }): Promise<boolean> {
+    await post(this.topic, {
+      from: this.myAddr, seq: 0, kind: "capsule", ts: Date.now(),
+      pub: capsule.epk, iv: capsule.iv, ct: capsule.ct,
+    });
+    return true;
+  }
+
+  /// Reveal our registration profile to the order counterparty (PRIVACY-TIERS
+  /// §5). The registry holds only a commitment, so this is how the other side
+  /// learns the name/vehicle/contact — and it is order-scoped, so revealing on
+  /// two orders produces unrelatable ciphertexts. The RECEIVER checks the
+  /// plaintext against the on-chain commitment; sending it proves nothing alone.
+  async sendProfile(canonicalJson: string): Promise<boolean> {
+    if (!this.peerPub) {
+      await this.open();
+      return false;
+    }
+    const sealed = await sealMessage(this.myPriv, this.peerPub, this.orderId, canonicalJson);
+    await post(this.topic, { from: this.myAddr, seq: 0, kind: "profile", ts: Date.now(), iv: sealed.iv, ct: sealed.ct });
     return true;
   }
 
@@ -243,6 +297,26 @@ export class OrderThread {
         try {
           const { key, id } = JSON.parse(await openMessage(this.myPriv, this.peerPub, this.orderId, { iv: newest.iv!, ct: newest.ct! }));
           if (typeof key === "string" && typeof id === "string") this.onPhoto({ key, id, ts: newest.ts });
+        } catch {
+          /* tampered / wrong key — drop */
+        }
+      }
+    }
+    // Pass 5 (§5): the peer's revealed registration profile. Handed up as raw
+    // canonical JSON — verifying it against their on-chain commitment is the
+    // caller's job (regmeta.openProfile), since only the caller knows which
+    // registry entry to check.
+    if (this.onProfile && this.peerPub) {
+      let newest: Envelope | null = null;
+      for (const e of thread) {
+        if (e.kind === "profile" && e.from.toLowerCase() === this.peerAddr.toLowerCase() && e.iv && e.ct) {
+          if (!newest || e.ts > newest.ts) newest = e;
+        }
+      }
+      if (newest && newest.ts > this.lastProfileTs) {
+        this.lastProfileTs = newest.ts;
+        try {
+          this.onProfile(await openMessage(this.myPriv, this.peerPub, this.orderId, { iv: newest.iv!, ct: newest.ct! }));
         } catch {
           /* tampered / wrong key — drop */
         }
