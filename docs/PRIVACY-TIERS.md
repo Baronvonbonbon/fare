@@ -116,15 +116,19 @@ deposits being indistinguishable from yours, which means batching.
 Split the payout into two transactions with no shared identity:
 
 ```
-T1  driver signs an EIP-712 shield authorization (off-chain)
-    relay submits it → vault moves `bucket` from balanceOf[driver]
-                       into a shared shield buffer, queues `commitment`
-                       ── emits NO (driver, commitment) pair ──
+T1  driver signs an EIP-712 shield authorization (off-chain) and hands the
+    keeper its commitment OFF-CHAIN — the commitment must never ride in this
+    transaction's calldata, which is as public and permanent as storage.
+    relay submits it → vault moves `bucket` from balanceOf[driver] into a
+                       shared buffer and issues a TICKET
+                       ── on-chain: (driver, bucket, ticket#). No commitment. ──
 
-    ...delay: queue fills with other drivers' and venues' entries...
+    ...dwell: the queue fills with other drivers' and venues' tickets...
 
-T2  relay (keeper) executes a batch of N queued commitments in ONE tx
+T2  keeper executes a batch of N commitments in ONE tx, consuming the N
+    oldest tickets FIFO
     → N × pool.depositNative{value: bucket}(commitment_i)
+                       ── on-chain: N commitments. No account. ──
 ```
 
 An observer of T2 sees N equal-value deposits from the vault. An observer of T1
@@ -140,8 +144,12 @@ Design rules that make this hold:
 - **Minimum batch size.** Executing a batch of 1 is the §3 anti-pattern with extra
   steps. The queue must not execute below a floor (and the floor is a real
   liveness/latency tradeoff — see §8).
-- **Delay + shuffle.** Queue order must not be execution order, and T2 must not
-  chase T1. Both are keeper policy, not contract logic.
+- **Dwell.** A batch must not chase a just-queued ticket, or timing re-links it.
+  Enforced on-chain (`shieldMinDwell`) rather than left to keeper discipline.
+- **Ticket ownership is on-chain, commitment ownership is not.** A ticket records
+  its owner so the owner can reclaim a stalled one; that publishes only
+  (account, bucket, position), which T1's event already revealed. What is never
+  written anywhere is which commitment redeems which ticket.
 - **The buffer is fungible.** Value lives in one vault-held pool, not
   per-account, so the buffer balance itself reveals nothing about who queued.
 
