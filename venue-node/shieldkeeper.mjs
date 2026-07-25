@@ -158,12 +158,18 @@ async function insertsBetween(pool, provider, fromBlock, toBlock) {
 /// Has the oldest unconsumed ticket aged past the contract's dwell? Checking
 /// first turns a guaranteed revert into a no-op — the contract enforces this
 /// regardless, so the keeper only saves itself the gas.
-export async function dwellReady(vault, bucket, now = Math.floor(Date.now() / 1000)) {
+///
+/// Compares against CHAIN time, not the keeper's clock: the contract tests
+/// `queuedAt + dwell <= block.timestamp`, so a keeper whose clock trails the
+/// chain would sit on a ready queue forever (and one that runs ahead would
+/// submit reverts).
+export async function dwellReady(vault, bucket, provider, now) {
   const cursor = await vault.shieldScanned(bucket);
   const ticket = await vault.shieldTicket(bucket, cursor);
   if (ticket.owner === "0x0000000000000000000000000000000000000000") return false;
   const dwell = Number(await vault.shieldMinDwell());
-  return Number(ticket.queuedAt) + dwell <= now;
+  const chainNow = now ?? (await provider.getBlock("latest")).timestamp;
+  return Number(ticket.queuedAt) + dwell <= chainNow;
 }
 
 /// One keeper pass over every bucket that has commitments waiting.
@@ -177,7 +183,7 @@ export async function runOnce({ vault, pool, provider, store, submit, log = () =
     const live = Number(await vault.shieldPending(bucket));
     const batch = planBatch({ held, live, minBatch });
     if (!batch) continue;
-    if (!(await dwellReady(vault, bucket))) {
+    if (!(await dwellReady(vault, bucket, provider))) {
       log(`shield-keeper: bucket ${bucket} has ${batch.length} ready but the oldest ticket is still dwelling`);
       continue;
     }
