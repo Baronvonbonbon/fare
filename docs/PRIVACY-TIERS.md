@@ -198,6 +198,20 @@ Scope by stage: the driver's vehicle and contact are revealed at **assignment**,
 not at bid; the customer's drop details at **assignment**, not at order creation.
 Bidding needs fare, region, and reputation — not identity.
 
+**As built** (`web/src/regmeta.ts`): `metadataURI` carries
+`fare-meta:v1:<keccak256(canonical profile)>`, so no contract change was needed —
+the field was already a free-form string. The profile travels over the existing
+order thread (`channel.ts` kind `profile`) under the same per-order ECDH key, and
+the receiver refuses anything that doesn't hash to the commitment. Binding is
+half the point: a driver who could present any profile would have moved the
+problem off-chain rather than solved it. Two consequences worth knowing:
+
+- The chain holds a hash, so **the plaintext lives only on the driver's device**.
+  Losing it means re-registering a new commitment; the driver UI warns when a
+  committed profile has no local plaintext.
+- Private is the **default** at registration. A tier a handful of people opt into
+  is itself an identifying signal (§7).
+
 ---
 
 ## 6. Private discovery (phase 4 — the expensive one)
@@ -288,7 +302,8 @@ to be worth anything.
 |---|---|---|---|
 | **1a** | Batched shielded payouts (§4) — vault queue, batch, reclaim | `FareVault` | **built** |
 | **1b** | Keeper (`venue-node/shieldkeeper.mjs`) + client queue/claim (`web/src/shieldpayout.ts`) | no | **built** |
-| **1c** | Encrypted registration metadata (§5), disclosure capsule (§7), driver-facing UI | `FareDrivers`/`FareVenues` | open |
+| **1c** | Encrypted registration metadata (§5) + driver-facing UI — commitment in `metadataURI`, reveal over the order thread | no | **built** |
+| **1d** | Disclosure capsule (§7) | no | open |
 | **2** | Denomination policy tuning, known-roots retry, batch telemetry, tier UX | no | next |
 | **3** | Relay hardening: multi-relay, blinded queue authorization (ZK), no-log posture | new circuit | spike first |
 | **4** | Private discovery (§6): coarse board, assignment-time reveal, drop the on-chain venue edge | `FareOrders` events | after 3 |

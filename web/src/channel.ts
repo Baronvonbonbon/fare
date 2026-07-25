@@ -25,7 +25,7 @@ export function topicOf(orderId: string | bigint): string {
 export interface Envelope {
   from: string;
   seq: number;
-  kind: "hello" | "chat" | "loc" | "photo";
+  kind: "hello" | "chat" | "loc" | "photo" | "profile";
   ts: number;
   pub?: string;
   iv?: string;
@@ -106,6 +106,7 @@ export class OrderThread {
 
   private lastLocTs = 0;
   private lastPhotoTs = 0;
+  private lastProfileTs = 0;
 
   constructor(
     private orderId: string | bigint,
@@ -113,7 +114,8 @@ export class OrderThread {
     private myAddr: string,
     private peerAddr: string,
     private onLoc?: (loc: LocUpdate) => void, // B2: called with each new peer location
-    private onPhoto?: (p: PhotoRef) => void // B6: called with a proof-of-delivery photo pointer
+    private onPhoto?: (p: PhotoRef) => void, // B6: called with a proof-of-delivery photo pointer
+    private onProfile?: (canonicalJson: string) => void // §5: peer's committed profile, revealed at assignment
   ) {
     this.topic = topicOf(orderId);
   }
@@ -165,6 +167,21 @@ export class OrderThread {
     }
     const sealed = await sealMessage(this.myPriv, this.peerPub, this.orderId, JSON.stringify({ key: photoKey, id }));
     await post(this.topic, { from: this.myAddr, seq: 0, kind: "photo", ts: Date.now(), iv: sealed.iv, ct: sealed.ct });
+    return true;
+  }
+
+  /// Reveal our registration profile to the order counterparty (PRIVACY-TIERS
+  /// §5). The registry holds only a commitment, so this is how the other side
+  /// learns the name/vehicle/contact — and it is order-scoped, so revealing on
+  /// two orders produces unrelatable ciphertexts. The RECEIVER checks the
+  /// plaintext against the on-chain commitment; sending it proves nothing alone.
+  async sendProfile(canonicalJson: string): Promise<boolean> {
+    if (!this.peerPub) {
+      await this.open();
+      return false;
+    }
+    const sealed = await sealMessage(this.myPriv, this.peerPub, this.orderId, canonicalJson);
+    await post(this.topic, { from: this.myAddr, seq: 0, kind: "profile", ts: Date.now(), iv: sealed.iv, ct: sealed.ct });
     return true;
   }
 
@@ -243,6 +260,26 @@ export class OrderThread {
         try {
           const { key, id } = JSON.parse(await openMessage(this.myPriv, this.peerPub, this.orderId, { iv: newest.iv!, ct: newest.ct! }));
           if (typeof key === "string" && typeof id === "string") this.onPhoto({ key, id, ts: newest.ts });
+        } catch {
+          /* tampered / wrong key — drop */
+        }
+      }
+    }
+    // Pass 5 (§5): the peer's revealed registration profile. Handed up as raw
+    // canonical JSON — verifying it against their on-chain commitment is the
+    // caller's job (regmeta.openProfile), since only the caller knows which
+    // registry entry to check.
+    if (this.onProfile && this.peerPub) {
+      let newest: Envelope | null = null;
+      for (const e of thread) {
+        if (e.kind === "profile" && e.from.toLowerCase() === this.peerAddr.toLowerCase() && e.iv && e.ct) {
+          if (!newest || e.ts > newest.ts) newest = e;
+        }
+      }
+      if (newest && newest.ts > this.lastProfileTs) {
+        this.lastProfileTs = newest.ts;
+        try {
+          this.onProfile(await openMessage(this.myPriv, this.peerPub, this.orderId, { iv: newest.iv!, ct: newest.ct! }));
         } catch {
           /* tampered / wrong key — drop */
         }
