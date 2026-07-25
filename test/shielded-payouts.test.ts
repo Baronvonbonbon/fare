@@ -67,6 +67,14 @@ describe("shielded payouts (batched vault → pool)", () => {
     return { vault, pool, owner, keeper, crediter, drivers };
   }
 
+  /// Seal then deposit — the two halves of what used to be one call.
+  async function sealAndDeposit(f: any, bucket: bigint, commitments: string[], maxPerTx = 100) {
+    await f.vault.connect(f.keeper).sealShieldBatch(bucket, commitments.length);
+    for (let i = 0; i < commitments.length; i += maxPerTx) {
+      await f.vault.connect(f.keeper).depositShieldBatch(bucket, commitments.slice(i, i + maxPerTx));
+    }
+  }
+
   /// Queue `n` one-PAS tickets from distinct drivers and age them past dwell.
   async function queueAndAge(f: any, n: number, bucket = BUCKETS[0]) {
     for (let i = 0; i < n; i++) await f.vault.connect(f.drivers[i]).queueShieldCredit(bucket);
@@ -167,9 +175,12 @@ describe("shielded payouts (batched vault → pool)", () => {
       await queueAndAge(f, MIN_BATCH);
       const commitments = Array.from({ length: MIN_BATCH }, (_, i) => commitmentFor(`note-${i}`));
 
-      await expect(f.vault.connect(f.keeper).executeShieldBatch(BUCKETS[0], commitments))
-        .to.emit(f.vault, "ShieldBatchExecuted")
+      await expect(f.vault.connect(f.keeper).sealShieldBatch(BUCKETS[0], MIN_BATCH))
+        .to.emit(f.vault, "ShieldBatchSealed")
         .withArgs(f.keeper.address, BUCKETS[0], MIN_BATCH, 0);
+      await expect(f.vault.connect(f.keeper).depositShieldBatch(BUCKETS[0], commitments))
+        .to.emit(f.vault, "ShieldDeposited")
+        .withArgs(f.keeper.address, BUCKETS[0], MIN_BATCH);
 
       expect(await f.pool.depositCount()).to.equal(MIN_BATCH);
       for (const c of commitments) expect(await f.pool.depositedValue(c)).to.equal(BUCKETS[0]);
@@ -183,16 +194,15 @@ describe("shielded payouts (batched vault → pool)", () => {
       await queueAndAge(f, MIN_BATCH);
       const commitments = Array.from({ length: MIN_BATCH - 1 }, (_, i) => commitmentFor(`n${i}`));
       await expect(
-        f.vault.connect(f.keeper).executeShieldBatch(BUCKETS[0], commitments)
+        f.vault.connect(f.keeper).sealShieldBatch(BUCKETS[0], commitments.length)
       ).to.be.revertedWith("batch-too-small");
     });
 
     it("refuses to deposit more commitments than there are tickets", async () => {
       const f = await loadFixture(fixture);
       await queueAndAge(f, MIN_BATCH);
-      const commitments = Array.from({ length: MIN_BATCH + 1 }, (_, i) => commitmentFor(`n${i}`));
       await expect(
-        f.vault.connect(f.keeper).executeShieldBatch(BUCKETS[0], commitments)
+        f.vault.connect(f.keeper).sealShieldBatch(BUCKETS[0], MIN_BATCH + 1)
       ).to.be.revertedWith("not-enough-tickets");
     });
 
@@ -201,9 +211,8 @@ describe("shielded payouts (batched vault → pool)", () => {
       for (let i = 0; i < MIN_BATCH; i++) {
         await f.vault.connect(f.drivers[i]).queueShieldCredit(BUCKETS[0]);
       }
-      const commitments = Array.from({ length: MIN_BATCH }, (_, i) => commitmentFor(`n${i}`));
       await expect(
-        f.vault.connect(f.keeper).executeShieldBatch(BUCKETS[0], commitments)
+        f.vault.connect(f.keeper).sealShieldBatch(BUCKETS[0], MIN_BATCH)
       ).to.be.revertedWith("dwell-not-met");
     });
 
@@ -212,7 +221,10 @@ describe("shielded payouts (batched vault → pool)", () => {
       await queueAndAge(f, MIN_BATCH);
       const commitments = Array.from({ length: MIN_BATCH }, (_, i) => commitmentFor(`n${i}`));
       await expect(
-        f.vault.connect(f.drivers[0]).executeShieldBatch(BUCKETS[0], commitments)
+        f.vault.connect(f.drivers[0]).sealShieldBatch(BUCKETS[0], MIN_BATCH)
+      ).to.be.revertedWith("not-keeper");
+      await expect(
+        f.vault.connect(f.drivers[0]).depositShieldBatch(BUCKETS[0], commitments)
       ).to.be.revertedWith("not-keeper");
     });
 
@@ -222,9 +234,8 @@ describe("shielded payouts (batched vault → pool)", () => {
       for (let i = 0; i < 2; i++) await f.vault.connect(f.drivers[i]).queueShieldCredit(BUCKETS[1]);
       await time.increase(MIN_DWELL + 1);
 
-      const commitments = Array.from({ length: MIN_BATCH }, (_, i) => commitmentFor(`five-${i}`));
       await expect(
-        f.vault.connect(f.keeper).executeShieldBatch(BUCKETS[1], commitments)
+        f.vault.connect(f.keeper).sealShieldBatch(BUCKETS[1], MIN_BATCH)
       ).to.be.revertedWith("not-enough-tickets");
 
       // The 1-PAS queue is untouched by the failed 5-PAS attempt.
@@ -281,7 +292,7 @@ describe("shielded payouts (batched vault → pool)", () => {
       const f = await loadFixture(fixture);
       await queueAndAge(f, MIN_BATCH);
       const commitments = Array.from({ length: MIN_BATCH }, (_, i) => commitmentFor(`n${i}`));
-      await f.vault.connect(f.keeper).executeShieldBatch(BUCKETS[0], commitments);
+      await sealAndDeposit(f, BUCKETS[0], commitments);
       await time.increase(RECLAIM_AFTER + 1);
       await expect(
         f.vault.connect(f.drivers[0]).reclaimShieldTicket(BUCKETS[0], 0)
@@ -302,7 +313,7 @@ describe("shielded payouts (batched vault → pool)", () => {
 
       // A full batch still executes, stepping over ticket 3.
       const commitments = Array.from({ length: MIN_BATCH }, (_, i) => commitmentFor(`n${i}`));
-      await f.vault.connect(f.keeper).executeShieldBatch(BUCKETS[0], commitments);
+      await sealAndDeposit(f, BUCKETS[0], commitments);
       expect(await f.pool.depositCount()).to.equal(MIN_BATCH);
       expect(await f.vault.shieldPending(BUCKETS[0])).to.equal(total - 1 - MIN_BATCH);
 
@@ -317,9 +328,13 @@ describe("shielded payouts (batched vault → pool)", () => {
   describe("accounting", () => {
     it("the buffer always equals the live tickets it stands behind", async () => {
       const f = await loadFixture(fixture);
+      // Buffer covers BOTH live tickets and sealed deposits not yet made.
       const live = async () => {
         let sum = 0n;
-        for (const b of BUCKETS) sum += b * BigInt(await f.vault.shieldPending(b));
+        for (const b of BUCKETS) {
+          sum += b * BigInt(await f.vault.shieldPending(b));
+          sum += b * BigInt(await f.vault.shieldOwed(b));
+        }
         return sum;
       };
 
@@ -332,7 +347,7 @@ describe("shielded payouts (batched vault → pool)", () => {
       expect(await f.vault.shieldBuffer()).to.equal(await live());
 
       const commitments = Array.from({ length: MIN_BATCH }, (_, i) => commitmentFor(`n${i}`));
-      await f.vault.connect(f.keeper).executeShieldBatch(BUCKETS[0], commitments);
+      await sealAndDeposit(f, BUCKETS[0], commitments);
       expect(await f.vault.shieldBuffer()).to.equal(await live());
     });
 
@@ -385,6 +400,74 @@ describe("shielded payouts (batched vault → pool)", () => {
     });
   });
 
+  describe("anonymity set (phase 2)", () => {
+    it("is the seal size, not the number of deposits a transaction can hold", async () => {
+      // The regression this guards is the live-run finding: sealing and
+      // depositing together made the per-transaction deposit ceiling (2 on
+      // Paseo, a proof-size bound) the anonymity set, because an observer reads
+      // shieldScanned before/after and learns whose tickets those commitments
+      // were. Split, a deposit transaction references no ticket at all.
+      const f = await loadFixture(fixture);
+      await queueAndAge(f, MIN_BATCH);
+      const commitments = Array.from({ length: MIN_BATCH }, (_, i) => commitmentFor(`anon-${i}`));
+
+      const seal = await f.vault.connect(f.keeper).sealShieldBatch(BUCKETS[0], MIN_BATCH);
+      const sealReceipt = await seal.wait();
+      // The seal moves the cursor over all 8 tickets and names no commitment.
+      expect(await f.vault.shieldScanned(BUCKETS[0])).to.equal(MIN_BATCH);
+      expect(await f.vault.shieldOwed(BUCKETS[0])).to.equal(MIN_BATCH);
+      const sealBlob = (seal.data + sealReceipt!.logs.map((l) => l.data + l.topics.join("")).join("")).toLowerCase();
+      for (const c of commitments) expect(sealBlob).to.not.include(c.slice(2).toLowerCase());
+
+      // Deposits arrive two at a time — the chain ceiling — and the cursor does
+      // NOT move with them, so no deposit can be aligned to any ticket.
+      for (let i = 0; i < MIN_BATCH; i += 2) {
+        const scannedBefore = await f.vault.shieldScanned(BUCKETS[0]);
+        const tx = await f.vault.connect(f.keeper).depositShieldBatch(BUCKETS[0], commitments.slice(i, i + 2));
+        const rec = await tx.wait();
+        expect(await f.vault.shieldScanned(BUCKETS[0])).to.equal(scannedBefore);
+
+        const blob = (tx.data + rec!.logs.map((l) => l.data + l.topics.join("")).join("")).toLowerCase();
+        for (let d = 0; d < MIN_BATCH; d++) {
+          expect(blob, "a deposit tx named a ticket owner").to.not.include(f.drivers[d].address.slice(2).toLowerCase());
+        }
+      }
+      expect(await f.pool.depositCount()).to.equal(MIN_BATCH);
+      expect(await f.vault.shieldOwed(BUCKETS[0])).to.equal(0);
+      expect(await f.vault.shieldBuffer()).to.equal(0);
+    });
+
+    it("will not deposit more than has been sealed", async () => {
+      const f = await loadFixture(fixture);
+      await queueAndAge(f, MIN_BATCH);
+      await f.vault.connect(f.keeper).sealShieldBatch(BUCKETS[0], MIN_BATCH);
+      const tooMany = Array.from({ length: MIN_BATCH + 1 }, (_, i) => commitmentFor(`x${i}`));
+      await expect(
+        f.vault.connect(f.keeper).depositShieldBatch(BUCKETS[0], tooMany)
+      ).to.be.revertedWith("not-sealed");
+    });
+
+    it("will not deposit against tickets that were never sealed", async () => {
+      const f = await loadFixture(fixture);
+      await queueAndAge(f, MIN_BATCH);
+      await expect(
+        f.vault.connect(f.keeper).depositShieldBatch(BUCKETS[0], [commitmentFor("solo")])
+      ).to.be.revertedWith("not-sealed");
+    });
+
+    it("a sealed ticket can no longer be reclaimed", async () => {
+      // Sealing is the point of no return: the value is owed to a deposit and
+      // the ticket is gone, so reclaim must refuse rather than double-spend it.
+      const f = await loadFixture(fixture);
+      await queueAndAge(f, MIN_BATCH);
+      await f.vault.connect(f.keeper).sealShieldBatch(BUCKETS[0], MIN_BATCH);
+      await time.increase(RECLAIM_AFTER + 1);
+      await expect(
+        f.vault.connect(f.drivers[0]).reclaimShieldTicket(BUCKETS[0], 0)
+      ).to.be.revertedWith("already-deposited");
+    });
+  });
+
   // ── the privacy invariants ────────────────────────────────────────────────
   // These are the reason the design is two transactions. A future change that
   // "helpfully" reunites the account with the commitment — a convenience
@@ -408,7 +491,8 @@ describe("shielded payouts (batched vault → pool)", () => {
       const f = await loadFixture(fixture);
       await queueAndAge(f, MIN_BATCH);
       const commitments = Array.from({ length: MIN_BATCH }, (_, i) => commitmentFor(`note-${i}`));
-      const tx = await f.vault.connect(f.keeper).executeShieldBatch(BUCKETS[0], commitments);
+      await f.vault.connect(f.keeper).sealShieldBatch(BUCKETS[0], MIN_BATCH);
+      const tx = await f.vault.connect(f.keeper).depositShieldBatch(BUCKETS[0], commitments);
       const receipt = await tx.wait();
 
       // No ticket owner may appear in the calldata or in any log of the batch —
@@ -436,7 +520,8 @@ describe("shielded payouts (batched vault → pool)", () => {
         txs.push({ data: tx.data, logs: r!.logs.map((l) => l.data + l.topics.join("")).join("") });
       }
       await time.increase(MIN_DWELL + 1);
-      const batch = await f.vault.connect(f.keeper).executeShieldBatch(BUCKETS[0], notes);
+      await f.vault.connect(f.keeper).sealShieldBatch(BUCKETS[0], MIN_BATCH);
+      const batch = await f.vault.connect(f.keeper).depositShieldBatch(BUCKETS[0], notes);
       const batchReceipt = await batch.wait();
       txs.push({
         data: batch.data,

@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { planBatch, shuffle, createStore, batchReceipt } from "./shieldkeeper.mjs";
+import { planBatch, shuffle, depositChunks, createStore, batchReceipt } from "./shieldkeeper.mjs";
 
 const C = (n) => `0x${String(n).padStart(64, "0")}`;
 const held = (n) => Array.from({ length: n }, (_, i) => C(i));
@@ -118,11 +118,17 @@ test("store: a corrupt file does not stop the keeper booting", () => {
   }
 });
 
-test("planBatch: respects the chain's per-transaction deposit ceiling", () => {
-  // Paseo rejects >2 pool deposits in one tx (proof size, not gas). Because the
-  // contract consumes tickets FIFO, that ceiling caps the anonymity set — so the
-  // keeper must submit several smaller batches rather than one oversized revert.
-  assert.equal(planBatch({ held: held(8), live: 8, minBatch: 2, maxBatch: 2 }).length, 2);
-  assert.equal(planBatch({ held: held(8), live: 8, minBatch: 8, maxBatch: 2 }), null);
-  assert.equal(planBatch({ held: held(8), live: 8, minBatch: 2 }).length, 8); // unset = no ceiling
+test("depositChunks: the chain ceiling splits deposits, never the seal", () => {
+  // Paseo rejects >2 pool deposits per tx (proof size, not gas). The seal is
+  // what the anonymity set is measured in and is NOT chunked — chunking the
+  // deposits costs nothing, because they name no account and no ticket.
+  assert.deepEqual(depositChunks(held(5), 2).map((c) => c.length), [2, 2, 1]);
+  assert.deepEqual(depositChunks(held(2), 2).map((c) => c.length), [2]);
+  assert.deepEqual(depositChunks([], 2), []);
+  // The whole batch still gets deposited, once, in order.
+  assert.deepEqual(depositChunks(held(5), 2).flat(), held(5));
+});
+
+test("planBatch: seals everything available — the ceiling is not a privacy cap", () => {
+  assert.equal(planBatch({ held: held(16), live: 16, minBatch: 8 }).length, 16);
 });

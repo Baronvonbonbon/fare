@@ -6,8 +6,15 @@
 //   T1  queueShieldCreditFor  — the relay submits the driver's EIP-712
 //       authorization. On-chain: (account, bucket, ticket#). The commitment is
 //       handed to this keeper OFF-CHAIN and must never reach that calldata.
-//   T2  executeShieldBatch    — this keeper deposits N >= minBatch commitments in
-//       one transaction. On-chain: N commitments, no account.
+//   T2  sealShieldBatch       — this keeper consumes N >= minBatch tickets FIFO.
+//       On-chain: N accounts served, no commitment.
+//   T3  depositShieldBatch    — the keeper deposits commitments against sealed
+//       tickets. On-chain: commitments, no account and no ticket.
+//
+// T2 and T3 are separate because merging them made the number of deposits a
+// transaction can hold the anonymity set — 2 on Paseo, where the limit is proof
+// size rather than gas. Split, the anonymity set is the SEAL size and the chain
+// ceiling only decides how many deposit transactions follow.
 //
 // So the keeper is the only party holding the pairing. That is a real trust
 // concession, stated plainly in §4: an authorized keeper can substitute its own
@@ -45,15 +52,23 @@ export function shuffle(items) {
 /// when drivers queued through a different relay — so the batch size is the
 /// smaller of the two, and it must still clear minBatch on its own.
 ///
-/// `maxBatch` exists because Paseo Asset Hub rejects more than 2 pool deposits
-/// in one transaction, at gas far below any limit — a proof-size bound that EVM
-/// gas doesn't express (docs/PRIVACY-TIERS.md §8). Since the contract consumes
-/// tickets FIFO, the per-transaction batch size IS the anonymity set, so this
-/// ceiling is a privacy parameter, not a throughput knob.
-export function planBatch({ held, live, minBatch, maxBatch = Infinity }) {
-  const n = Math.min(held.length, live, maxBatch);
+/// The seal is what the anonymity set is measured in, so it is NOT capped by the
+/// chain's per-transaction deposit ceiling — sealing touches no external
+/// contract. `depositChunk` below is where that ceiling applies.
+export function planBatch({ held, live, minBatch }) {
+  const n = Math.min(held.length, live);
   if (n < minBatch) return null;
   return shuffle(held).slice(0, n);
+}
+
+/// Split a sealed batch into deposit-sized calls. Paseo rejects more than 2 pool
+/// deposits per transaction (proof size, not gas — a 2-deposit call estimates
+/// ~40 k), so the keeper submits several. None of them names an account or a
+/// ticket, so splitting costs no privacy.
+export function depositChunks(commitments, maxPerTx = 2) {
+  const out = [];
+  for (let i = 0; i < commitments.length; i += maxPerTx) out.push(commitments.slice(i, i + maxPerTx));
+  return out;
 }
 
 /// Per-commitment tree positions for a mined batch. The keeper publishes only
@@ -179,64 +194,76 @@ export async function dwellReady(vault, bucket, provider, now) {
   return Number(ticket.queuedAt) + dwell <= chainNow;
 }
 
-/// One keeper pass over every bucket that has commitments waiting.
+/// One keeper pass over every bucket that has commitments waiting: seal the
+/// whole batch in one transaction, then deposit it in chain-sized chunks.
 /// `submit` runs the transaction (the relay passes its nonce-serializing wrapper).
-export async function runOnce({ vault, pool, provider, store, submit, maxBatch, log = () => {} }) {
+export async function runOnce({ vault, pool, provider, store, submit, maxPerTx = 2, log = () => {} }) {
   const minBatch = Number(await vault.shieldMinBatch());
   const executed = [];
 
   for (const bucket of store.buckets()) {
     const held = store.heldFor(bucket);
     const live = Number(await vault.shieldPending(bucket));
-    const batch = planBatch({ held, live, minBatch, maxBatch });
+    const batch = planBatch({ held, live, minBatch });
     if (!batch) continue;
     if (!(await dwellReady(vault, bucket, provider))) {
       log(`shield-keeper: bucket ${bucket} has ${batch.length} ready but the oldest ticket is still dwelling`);
       continue;
     }
 
-    // Snapshot BEFORE submitting — inside the batch transaction the later
-    // inserts overwrite the levels the earlier leaves needed, so there is no
-    // after-the-fact read that reconstructs this.
-    const { snapBlock, startIndex, preSideNodes } = await snapshotTree(pool, provider);
-    const tx = await submit((overrides = {}) => vault.executeShieldBatch(bucket, batch, overrides));
-    const rec = await tx.wait();
+    // 1. Seal — consumes the tickets, names no commitment. This transaction is
+    //    where the anonymity set is set, so it takes the WHOLE batch.
+    const sealTx = await submit((o = {}) => vault.sealShieldBatch(bucket, batch.length, o));
+    await sealTx.wait();
+    log(`shield-keeper: sealed ${batch.length} × ${bucket} (${sealTx.hash})`);
 
-    // Anyone may deposit between the snapshot and inclusion, which shifts both
-    // the indices and the tree state the snapshot describes. Recover by
-    // replaying: find where we actually landed, then prepend whatever leaves
-    // slipped in ahead of us so the recipients' replay starts from a state the
-    // snapshot really does describe.
-    const landed = await resolveStartIndex({ pool, provider, receipt: rec, batch });
-    if (landed == null) {
-      log(`shield-keeper: batch ${tx.hash} mined but its deposits were not found in the receipt`);
-      continue;
-    }
-    const jumped = landed - startIndex;
-    let replay = batch;
-    if (jumped > 0) {
-      const before = await insertsBetween(pool, provider, snapBlock, rec.blockNumber);
-      const ourFirst = Math.min(...rec.logs.filter((l) => l.transactionHash === tx.hash).map((l) => l.index));
-      const preceding = before
-        .filter((l) => l.blockNumber < rec.blockNumber || l.index < ourFirst)
-        .slice(-jumped)
-        .map((l) => BigInt(l.data.slice(0, 66)).toString());
-      if (preceding.length !== jumped) {
-        // Can't describe the gap → a derived path would be silently wrong.
-        // Leave the commitments pending: the tickets are spent either way, but a
-        // flagged failure is recoverable and a bad note is not.
-        log(`shield-keeper: batch ${tx.hash} landed at ${landed}, expected ${startIndex}, and the ${jumped}-leaf gap could not be reconstructed — MANUAL RECOVERY NEEDED`);
+    // 2. Deposit — names no account and no ticket, so it can be split across as
+    //    many transactions as the chain requires without costing privacy.
+    for (const chunk of depositChunks(batch, maxPerTx)) {
+      // Snapshot immediately before each deposit call: within one call the later
+      // inserts overwrite the levels the earlier leaves needed, so there is no
+      // after-the-fact read that reconstructs this.
+      const { snapBlock, startIndex, preSideNodes } = await snapshotTree(pool, provider);
+      const tx = await submit((o = {}) => vault.depositShieldBatch(bucket, chunk, o));
+      const rec = await tx.wait();
+
+      // Anyone may deposit between the snapshot and inclusion, which shifts both
+      // the indices and the tree state the snapshot describes. Recover by
+      // replaying: find where we actually landed, then prepend whatever leaves
+      // slipped in ahead of us so recipients replay from a state the snapshot
+      // really does describe.
+      const landed = await resolveStartIndex({ pool, provider, receipt: rec, batch: chunk });
+      if (landed == null) {
+        log(`shield-keeper: deposit ${tx.hash} mined but its deposits were not found in the receipt — MANUAL RECOVERY NEEDED`);
         continue;
       }
-      replay = [...preceding, ...batch];
-    }
+      const jumped = landed - startIndex;
+      let replay = chunk;
+      if (jumped > 0) {
+        const before = await insertsBetween(pool, provider, snapBlock, rec.blockNumber);
+        const ourFirst = Math.min(...rec.logs.filter((l) => l.transactionHash === tx.hash).map((l) => l.index));
+        const preceding = before
+          .filter((l) => l.blockNumber < rec.blockNumber || l.index < ourFirst)
+          .slice(-jumped)
+          // Same 0x-padded form the caller's commitments use — a replay list
+          // that mixes encodings is a trap for anything comparing strings.
+          .map((l) => "0x" + BigInt(l.data.slice(0, 66)).toString(16).padStart(64, "0"));
+        if (preceding.length !== jumped) {
+          // Can't describe the gap → a derived path would be silently wrong.
+          // A flagged failure is recoverable; a bad note is not.
+          log(`shield-keeper: deposit ${tx.hash} landed at ${landed}, expected ${startIndex}, and the ${jumped}-leaf gap could not be reconstructed — MANUAL RECOVERY NEEDED`);
+          continue;
+        }
+        replay = [...preceding, ...chunk];
+      }
 
-    store.settle(batchReceipt({
-      bucket, txHash: tx.hash, blockNumber: rec.blockNumber,
-      startIndex, preSideNodes, commitments: replay, mine: batch,
-    }));
-    executed.push({ bucket, count: batch.length, txHash: tx.hash });
-    log(`shield-keeper: deposited ${batch.length} × ${bucket} at leaf ${landed} (${tx.hash})`);
+      store.settle(batchReceipt({
+        bucket, txHash: tx.hash, blockNumber: rec.blockNumber,
+        startIndex, preSideNodes, commitments: replay, mine: chunk,
+      }));
+      executed.push({ bucket, count: chunk.length, txHash: tx.hash, sealTxHash: sealTx.hash });
+      log(`shield-keeper: deposited ${chunk.length} × ${bucket} at leaf ${landed} (${tx.hash})`);
+    }
   }
   return executed;
 }

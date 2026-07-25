@@ -46,6 +46,14 @@ contract MockShieldPool {
         _sideNodes[level] = value;
     }
 
+    /// Mirror a reference LeanIMT's sideNodes in one call. The real pool
+    /// maintains these itself; the mock is told, because Poseidon lives in a
+    /// precompile the test chain doesn't have.
+    function setSideNodes(uint256[] calldata levels, uint256[] calldata values) external {
+        require(levels.length == values.length, "length");
+        for (uint256 i = 0; i < levels.length; i++) _sideNodes[levels[i]] = values[i];
+    }
+
     function depositCount() external view returns (uint256) {
         return commitments.length;
     }

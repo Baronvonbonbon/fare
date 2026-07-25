@@ -58,9 +58,14 @@ contract FareVault is Ownable2Step, PaseoSafeSender, FareUpgradable, EIP712 {
     //   T1 queueShieldCredit — moves a FIXED bucket from balanceOf into the
     //      shared buffer and takes a ticket. Public: (account, bucket). No
     //      commitment exists on-chain yet.
-    //   T2 executeShieldBatch — a keeper deposits N commitments (N >= minBatch)
-    //      in one transaction, consuming the N oldest tickets FIFO. Public:
-    //      N equal-value deposits from the vault, with no account beside them.
+    //   T2 sealShieldBatch — a keeper consumes the N oldest tickets FIFO
+    //      (N >= minBatch), naming no commitment. Public: N accounts served.
+    //   T3 depositShieldBatch — the keeper deposits commitments against sealed
+    //      tickets, naming no account and no ticket. Public: the commitments.
+    //
+    // T2 and T3 are separate because merging them made the number of deposits a
+    // transaction can hold the anonymity set — 2 on Paseo. Split, the anonymity
+    // set is the SEAL size (docs/E2E-PRIVACY-LIVE.md §2).
     //
     // Pairing T1 with T2 means guessing which of the N commitments is whose, so
     // the anonymity set is the batch on top of the pool's own. Bucketing is
@@ -86,14 +91,16 @@ contract FareVault is Ownable2Step, PaseoSafeSender, FareUpgradable, EIP712 {
     }
     mapping(uint96 => mapping(uint64 => ShieldTicket)) public shieldTicket; // bucket => ticket# => ticket
     mapping(uint96 => uint64) public shieldQueued; // bucket => tickets ever taken
-    mapping(uint96 => uint64) public shieldScanned; // bucket => FIFO cursor (deposited + skipped)
-    mapping(uint96 => uint64) public shieldLive; // bucket => tickets awaiting deposit
+    mapping(uint96 => uint64) public shieldScanned; // bucket => FIFO cursor (sealed + skipped)
+    mapping(uint96 => uint64) public shieldLive; // bucket => tickets awaiting a seal
+    mapping(uint96 => uint64) public shieldSealed; // bucket => deposits owed, no longer tied to a ticket
 
     bytes32 private constant SHIELD_TYPEHASH =
         keccak256("ShieldCredit(address account,uint96 bucket,uint256 nonce,uint256 deadline)");
 
     event ShieldQueued(address indexed account, uint96 indexed bucket, uint64 ticket);
-    event ShieldBatchExecuted(address indexed keeper, uint96 indexed bucket, uint64 count, uint64 firstTicket);
+    event ShieldBatchSealed(address indexed keeper, uint96 indexed bucket, uint64 count, uint64 firstTicket);
+    event ShieldDeposited(address indexed keeper, uint96 indexed bucket, uint64 count);
     event ShieldReclaimed(address indexed account, uint96 indexed bucket, uint64 ticket);
     event ShieldPoolSet(address indexed pool);
     event ShieldBucketsSet(uint96[] buckets);
@@ -177,9 +184,15 @@ contract FareVault is Ownable2Step, PaseoSafeSender, FareUpgradable, EIP712 {
         return shieldBuckets.length;
     }
 
-    /// @notice Tickets queued but not yet deposited or reclaimed, for `bucket`.
+    /// @notice Tickets queued but not yet sealed or reclaimed, for `bucket`.
     function shieldPending(uint96 bucket) public view returns (uint64) {
         return shieldLive[bucket];
+    }
+
+    /// @notice Deposits owed against sealed tickets — value the buffer still
+    ///         holds but no ticket can reclaim.
+    function shieldOwed(uint96 bucket) external view returns (uint64) {
+        return shieldSealed[bucket];
     }
 
     function setAuthorized(address account, bool enabled) external onlyOwner {
@@ -303,24 +316,35 @@ contract FareVault is Ownable2Step, PaseoSafeSender, FareUpgradable, EIP712 {
     }
 
     /// @notice Keeper: deposit `commitments` into the shielded pool, consuming
-    ///         the oldest tickets of `bucket` FIFO. One transaction, N equal
-    ///         deposits, no account named — that is the whole privacy argument,
-    ///         so the batch floor and dwell are enforced here rather than left
-    ///         to keeper discipline.
-    function executeShieldBatch(uint96 bucket, bytes32[] calldata commitments) external nonReentrant {
+    ///         the oldest tickets of `bucket` FIFO — WITHOUT naming a single
+    ///         commitment. Deposits happen separately (`depositShieldBatch`).
+    ///
+    /// @dev The split is the phase-2 fix, and it is not an optimization. Sealing
+    ///      and depositing in one transaction made the number of deposits that
+    ///      fit in a transaction the anonymity set, because an observer reads
+    ///      `shieldScanned` before and after and learns exactly which accounts'
+    ///      tickets those commitments belong to. Paseo caps a transaction at TWO
+    ///      pool deposits — a proof-size bound, not gas — so that ceiling was
+    ///      capping privacy at 2-anonymity (docs/E2E-PRIVACY-LIVE.md §2).
+    ///
+    ///      Sealing touches no external contract, so it is cheap and can consume
+    ///      a large batch. The deposits that follow reference no ticket at all,
+    ///      so nothing aligns a commitment with an account: the anonymity set is
+    ///      the SEAL size, and the chain's per-transaction limit only decides how
+    ///      many transactions the deposits take.
+    function sealShieldBatch(uint96 bucket, uint64 count) external nonReentrant {
         require(shieldKeeper[msg.sender], "not-keeper");
         require(address(shieldPool) != address(0), "shield-off");
-        uint64 n = uint64(commitments.length);
-        require(n >= shieldMinBatch, "batch-too-small");
-        require(shieldLive[bucket] >= n, "not-enough-tickets");
+        require(count >= shieldMinBatch, "batch-too-small");
+        require(shieldLive[bucket] >= count, "not-enough-tickets");
 
-        // Walk the FIFO cursor forward over `n` live tickets, stepping past any
-        // that were reclaimed while queued. Skipping is paid once — the cursor
-        // stays advanced — so a burst of reclaims can't wedge the queue.
+        // Walk the FIFO cursor forward over `count` live tickets, stepping past
+        // any that were reclaimed while queued. Skipping is paid once — the
+        // cursor stays advanced — so a burst of reclaims can't wedge the queue.
         uint64 first = shieldScanned[bucket];
         uint64 idx = first;
         uint64 taken = 0;
-        while (taken < n) {
+        while (taken < count) {
             ShieldTicket storage t = shieldTicket[bucket][idx];
             if (!t.reclaimed) {
                 require(t.queuedAt + shieldMinDwell <= block.timestamp, "dwell-not-met");
@@ -329,13 +353,31 @@ contract FareVault is Ownable2Step, PaseoSafeSender, FareUpgradable, EIP712 {
             idx++;
         }
 
-        // Effects before the external calls: the tickets are spent even if a
-        // single deposit reverts, and the whole batch unwinds together.
         shieldScanned[bucket] = idx;
-        shieldLive[bucket] -= n;
-        uint256 total = uint256(bucket) * n;
-        shieldBuffer -= total;
-        emit ShieldBatchExecuted(msg.sender, bucket, n, first);
+        shieldLive[bucket] -= count;
+        shieldSealed[bucket] += count;
+        emit ShieldBatchSealed(msg.sender, bucket, count, first);
+    }
+
+    /// @notice Keeper: deposit commitments against already-sealed tickets. Names
+    ///         no account and no ticket — the only two things that could pair a
+    ///         commitment with a payee.
+    /// @dev Deliberately NOT floored by `shieldMinBatch`: a single deposit here
+    ///      discloses nothing, because the accounts were sealed in a separate
+    ///      transaction covering a much larger set. The caller sizes each call to
+    ///      whatever the chain accepts (two, on Paseo).
+    function depositShieldBatch(uint96 bucket, bytes32[] calldata commitments) external nonReentrant {
+        require(shieldKeeper[msg.sender], "not-keeper");
+        require(address(shieldPool) != address(0), "shield-off");
+        uint64 n = uint64(commitments.length);
+        require(n > 0, "empty-batch");
+        require(shieldSealed[bucket] >= n, "not-sealed");
+
+        // Effects before the external calls; the whole call unwinds together if a
+        // single deposit reverts.
+        shieldSealed[bucket] -= n;
+        shieldBuffer -= uint256(bucket) * n;
+        emit ShieldDeposited(msg.sender, bucket, n);
 
         for (uint256 i = 0; i < commitments.length; i++) {
             shieldPool.depositNative{value: bucket}(commitments[i]);

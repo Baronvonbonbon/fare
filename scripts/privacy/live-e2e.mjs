@@ -33,15 +33,18 @@ const RPC = process.env.TESTNET_RPC ?? "https://eth-rpc-testnet.polkadot.io/";
 // The v7-artifact-matching deployment. The docs' address reverts on deposit —
 // see docs/KUSAMA-SHIELD-FINDINGS.md.
 const POOL = process.env.SHIELD_POOL ?? "0x7d5a496bD61b631025A828d9049f6A68e007e0dC";
-const PAYEES = Number(process.env.PAYEES ?? 4);
+const PAYEES = Number(process.env.PAYEES ?? 8);
 // Paseo rejects more than 2 pool deposits in one transaction — at gas far below
-// any limit, so it is a proof-size bound EVM gas doesn't express. Because the
-// contract consumes tickets FIFO, this ceiling caps the per-batch anonymity set.
-const MAX_BATCH = Number(process.env.MAX_BATCH ?? 2);
-const MIN_BATCH = Number(process.env.MIN_BATCH ?? 2);
+// any limit, so it is a proof-size bound EVM gas doesn't express. Since phase 2
+// split sealing from depositing, this only decides how many deposit
+// transactions follow; the anonymity set is the SEAL size (MIN_BATCH).
+const MAX_PER_TX = Number(process.env.MAX_PER_TX ?? 2);
+const MIN_BATCH = Number(process.env.MIN_BATCH ?? 8);
 const DWELL = Number(process.env.DWELL ?? 60); // seconds; 5 min in production
 const BUCKET = ethers.parseEther("1");
-const OUT = path.join(ROOT, "artifacts", "privacy-live");
+// NOT under artifacts/ — hardhat's typechain scans that tree and chokes on any
+// JSON that isn't an ABI.
+const OUT = path.join(ROOT, "e2e-runs", "privacy-live");
 
 const POOL_ABI = [
   "function depositNative(bytes32 commitment) payable",
@@ -150,15 +153,15 @@ async function main() {
 
   const poolTreeBefore = Number(await pool.treeSize());
   const batches = [];
-  for (let i = 0; i < Math.ceil(PAYEES / MAX_BATCH) + 1; i++) {
+  for (let i = 0; i < 2; i++) {
     const executed = await keeperTick({
-      vault, pool, provider, store, maxBatch: MAX_BATCH,
+      vault, pool, provider, store, maxPerTx: MAX_PER_TX,
       submit: (call) => call({ gasLimit: 500_000_000n }),
       log: (m) => log(`   ${m}`),
     });
     if (executed.length === 0) break;
-    batches.push(executed[0]);
-    record("batch", { tx: executed[0].txHash, count: executed[0].count });
+    batches.push(...executed);
+    for (const e of executed) record("deposit", { tx: e.txHash, count: e.count, seal: e.sealTxHash });
   }
   if (batches.length === 0) throw new Error("keeper produced no batch — see the log above");
 
@@ -213,7 +216,8 @@ async function main() {
   const report = {
     ranAt: new Date().toISOString(), rpc: RPC, pool: POOL, vault: vaultAddr,
     payees: PAYEES, bucketPAS: ethers.formatEther(BUCKET), dwellSeconds: DWELL,
-    minBatch: MIN_BATCH, maxBatchPerTx: MAX_BATCH,
+    sealSize: MIN_BATCH, maxDepositsPerTx: MAX_PER_TX,
+    sealTx: batches[0]?.sealTxHash,
     batches: batches.map((b) => ({ count: b.count, tx: b.txHash })),
     poolTreeBefore, poolTreeAfter,
     derivedIndex: index, withdrawTx: wtx.hash, recipient,
@@ -223,7 +227,8 @@ async function main() {
 
   log(`\n✅ contract-originated deposits accepted; a batched note spent to a fresh address`);
   log(`   vault    ${vaultAddr}`);
-  log(`   batches  ${batches.length} × ≤${MAX_BATCH} deposits (Paseo per-tx ceiling)`);
+  log(`   seal     ${batches[0]?.sealTxHash} (${MIN_BATCH} tickets — the anonymity set)`);
+  log(`   deposits ${batches.length} txs × ≤${MAX_PER_TX} (Paseo per-tx ceiling)`);
   log(`   withdraw ${wtx.hash} → ${recipient} (${ethers.formatEther(after - before)} PAS)`);
   log(`   report   artifacts/privacy-live/report.json\n`);
 }

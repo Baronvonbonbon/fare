@@ -152,7 +152,8 @@ const VAULT_ABI = [
   "function withdrawToken(address token)",              // sweep the relay's own token balance out
   // shielded payouts (privacy phase 1)
   "function queueShieldCreditFor(address account, uint96 bucket, uint256 deadline, bytes signature)",
-  "function executeShieldBatch(uint96 bucket, bytes32[] commitments)",
+  "function sealShieldBatch(uint96 bucket, uint64 count)",
+  "function depositShieldBatch(uint96 bucket, bytes32[] commitments)",
   "function shieldPending(uint96 bucket) view returns (uint64)",
   "function shieldScanned(uint96 bucket) view returns (uint64)",
   "function shieldTicket(uint96 bucket, uint64 ticket) view returns (address owner, uint64 queuedAt, bool reclaimed)",
@@ -169,12 +170,17 @@ const GAS_WITHDRAW = 200_000n;
 //                        travels in the request BODY and is held off-chain; it
 //                        must never reach this transaction's calldata.
 //   keeper tick        — once minBatch commitments are held for a bucket and the
-//                        oldest ticket has dwelled, deposit them in ONE batch.
+//                        oldest ticket has dwelled, SEAL them in one transaction
+//                        (that seal size is the anonymity set) and then deposit
+//                        them in chain-sized chunks that name no account.
 // Trust: a keeper holds the pairing and could substitute its own commitments for
 // the drivers' (PRIVACY-TIERS §4). Only run this on a relay the payees trust.
 const SHIELD_KEEPER = process.env.SHIELD_KEEPER === "1";
 const SHIELD_KEEPER_STORE = process.env.SHIELD_KEEPER_STORE || "./shield-keeper.json";
 const SHIELD_KEEPER_POLL_MS = Number(process.env.SHIELD_KEEPER_POLL_MS || 60_000);
+// Paseo rejects more than 2 pool deposits in one transaction (proof size, not
+// gas — docs/E2E-PRIVACY-LIVE.md §2). Splitting costs no privacy.
+const SHIELD_MAX_PER_TX = Number(process.env.SHIELD_MAX_PER_TX || 2);
 const GAS_SHIELD_BATCH = 3_000_000n;
 const keeperStore = SHIELD_KEEPER ? createStore(SHIELD_KEEPER_STORE) : null;
 
@@ -736,7 +742,7 @@ async function shieldKeeperTick() {
   if (!vault || !keeperStore) return;
   try {
     await keeperTick({
-      vault, pool: shieldPool, provider, store: keeperStore,
+      vault, pool: shieldPool, provider, store: keeperStore, maxPerTx: SHIELD_MAX_PER_TX,
       submit: (call) => serialize(async () => {
         const nonce = await provider.getTransactionCount(relay.address);
         return call({ gasLimit: GAS_SHIELD_BATCH, nonce });
