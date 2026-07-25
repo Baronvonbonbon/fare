@@ -95,6 +95,38 @@ contract FareVault is Ownable2Step, PaseoSafeSender, FareUpgradable, EIP712 {
     mapping(uint96 => uint64) public shieldLive; // bucket => tickets awaiting a seal
     mapping(uint96 => uint64) public shieldSealed; // bucket => deposits owed, no longer tied to a ticket
 
+    // ── ZK note pool (privacy phase 3) ───────────────────────────────────────
+    // The ticket path above still names accounts when a batch is sealed, so its
+    // anonymity set is the seal size — and the keeper, holding the
+    // account↔commitment pairing, could substitute its own commitments.
+    //
+    // This path removes both. A payee converts balance into a NOTE (linked, like
+    // any pool deposit) and later spends it with a Groth16 proof that reveals
+    // only a nullifier. Nothing says which note was spent, so the anonymity set
+    // is every unspent note in the tree. And because the proof binds the
+    // shielded-pool commitment, `depositShieldNoteZK` is PERMISSIONLESS: anyone
+    // may submit it, nobody can redirect it. See circuits/shieldnote.circom.
+    uint256 public constant NOTE_DEPTH = 16; // 65,536 notes; must match the circuit
+    uint256 private constant ROOT_HISTORY = 30;
+
+    IFareShieldVerifier public shieldVerifier; // address(0) = ZK path off
+    IFarePoseidonT3 public shieldPoseidon;
+
+    uint256[NOTE_DEPTH] public noteZeros; // empty-subtree roots, set with the hasher
+    uint256[NOTE_DEPTH] private _filledSubtrees;
+    uint256[ROOT_HISTORY] public noteRoots;
+    uint32 public noteRootIndex;
+    uint32 public nextNoteIndex;
+    mapping(uint256 => bool) public shieldNullifierSpent;
+
+    bytes32 private constant NOTE_TYPEHASH =
+        keccak256("ShieldNote(address account,uint96 bucket,uint256 commitment,uint256 nonce,uint256 deadline)");
+
+    event ShieldNoteInserted(address indexed account, uint96 indexed bucket, uint256 commitment, uint32 index);
+    event ShieldNoteSpent(uint256 indexed nullifierHash, uint96 indexed bucket, bytes32 ksCommitment);
+    event ShieldVerifierSet(address indexed verifier);
+    event ShieldPoseidonSet(address indexed poseidon);
+
     bytes32 private constant SHIELD_TYPEHASH =
         keccak256("ShieldCredit(address account,uint96 bucket,uint256 nonce,uint256 deadline)");
 
@@ -178,6 +210,51 @@ contract FareVault is Ownable2Step, PaseoSafeSender, FareUpgradable, EIP712 {
         require(keeper != address(0), "zero-addr");
         shieldKeeper[keeper] = enabled;
         emit ShieldKeeperSet(keeper, enabled);
+    }
+
+    /// @notice Point at the shield-note Groth16 verifier. address(0) disables the
+    ///         ZK path; the ticket path is unaffected either way.
+    function setShieldVerifier(address verifier) external onlyOwner {
+        shieldVerifier = IFareShieldVerifier(verifier);
+        emit ShieldVerifierSet(verifier);
+    }
+
+    /// @notice Bind the Poseidon(2) hasher and initialize the note tree.
+    /// @dev The zeros are derived from the hasher itself, so the tree cannot be
+    ///      initialized against one Poseidon and used with another. Re-pointing
+    ///      after notes exist would invalidate every outstanding proof, so this
+    ///      is one-shot.
+    function setShieldPoseidon(address poseidon) external onlyOwner {
+        require(address(shieldPoseidon) == address(0), "poseidon-set");
+        require(poseidon != address(0), "zero-addr");
+        shieldPoseidon = IFarePoseidonT3(poseidon);
+
+        uint256 z = 0;
+        for (uint256 i = 0; i < NOTE_DEPTH; i++) {
+            noteZeros[i] = z;
+            _filledSubtrees[i] = z;
+            z = _poseidon(z, z);
+        }
+        noteRoots[0] = z; // the empty tree's root
+        emit ShieldPoseidonSet(poseidon);
+    }
+
+    /// @notice The current note-tree root.
+    function noteRoot() public view returns (uint256) {
+        return noteRoots[noteRootIndex];
+    }
+
+    /// @notice Is `root` within the retained window? Proofs are built off-chain
+    ///         against a root that may be a few inserts stale by the time they
+    ///         land, so a window is required for the path to be usable at all.
+    function isKnownNoteRoot(uint256 root) public view returns (bool) {
+        if (root == 0) return false;
+        uint32 i = noteRootIndex;
+        for (uint256 n = 0; n < ROOT_HISTORY; n++) {
+            if (noteRoots[i] == root) return true;
+            i = i == 0 ? uint32(ROOT_HISTORY - 1) : i - 1;
+        }
+        return false;
     }
 
     function shieldBucketCount() external view returns (uint256) {
@@ -382,6 +459,111 @@ contract FareVault is Ownable2Step, PaseoSafeSender, FareUpgradable, EIP712 {
         for (uint256 i = 0; i < commitments.length; i++) {
             shieldPool.depositNative{value: bucket}(commitments[i]);
         }
+    }
+
+    // ── ZK note pool: insert → prove → deposit ───────────────────────────────
+
+    /// @notice Convert `bucket` of your balance into a shielded note.
+    /// @dev This transaction names you AND your note commitment, and that is
+    ///      fine: the anonymity comes from spending, which reveals only a
+    ///      nullifier. It is the same shape as any pool deposit.
+    function insertShieldNote(uint96 bucket, uint256 commitment) external nonReentrant {
+        _insertShieldNote(msg.sender, bucket, commitment);
+    }
+
+    /// @notice Relay-submitted note insertion, so a payee with no gas can shield
+    ///         earnings.
+    /// @dev The signature covers the COMMITMENT, so a relay cannot substitute a
+    ///      note of its own — the one thing it could otherwise steal here.
+    function insertShieldNoteFor(
+        address account,
+        uint96 bucket,
+        uint256 commitment,
+        uint256 deadline,
+        bytes calldata signature
+    ) external nonReentrant {
+        require(block.timestamp <= deadline, "expired");
+        bytes32 digest = _hashTypedDataV4(
+            keccak256(abi.encode(NOTE_TYPEHASH, account, bucket, commitment, shieldNonce[account], deadline))
+        );
+        require(digest.recover(signature) == account, "bad-sig");
+        shieldNonce[account] += 1;
+        _insertShieldNote(account, bucket, commitment);
+    }
+
+    /// @notice Spend a note into the shielded pool. PERMISSIONLESS by design:
+    ///         the proof binds `ksCommitment`, so whoever submits it cannot
+    ///         redirect the deposit, and a payee needs no gas and no keeper.
+    /// @dev Reveals a nullifier and nothing else — not the leaf, not the index,
+    ///      not the account. The anonymity set is every unspent note.
+    function depositShieldNoteZK(
+        bytes calldata proof,
+        uint256 root,
+        uint256 nullifierHash,
+        uint96 bucket,
+        bytes32 ksCommitment
+    ) external nonReentrant {
+        require(address(shieldVerifier) != address(0), "zk-off");
+        require(address(shieldPool) != address(0), "shield-off");
+        require(!shieldNullifierSpent[nullifierHash], "note-spent");
+        require(isKnownNoteRoot(root), "unknown-root");
+        require(_isShieldBucket(bucket), "bad-bucket");
+        require(
+            shieldVerifier.verifyShieldNote(proof, [root, nullifierHash, uint256(bucket), uint256(ksCommitment)]),
+            "bad-proof"
+        );
+
+        // Effects before the external call; the nullifier is burned even if the
+        // pool reverts, and the whole call unwinds together if it does.
+        shieldNullifierSpent[nullifierHash] = true;
+        shieldBuffer -= bucket;
+        emit ShieldNoteSpent(nullifierHash, bucket, ksCommitment);
+
+        shieldPool.depositNative{value: bucket}(ksCommitment);
+    }
+
+    function _insertShieldNote(address account, uint96 bucket, uint256 commitment) internal {
+        require(address(shieldPoseidon) != address(0), "poseidon-unset");
+        require(_isShieldBucket(bucket), "bad-bucket");
+        require(balanceOf[account] >= bucket, "insufficient-balance");
+        require(commitment != 0, "zero-commitment");
+
+        balanceOf[account] -= bucket;
+        shieldBuffer += bucket;
+        uint32 index = _insertLeaf(commitment);
+        emit ShieldNoteInserted(account, bucket, commitment, index);
+    }
+
+    /// @dev Standard incremental Merkle insert: hash up the spine, caching the
+    ///      left siblings that later leaves will need.
+    function _insertLeaf(uint256 leaf) internal returns (uint32 index) {
+        index = nextNoteIndex;
+        require(index < uint32(1 << NOTE_DEPTH), "tree-full");
+
+        uint256 current = leaf;
+        uint32 idx = index;
+        for (uint256 i = 0; i < NOTE_DEPTH; i++) {
+            uint256 left;
+            uint256 right;
+            if (idx % 2 == 0) {
+                left = current;
+                right = noteZeros[i];
+                _filledSubtrees[i] = current;
+            } else {
+                left = _filledSubtrees[i];
+                right = current;
+            }
+            current = _poseidon(left, right);
+            idx /= 2;
+        }
+
+        noteRootIndex = uint32((noteRootIndex + 1) % ROOT_HISTORY);
+        noteRoots[noteRootIndex] = current;
+        nextNoteIndex = index + 1;
+    }
+
+    function _poseidon(uint256 a, uint256 b) internal view returns (uint256) {
+        return shieldPoseidon.hash([a, b]);
     }
 
     /// @notice Liveness escape hatch: if no keeper has reached your ticket after

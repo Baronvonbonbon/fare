@@ -159,6 +159,10 @@ const VAULT_ABI = [
   "function shieldTicket(uint96 bucket, uint64 ticket) view returns (address owner, uint64 queuedAt, bool reclaimed)",
   "function shieldMinBatch() view returns (uint16)",
   "function shieldMinDwell() view returns (uint32)",
+  // shield notes (privacy phase 3)
+  "function insertShieldNoteFor(address account, uint96 bucket, uint256 commitment, uint256 deadline, bytes signature)",
+  "function depositShieldNoteZK(bytes proof, uint256 root, uint256 nullifierHash, uint96 bucket, bytes32 ksCommitment)",
+  "function isKnownNoteRoot(uint256 root) view returns (bool)",
 ];
 const vault = vaultAddr ? new Contract(vaultAddr, VAULT_ABI, relay) : null;
 const GAS_WITHDRAW = 200_000n;
@@ -182,6 +186,10 @@ const SHIELD_KEEPER_POLL_MS = Number(process.env.SHIELD_KEEPER_POLL_MS || 60_000
 // gas — docs/E2E-PRIVACY-LIVE.md §2). Splitting costs no privacy.
 const SHIELD_MAX_PER_TX = Number(process.env.SHIELD_MAX_PER_TX || 2);
 const GAS_SHIELD_BATCH = 3_000_000n;
+// A note insert is ~16 Poseidon precompile calls; a spend adds a Groth16
+// pairing plus the pool deposit.
+const GAS_NOTE = 3_000_000n;
+const GAS_NOTE_SPEND = 5_000_000n;
 const keeperStore = SHIELD_KEEPER ? createStore(SHIELD_KEEPER_STORE) : null;
 
 // ── Kusama Shield pool (C4 shielded funding) ─────────────────────────────────
@@ -618,6 +626,78 @@ const server = http.createServer(async (req, res) => {
       }
       recordBudget(cost);
       return send(res, 200, { queued: true, txHash: tx.hash, bucket: String(bucketWei) }, origin);
+    }
+
+    // ── Shield notes (privacy phase 3) ───────────────────────────────────────
+    // Insert: the payee's balance becomes a note. The signature covers the
+    // commitment, so this relay cannot substitute a note of its own.
+    if (req.method === "POST" && url.pathname === "/shield-note") {
+      if (!vault) return send(res, 503, { error: "vault not configured" }, origin);
+      const { account, bucket, commitment, deadline, signature } = await readJson(req);
+      if (!isAddress(account)) return send(res, 400, { error: "bad account" }, origin);
+      if (typeof signature !== "string") return send(res, 400, { error: "missing signature" }, origin);
+      let bucketWei, commit;
+      try { bucketWei = BigInt(bucket); commit = BigInt(commitment); }
+      catch { return send(res, 400, { error: "bad bucket/commitment" }, origin); }
+      if (commit === 0n) return send(res, 400, { error: "zero commitment" }, origin);
+
+      const cost = await estCostWei(
+        () => vault.insertShieldNoteFor.estimateGas(account, bucketWei, commit, deadline, signature), GAS_NOTE
+      );
+      if (PROFIT_GUARD && !budgetRoom(cost)) {
+        return decline(res, "subsidy budget exhausted", { action: "shield-note" }, origin);
+      }
+      let tx;
+      try {
+        tx = await serialize(async () => {
+          const nonce = await provider.getTransactionCount(relay.address);
+          return vault.insertShieldNoteFor(account, bucketWei, commit, deadline, signature, { gasLimit: GAS_NOTE, nonce });
+        });
+      } catch (e) {
+        return send(res, 502, { error: e?.shortMessage ?? e?.reason ?? e?.message ?? String(e) }, origin);
+      }
+      recordBudget(cost);
+      return send(res, 200, { inserted: true, txHash: tx.hash }, origin);
+    }
+
+    // Spend: submit a note's ZK proof. Deliberately unauthenticated — the proof
+    // binds the destination commitment, so the relay (or anyone) can pay the gas
+    // without being able to redirect the deposit. That is the whole point of
+    // phase 3: no keeper trust, no account named.
+    if (req.method === "POST" && url.pathname === "/shield-note-spend") {
+      if (!vault) return send(res, 503, { error: "vault not configured" }, origin);
+      const { proof, root, nullifierHash, bucket, ksCommitment } = await readJson(req);
+      if (typeof proof !== "string" || !/^0x[0-9a-fA-F]+$/.test(proof))
+        return send(res, 400, { error: "bad proof" }, origin);
+      if (typeof ksCommitment !== "string" || !/^0x[0-9a-fA-F]{64}$/.test(ksCommitment))
+        return send(res, 400, { error: "ksCommitment must be a 32-byte hex string" }, origin);
+      let rootN, nh, bucketWei;
+      try { rootN = BigInt(root); nh = BigInt(nullifierHash); bucketWei = BigInt(bucket); }
+      catch { return send(res, 400, { error: "bad numeric field" }, origin); }
+
+      // A stale root is the common failure (the tree moves while the payee
+      // proves), and it is recoverable client-side — say so rather than burning
+      // gas on a revert.
+      if (!(await vault.isKnownNoteRoot(rootN)))
+        return send(res, 409, { error: "unknown root", retry: true, detail: "rebuild the proof against a current root" }, origin);
+
+      const cost = await estCostWei(
+        () => vault.depositShieldNoteZK.estimateGas(proof, rootN, nh, bucketWei, ksCommitment), GAS_NOTE_SPEND
+      );
+      if (PROFIT_GUARD && !budgetRoom(cost)) {
+        return decline(res, "subsidy budget exhausted", { action: "shield-note-spend" }, origin);
+      }
+      let tx;
+      try {
+        tx = await serialize(async () => {
+          const nonce = await provider.getTransactionCount(relay.address);
+          return vault.depositShieldNoteZK(proof, rootN, nh, bucketWei, ksCommitment, { gasLimit: GAS_NOTE_SPEND, nonce });
+        });
+      } catch (e) {
+        return send(res, 502, { error: e?.shortMessage ?? e?.reason ?? e?.message ?? String(e) }, origin);
+      }
+      recordBudget(cost);
+      return send(res, 200, { spent: true, txHash: tx.hash }, origin);
     }
 
     // ── Claim a queued shielded payout's tree position ───────────────────────

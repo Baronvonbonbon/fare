@@ -21,12 +21,19 @@ circuits/build/*.r1cs
 circuits/build/*.sym
 circuits/build/*.zkey
 circuits/build/proximity_js/
+circuits/build/shieldnote_js/
 circuits/build/sample-input.json
 
 # The 32.8 MiB withdraw proving key can never be published as one asset —
 # Cloudflare Pages rejects anything over 25 MiB. web/public/shield/ carries the
 # split parts + manifest instead; regenerate with scripts/shield/split-zkey.mjs.
 web/public/shield/*.zkey
+# ...but shieldnote.zkey is 4.4 MiB, comfortably under the cap, so it ships
+# whole. Anything added here must be re-checked against 25 MiB.
+!web/public/shield/shieldnote.zkey
+
+# circom binary, if fetched locally for scripts/setup-shieldnote.mjs
+/circom
 
 # venue node relay secrets
 venue-node/.env
