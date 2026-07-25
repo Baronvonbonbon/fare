@@ -3,10 +3,10 @@
 Run date: 2026-07-25. Script: `scripts/privacy/live-e2e.mjs`.
 Design: [PRIVACY-TIERS.md](PRIVACY-TIERS.md) §4.
 
-**Verdict: the design works on the live pool — and Paseo caps a batch at 2
-deposits per transaction, which caps the per-batch anonymity set at 2.** The
-mechanism is sound; the anonymity it delivers on *this* chain is much weaker than
-the `minBatch = 8` default implies. That is the finding.
+**Verdict: the design works on the live pool.** The first run exposed a real
+limit — Paseo caps a transaction at 2 pool deposits, which (before phase 2)
+capped the anonymity set at 2. Phase 2 decoupled sealing from depositing, and the
+second run reaches an **8-ticket anonymity set on the same chain** (§5).
 
 Deployed a **standalone** `FareVault` (`0x2dFc1730fc233F0A45FCC1490f65bA102FC10306`).
 The demo deployment was not touched — no migration, no re-pointing.
@@ -58,19 +58,30 @@ At the ceiling of 2, a batched payout is 2-anonymous. Splitting one logical batc
 across several transactions does not help — each transaction's consumed range is
 independently derivable.
 
-### The fix (phase 2)
+### The fix (phase 2) — built and re-verified below
 
-Stop publishing the ticket→owner alignment. Store `keccak256(owner, salt)` on the
-ticket and drop the owner from the queue event; the owner reveals the preimage
-only when reclaiming a stalled ticket, which is the one case where linking costs
-nothing (no deposit was made against it). Batches then consume positions nobody
-can attribute, and the anonymity set becomes **all live tickets in the queue**
-rather than the few that fit in one transaction.
+**The fix first recorded here was wrong.** It proposed hiding the ticket owner
+behind `keccak256(owner, salt)`. That does nothing: ticket positions are handed
+out sequentially, one per queue transaction, so the ticket→account map is
+derivable from transaction *order* whatever storage holds. Hiding the field
+hides nothing.
 
-This supersedes the reasoning in `FareVault`'s ticket comment, which argued that
-storing the owner "leaks nothing the T1 event doesn't already". True in
-isolation, wrong in combination: it is FIFO consumption *plus* public owners that
-creates the alignment.
+What works is splitting the transaction in two, so that consuming tickets and
+depositing commitments never happen together:
+
+- `sealShieldBatch(bucket, count)` consumes `count` tickets FIFO and names no
+  commitment. It touches no external contract, so it is cheap and takes the whole
+  batch. **This is where the anonymity set is set.**
+- `depositShieldBatch(bucket, commitments)` deposits against already-sealed
+  tickets, names no account and no ticket, and does not move the cursor. Nothing
+  aligns a commitment with a payee, so splitting it across as many transactions
+  as the chain demands costs no privacy.
+
+The chain ceiling now decides only how many deposit transactions follow.
+
+This still supersedes `FareVault`'s original ticket comment ("storing the owner
+leaks nothing the T1 event doesn't already") — true in isolation, wrong in
+combination — but the remedy is the split, not concealment.
 
 ## 3. Also learned
 
@@ -98,7 +109,27 @@ is not: `live-e2e.mjs` now writes `artifacts/privacy-live/notes.json` **before**
 any transaction can spend a ticket against a commitment. On mainnet that ordering
 is the difference between a recoverable retry and destroyed earnings.
 
-## 5. Not covered
+## 5. Phase 2 verified on the same chain
+
+Second run, same pool, `minBatch = 8` — the default that was unreachable before:
+
+| | |
+|---|---|
+| Vault | `0xF6a9753B9B5e752eA81D7edee685c78dED8eD5E5` |
+| **Seal** | **8 tickets in one transaction** — `0x95fb1515…` |
+| Deposits | **4 transactions × 2** — `0x7e338b67…`, `0x9386e67b…`, `0xce5b63a0…`, `0xe03628b3…` |
+| Pool tree | 262 → **270** |
+| Derived leaf | **265**, from the keeper's per-chunk snapshots |
+| Withdrawal | `0x77e546b0…` → fresh `0xb75FA1b2…`, **1.0 PAS** |
+
+The anonymity set is **8** on a chain that still refuses more than 2 deposits per
+transaction. That is the whole point of the split, measured rather than argued.
+
+The withdrawal also confirms the multi-chunk derivation: the spent note landed in
+a later chunk, so its path came from a snapshot taken after earlier chunks had
+already moved the tree.
+
+## 6. Not covered
 
 - Only `withdrawnValue == bucket` (full spend). Partial spends re-insert a change
   note whose path the payee must track — untested here.
