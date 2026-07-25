@@ -175,10 +175,13 @@ Design rules that make this hold:
   is immediately visible to the victims (their note does not exist in the pool),
   and the exposure is capped by what is queued at that moment. It is a genuine
   custody escalation over today's vault, where a relay can submit but never
-  divert. Phase 3's ZK authorization is what removes it: once a ticket holder can
-  prove entitlement without naming themselves, the vault can verify the batch and
-  the keeper becomes untrusted again. **Do not enable a keeper you would not
-  trust with the queued balance.**
+  divert. **Do not enable a keeper you would not trust with the queued balance.**
+  **Closed in phase 3** (§7): `depositShieldNoteZK` binds the deposit target into
+  the proof and needs no keeper at all — prefer that path wherever the verifier
+  is wired. The description of the fix that used to sit here was wrong in the
+  same way phase 2's first attempt was: it imagined proving entitlement against a
+  *ticket*, but a ticket's position is derivable from queue order, so the note
+  pool replaces tickets rather than authenticating them.
 - **USDC payouts.** The pool holds native PAS; the live USDC flow derives escrow
   by swapping shielded PAS → USDC on the local DEX (`venue-node/swap.mjs`). A
   shielded USDC *payout* needs the reverse swap, and it must happen at the
