@@ -94,6 +94,12 @@ export const VAULT_ABI = [
   "function withdrawFor(address account, address recipient, uint256 deadline, bytes signature)",
   "function pendingPaseoDust(address) view returns (uint256)",
   "function claimPaseoDust()",
+  // Shielded payouts (privacy phase 1): queue a bucket, then a keeper batches it.
+  "function shieldNonce(address) view returns (uint256)",
+  "function shieldBuckets(uint256) view returns (uint96)",
+  "function shieldBucketCount() view returns (uint256)",
+  "function queueShieldCredit(uint96 bucket)",
+  "function shieldPending(uint96 bucket) view returns (uint64)",
   // Governance params (D2): withdrawal relay fee.
   "function withdrawFeeBps() view returns (uint16)",
   "function setWithdrawFeeBps(uint16 bps)",

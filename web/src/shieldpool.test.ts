@@ -2,7 +2,7 @@ import { describe, it, expect, vi } from "vitest";
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { poseidon1, poseidon2 } from "poseidon-lite";
-import { authPath, subtreeRoot, commitmentOf, nullifierHashOf, contextFor, loadZkey } from "./shieldpool";
+import { authPath, subtreeRoot, commitmentOf, nullifierHashOf, contextFor, loadZkey, batchNotePaths } from "./shieldpool";
 
 // Reference LeanIMT128 (parent = Poseidon(l,r); lone node promotes; root = last
 // inserted node) — the same construction the pool uses. Used to cross-check the
@@ -104,5 +104,39 @@ describe("withdraw zkey reassembly", () => {
     // .zkey magic header ("zkey" + version), i.e. snarkjs will accept these bytes.
     expect(new TextDecoder().decode(key.subarray(0, 4))).toBe("zkey");
     vi.unstubAllGlobals();
+  });
+});
+
+// Batched vault payouts (docs/PRIVACY-TIERS.md §4): the recipient of a batched
+// deposit never gets to snapshot sideNodes at insertion time, so they replay the
+// batch locally from the PRE-batch tree state. Cross-checked against the same
+// reference LeanIMT the snapshot path is checked against — if the replay were
+// wrong, the note would be unspendable (a wrong path proves nothing).
+describe("batched deposit paths", () => {
+  it("derives every batch member's left path from pre-batch state alone", () => {
+    for (const preexisting of [0, 1, 5, 8, 23]) {
+      const tree = new LeanIMT();
+      for (let i = 0; i < preexisting; i++) tree.insert(poseidon2([BigInt(i + 1), 3n]));
+
+      // The keeper's snapshot: sideNodes as they stand just before the batch.
+      const preSideNodes: Record<number, string> = {};
+      for (let lv = 0; lv < 128; lv++) preSideNodes[lv] = (tree._sn.get(lv) ?? 0n).toString();
+
+      const batch = Array.from({ length: 8 }, (_, k) => poseidon2([BigInt(1000 + k), 9n]));
+      const derived = batchNotePaths(preexisting, preSideNodes, batch);
+      for (const leaf of batch) tree.insert(leaf);
+
+      // Each derived path must reproduce the live root, which is the only test
+      // that matters: it is exactly what the pool's verifier checks.
+      derived.forEach((d, k) => {
+        expect(d.index).toBe(preexisting + k);
+        const full = tree.proof(d.index);
+        for (let lv = 0; lv < 128; lv++) {
+          if (bit(d.index, lv)) expect(d.leftSnapshot[lv] ?? "0").toBe(full[lv]);
+        }
+        const rebuilt = authPath(d.index, d.leftSnapshot, new Map(batch.map((l, i) => [preexisting + i, l])), preexisting + batch.length - 1);
+        expect(rootFrom(batch[k], d.index, rebuilt)).toBe(tree.root);
+      });
+    }
   });
 });

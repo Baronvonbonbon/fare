@@ -81,6 +81,42 @@ export async function depositAndSnapshot(
   return { record: { ...note, index, leftSnapshot, depositBlock: tx.blockNumber ?? (await provider.getBlockNumber()) }, txHash: tx.hash };
 }
 
+// ── batched deposits: deriving a note's left path after the fact ─────────────
+/// Left paths for every commitment in a vault batch (docs/PRIVACY-TIERS.md §4).
+///
+/// `depositAndSnapshot` works because the depositor reads `sideNodes` the instant
+/// their leaf lands. A batch payout can't do that: the recipient isn't the
+/// depositor, and N leaves are inserted inside ONE transaction, so by the time
+/// anyone reads `sideNodes` the later inserts have overwritten the levels the
+/// earlier leaves needed.
+///
+/// What IS sufficient is the tree state from just BEFORE the batch plus the
+/// ordered commitments: every left sibling of a batch member either lies wholly
+/// before the batch (captured by `preSideNodes`) or is built from batch members
+/// (computable here). So the keeper publishes only public chain state and each
+/// recipient replays the insertions locally — secrets never leave the device.
+export function batchNotePaths(
+  startIndex: number, preSideNodes: Record<number, string>, commitments: bigint[]
+): { index: number; leftSnapshot: Record<number, string> }[] {
+  const side: Record<number, bigint> = {};
+  for (let lv = 0; lv < 128; lv++) side[lv] = BigInt(preSideNodes[lv] ?? "0");
+
+  return commitments.map((leaf, k) => {
+    const index = startIndex + k;
+    // Capture before inserting: the insert only writes at bit-CLEAR levels, but
+    // reading first keeps the snapshot obviously independent of the update.
+    const leftSnapshot: Record<number, string> = {};
+    for (let lv = 0; lv < 128; lv++) if (bit(index, lv)) leftSnapshot[lv] = side[lv].toString();
+
+    let node = leaf;
+    for (let lv = 0; lv < 128; lv++) {
+      if (bit(index, lv)) { if (side[lv] !== 0n) node = poseidon2([side[lv], node]); }
+      else side[lv] = node;
+    }
+    return { index, leftSnapshot };
+  });
+}
+
 // ── right-side reconstruction (bounded, genesis-free) ────────────────────────
 async function getLogsSafe(provider: Provider, filter: any, from: number, to: number, out: any[]): Promise<void> {
   try { out.push(...(await provider.getLogs({ ...filter, fromBlock: from, toBlock: to }))); }

@@ -30,6 +30,7 @@ import { JsonRpcProvider, Wallet, Contract, Interface, parseEther, formatEther, 
 import { rebateWei, withdrawFeeWei, coversCost, withinBudget, windowSpent } from "./economics.mjs";
 import { rebateInNative, shouldTopUp, planSwap, assetConversionQuote, priceFraction, cfg as swapCfg } from "./treasury.mjs";
 import { executeRecoverySwap } from "./swap.mjs";
+import { createStore, runOnce as keeperTick } from "./shieldkeeper.mjs";
 
 const PORT = Number(process.env.RELAY_PORT || 8788);
 // A single-signer relay keeps ONE provider (nonce safety — no fallback quorum on
@@ -149,13 +150,42 @@ const VAULT_ABI = [
   "function withdrawFeeBps() view returns (uint16)",
   "function tokenBalanceOf(address token, address account) view returns (uint256)", // relay's accrued fee (F6-swap)
   "function withdrawToken(address token)",              // sweep the relay's own token balance out
+  // shielded payouts (privacy phase 1)
+  "function queueShieldCreditFor(address account, uint96 bucket, uint256 deadline, bytes signature)",
+  "function executeShieldBatch(uint96 bucket, bytes32[] commitments)",
+  "function shieldPending(uint96 bucket) view returns (uint64)",
+  "function shieldScanned(uint96 bucket) view returns (uint64)",
+  "function shieldTicket(uint96 bucket, uint64 ticket) view returns (address owner, uint64 queuedAt, bool reclaimed)",
+  "function shieldMinBatch() view returns (uint16)",
+  "function shieldMinDwell() view returns (uint32)",
 ];
 const vault = vaultAddr ? new Contract(vaultAddr, VAULT_ABI, relay) : null;
 const GAS_WITHDRAW = 200_000n;
 
+// ── Shielded payouts (privacy phase 1) ───────────────────────────────────────
+// The relay plays two roles here, deliberately split across two transactions so
+// neither one carries both an account and a pool commitment (PRIVACY-TIERS §3):
+//   POST /shield-queue — submit a driver's EIP-712 authorization. The commitment
+//                        travels in the request BODY and is held off-chain; it
+//                        must never reach this transaction's calldata.
+//   keeper tick        — once minBatch commitments are held for a bucket and the
+//                        oldest ticket has dwelled, deposit them in ONE batch.
+// Trust: a keeper holds the pairing and could substitute its own commitments for
+// the drivers' (PRIVACY-TIERS §4). Only run this on a relay the payees trust.
+const SHIELD_KEEPER = process.env.SHIELD_KEEPER === "1";
+const SHIELD_KEEPER_STORE = process.env.SHIELD_KEEPER_STORE || "./shield-keeper.json";
+const SHIELD_KEEPER_POLL_MS = Number(process.env.SHIELD_KEEPER_POLL_MS || 60_000);
+const GAS_SHIELD_BATCH = 3_000_000n;
+const keeperStore = SHIELD_KEEPER ? createStore(SHIELD_KEEPER_STORE) : null;
+
 // ── Kusama Shield pool (C4 shielded funding) ─────────────────────────────────
 const SHIELD_ABI = [
   "function proxy_withdraw(uint[2] pA, uint[2][2] pB, uint[2] pC, uint[8] pubSignals, address recipient)",
+  // Tree reads + insert events for the batch keeper's pre-batch snapshot.
+  "function treeSize() view returns (uint256)",
+  "function sideNodes(uint256) view returns (uint256)",
+  "event Deposit(address indexed asset, bytes32 commitment)",
+  "event NewCommitment(bytes32 commitment)",
 ];
 const shieldPool = new Contract(SHIELD_POOL, SHIELD_ABI, relay);
 
@@ -537,6 +567,66 @@ const server = http.createServer(async (req, res) => {
       return send(res, 200, { withdrawn: true, txHash: tx.hash, account }, origin);
     }
 
+    // ── Queue a shielded PAYOUT (privacy phase 1) ────────────────────────────
+    // Body: { account, bucket, deadline, signature, commitment }
+    // The signature authorizes moving `bucket` out of the account's vault
+    // balance; the commitment is held here and deposited later in a batch. The
+    // two must never share a transaction — see docs/PRIVACY-TIERS.md §3.
+    if (req.method === "POST" && url.pathname === "/shield-queue") {
+      if (!vault) return send(res, 503, { error: "vault not configured" }, origin);
+      if (!keeperStore) return send(res, 503, { error: "this relay does not keep shielded payouts" }, origin);
+      const { account, bucket, deadline, signature, commitment } = await readJson(req);
+      if (!isAddress(account)) return send(res, 400, { error: "bad account" }, origin);
+      if (typeof signature !== "string") return send(res, 400, { error: "missing signature" }, origin);
+      if (typeof commitment !== "string" || !/^0x[0-9a-fA-F]{64}$/.test(commitment))
+        return send(res, 400, { error: "commitment must be a 32-byte hex string" }, origin);
+      let bucketWei;
+      try { bucketWei = BigInt(bucket); } catch { return send(res, 400, { error: "bad bucket" }, origin); }
+
+      // Hold the commitment BEFORE spending the ticket. If the queue tx lands and
+      // we have not recorded the commitment, the payout is destroyed — the ticket
+      // is spent and nothing on-chain says who was owed a note.
+      if (!keeperStore.addPending(bucketWei, commitment))
+        return send(res, 409, { error: "commitment already queued" }, origin);
+
+      // Unrewarded like sponsor-mode shielded funding: the vault takes no fee on
+      // queueing, so this is a subsidy and belongs under the same budget.
+      const cost = await estCostWei(
+        () => vault.queueShieldCreditFor.estimateGas(account, bucketWei, deadline, signature), GAS_WITHDRAW
+      );
+      if (PROFIT_GUARD && !budgetRoom(cost)) {
+        keeperStore.dropPending(commitment);
+        return decline(res, "subsidy budget exhausted", { action: "shield-queue" }, origin);
+      }
+
+      let tx;
+      try {
+        tx = await serialize(async () => {
+          const nonce = await provider.getTransactionCount(relay.address);
+          return vault.queueShieldCreditFor(account, bucketWei, deadline, signature, { gasLimit: GAS_WITHDRAW, nonce });
+        });
+      } catch (e) {
+        keeperStore.dropPending(commitment); // the ticket was never taken
+        const msg = e?.shortMessage ?? e?.reason ?? e?.message ?? String(e);
+        return send(res, 502, { error: msg }, origin);
+      }
+      recordBudget(cost);
+      return send(res, 200, { queued: true, txHash: tx.hash, bucket: String(bucketWei) }, origin);
+    }
+
+    // ── Claim a queued shielded payout's tree position ───────────────────────
+    // Public chain state only: where the batch landed and the tree state before
+    // it. The recipient replays the insertions locally to derive its own left
+    // path, so the note's secrets never leave their device.
+    if (req.method === "GET" && url.pathname === "/shield-claim") {
+      if (!keeperStore) return send(res, 503, { error: "this relay does not keep shielded payouts" }, origin);
+      const commitment = url.searchParams.get("commitment") || "";
+      const receipt = keeperStore.receiptFor(commitment);
+      if (receipt) return send(res, 200, { deposited: true, ...receipt }, origin);
+      if (keeperStore.isPending(commitment)) return send(res, 200, { deposited: false, pending: true }, origin);
+      return send(res, 404, { error: "unknown commitment" }, origin);
+    }
+
     // ── Relay a shielded-pool withdrawal that funds a fresh burner (C4) ───────
     // Body: { pA:[2], pB:[2][2], pC:[2], pubSignals:[8], recipient, burner? }
     //   sponsor mode  (SHIELD_FEE==0): recipient must be the burner; pool pays it
@@ -637,6 +727,25 @@ async function feeRecoveryTick() {
   } catch (e) { console.error("[relay] fee-recovery error:", e?.shortMessage ?? e?.message ?? e); }
 }
 if (FEE_RECOVERY && FEE_ASSET_ID != null) setInterval(feeRecoveryTick, SWAP_POLL_MS).unref?.();
+
+// ── shielded-payout keeper tick ──────────────────────────────────────────────
+// Deposits held commitments once a bucket has minBatch of them AND the oldest
+// ticket has cleared the contract's dwell. Both floors are enforced on-chain
+// too; checking here only saves a guaranteed-revert transaction.
+async function shieldKeeperTick() {
+  if (!vault || !keeperStore) return;
+  try {
+    await keeperTick({
+      vault, pool: shieldPool, provider, store: keeperStore,
+      submit: (call) => serialize(async () => {
+        const nonce = await provider.getTransactionCount(relay.address);
+        return call({ gasLimit: GAS_SHIELD_BATCH, nonce });
+      }),
+      log: (m) => console.log(`[relay] ${m}`),
+    });
+  } catch (e) { console.error("[relay] shield-keeper error:", e?.shortMessage ?? e?.message ?? e); }
+}
+if (SHIELD_KEEPER) setInterval(shieldKeeperTick, SHIELD_KEEPER_POLL_MS).unref?.();
 
 server.listen(PORT, () => {
   console.log(`[relay] FARE venue relay on :${PORT}`);
