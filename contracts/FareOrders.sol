@@ -58,6 +58,9 @@ contract FareOrders is Ownable2Step, ReentrancyGuard, FareUpgradable, ERC2771Con
         // Escrow asset (C3): address(0) = native PAS; otherwise an accepted
         // ERC-20 stablecoin. Fixed at creation; fare/tip top-ups use the same one.
         address token;
+        // Flat relay service fee (F6-flat) snapshot at creation — escrowed on top
+        // of orderValue+tip and paid in full to the settling relay at dropoff.
+        uint96 serviceFee;
     }
 
     uint256 public nextOrderId = 1;
@@ -82,6 +85,15 @@ contract FareOrders is Ownable2Step, ReentrancyGuard, FareUpgradable, ERC2771Con
     // orders (F6); carved from the treasury's fee, so no new customer cost.
     // Defaults to 0 (dormant) — governance enables it via setRelayRebateBps.
     uint16 public relayRebateBps = 0;
+    // Flat relay service fee (F6-flat): a governance-set, per-token flat amount the
+    // customer escrows ON TOP OF orderValue+tip and that is paid IN FULL to the
+    // relay that settles the dropoff. Sized (off-chain, by governance) to cover the
+    // relay's real per-order cost — forward + settle + shielded funding — plus a
+    // margin, because a percentage rebate on the fare cannot (see the e2e
+    // economics report). address(0) = native orders. Snapshot per order at
+    // creation so a later change never breaks an in-flight order's escrow. Default
+    // 0 (dormant) — set via setRelayServiceFee. Complements relayRebateBps.
+    mapping(address => uint96) public relayServiceFee;
     uint64 public constant MIN_WINDOW = 10 minutes;
     uint64 public constant MAX_WINDOW = 24 hours;
     uint64 public defaultPickupWindow = 45 minutes;
@@ -112,6 +124,10 @@ contract FareOrders is Ownable2Step, ReentrancyGuard, FareUpgradable, ERC2771Con
     /// the `protocolFee` reported by OrderDelivered; treasury received the rest.
     event RelayRebated(uint256 indexed orderId, address indexed relayer, uint96 amount);
     event RelayRebateSet(uint16 relayRebateBps);
+    /// Flat relay service fee paid to the settling relay at dropoff (F6-flat) —
+    /// a separate, customer-escrowed amount (NOT carved from the protocol fee).
+    event RelayServiceFeePaid(uint256 indexed orderId, address indexed relayer, uint96 amount);
+    event RelayServiceFeeSet(address indexed token, uint96 amount);
     event OrderCancelled(uint256 indexed orderId, uint8 reason, uint96 refunded, uint96 driverComp);
     event OrderDisputed(uint256 indexed orderId);
     event OrderResolved(uint256 indexed orderId, uint96 customerAmount, uint96 driverAmount);
@@ -207,6 +223,16 @@ contract FareOrders is Ownable2Step, ReentrancyGuard, FareUpgradable, ERC2771Con
         emit RelayRebateSet(_bps);
     }
 
+    /// @notice Set the flat relay service fee for `token` (address(0) = native),
+    ///         in the token's smallest units. Charged on top of orderValue+tip at
+    ///         creation and paid in full to the settling relay (F6-flat). 0
+    ///         disables it for that token. Snapshotted per order, so this only
+    ///         affects orders created after the change.
+    function setRelayServiceFee(address token, uint96 amount) external onlyOwner {
+        relayServiceFee[token] = amount;
+        emit RelayServiceFeeSet(token, amount);
+    }
+
     /// @notice Allow (or revoke) an ERC-20 as an escrow asset for stablecoin
     ///         orders (C3). On mainnet this is the bridged USDC/USDT precompile;
     ///         in tests/testnet, MockUSDC.
@@ -239,7 +265,7 @@ contract FareOrders is Ownable2Step, ReentrancyGuard, FareUpgradable, ERC2771Con
         uint64 pickupWindowSecs,
         uint64 deliveryWindowSecs
     ) external payable whenNotPaused whenNotFrozen returns (uint256 orderId) {
-        require(msg.value == uint256(orderValue) + tip, "bad-value");
+        require(msg.value == uint256(orderValue) + tip + relayServiceFee[address(0)], "bad-value");
         // Native value function: read msg.sender directly (a relay must never
         // front msg.value), so this stays on the gas-sponsored funded path.
         orderId = _open(msg.sender, venueId, dropCommit, orderValue, tip, maxFare, pickupWindowSecs, deliveryWindowSecs, address(0));
@@ -306,8 +332,9 @@ contract FareOrders is Ownable2Step, ReentrancyGuard, FareUpgradable, ERC2771Con
     ) internal returns (uint256 orderId) {
         require(acceptedToken[token], "token-not-accepted");
         // orderValue + tip may be 0 for a fare-only order — the fare is escrowed
-        // in-token later at acceptBidERC20.
-        uint256 escrow = uint256(orderValue) + tip;
+        // in-token later at acceptBidERC20. The flat relay service fee (F6-flat) is
+        // pulled up front too, so it's available to pay the relay at settlement.
+        uint256 escrow = uint256(orderValue) + tip + relayServiceFee[token];
         if (escrow > 0) IERC20(token).safeTransferFrom(customer, address(this), escrow);
         orderId = _open(customer, venueId, dropCommit, orderValue, tip, maxFare, pickupWindowSecs, deliveryWindowSecs, token);
     }
@@ -342,7 +369,9 @@ contract FareOrders is Ownable2Step, ReentrancyGuard, FareUpgradable, ERC2771Con
         o.orderValue = orderValue;
         o.tip = tip;
         o.maxFare = maxFare;
-        o.escrow = uint96(uint256(orderValue) + tip);
+        uint96 svcFee = relayServiceFee[token]; // snapshot the flat relay fee (F6-flat)
+        o.serviceFee = svcFee;
+        o.escrow = uint96(uint256(orderValue) + tip + svcFee);
         o.dropCommit = dropCommit;
         o.createdAt = uint64(block.timestamp);
         o.pickupWindowSecs = pw;
@@ -576,16 +605,25 @@ contract FareOrders is Ownable2Step, ReentrancyGuard, FareUpgradable, ERC2771Con
 
         uint96 fee = uint96((uint256(o.fare) * feeBps) / 10_000);
         // Carve the relay rebate out of the fee (never adds to the total). Skip
-        // a zero/treasury relayer so we don't emit or double-credit needlessly.
-        uint96 rebate = uint96((uint256(fee) * relayRebateBps) / 10_000);
-        if (relayer == address(0) || relayer == treasury) rebate = 0;
+        // a zero/treasury relayer (a non-relay/self-submitted settlement) so we
+        // don't emit or double-credit needlessly.
+        bool hasRelay = relayer != address(0) && relayer != treasury;
+        uint96 rebate = hasRelay ? uint96((uint256(fee) * relayRebateBps) / 10_000) : 0;
+        uint96 svcFee = o.serviceFee; // flat relay service fee (F6-flat)
         uint96 toTreasury = fee - rebate;
         uint96 toDriver = o.fare - fee + o.tip;
-        o.escrow -= (o.fare + o.tip); // == toDriver + toTreasury + rebate
+        o.escrow -= (o.fare + o.tip + svcFee); // == toDriver + toTreasury + rebate + svcFee
 
         _credit(o, o.driver, toDriver);
         _credit(o, treasury, toTreasury);
-        _credit(o, relayer, rebate);
+        if (hasRelay) {
+            if (rebate > 0) _credit(o, relayer, rebate);
+            if (svcFee > 0) { _credit(o, relayer, svcFee); emit RelayServiceFeePaid(orderId, relayer, svcFee); }
+        } else if (svcFee > 0) {
+            // No relay settled this order → refund the service fee to the customer
+            // (they escrowed it to pay a relay that never materialised).
+            _credit(o, o.customer, svcFee);
+        }
         drivers.recordDelivered(o.driver);
 
         emit OrderDelivered(orderId, toDriver, fee);

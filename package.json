@@ -12,6 +12,7 @@
     "seed:local": "hardhat run scripts/seed.ts --network localhost",
     "seed:paseo": "hardhat run scripts/seed-paseo.ts --network polkadotTestnet",
     "zk:setup": "node scripts/setup-zk.mjs",
+    "probe:coverage": "node scripts/shield/coverage-swap.mjs",
     "size": "hardhat size-contracts"
   },
   "devDependencies": {
@@ -25,6 +26,7 @@
     "typescript": "^5.4.0"
   },
   "dependencies": {
-    "@openzeppelin/contracts": "^5.0.2"
+    "@openzeppelin/contracts": "^5.0.2",
+    "@polkadot/api": "^16.5.6"
   }
 }

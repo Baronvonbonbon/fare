@@ -28,7 +28,8 @@ import { readFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { JsonRpcProvider, Wallet, Contract, Interface, parseEther, formatEther, isAddress, keccak256, solidityPacked } from "ethers";
 import { rebateWei, withdrawFeeWei, coversCost, withinBudget, windowSpent } from "./economics.mjs";
-import { rebateInNative } from "./treasury.mjs";
+import { rebateInNative, shouldTopUp, planSwap, assetConversionQuote, priceFraction, cfg as swapCfg } from "./treasury.mjs";
+import { executeRecoverySwap } from "./swap.mjs";
 
 const PORT = Number(process.env.RELAY_PORT || 8788);
 // A single-signer relay keeps ONE provider (nonce safety — no fallback quorum on
@@ -95,6 +96,17 @@ const MIN_MARGIN = Number(process.env.RELAY_MIN_MARGIN || 1.25); // reward ≥ c
 const GAS_BUDGET = parseEther(process.env.RELAY_GAS_BUDGET_PAS || "50"); // no-reward spend / window
 const BUDGET_WINDOW_MS = Number(process.env.RELAY_BUDGET_WINDOW_MS || 86_400_000); // 1 day
 
+// ── Fee-recovery (F6-swap): the relay earns USDC but burns PAS, so when its gas
+// dips below the floor it sells accrued USDC → PAS on the local asset-conversion
+// DEX (via the RUNTIME_PALLETS_ADDR sentinel, its own EVM key), self-refuelling.
+// Thresholds reuse treasury.cfg (GAS_FLOOR_PAS / GAS_TARGET_PAS). Off by default.
+const FEE_RECOVERY = (process.env.RELAY_FEE_RECOVERY || "off").toLowerCase() === "on";
+const FEE_TOKEN = process.env.RELAY_FEE_TOKEN;                              // USDC to recover (defaults to addr.stablecoin below)
+const FEE_ASSET_ID = process.env.RELAY_FEE_ASSET_ID ? Number(process.env.RELAY_FEE_ASSET_ID) : null; // pallet-assets id
+const FEE_TOKEN_DECIMALS = Number(process.env.RELAY_FEE_TOKEN_DECIMALS || 6);
+const SWAP_POLL_MS = Number(process.env.SWAP_POLL_MS || 300_000);
+const GAS_SWAP = 2_000_000n;
+
 if (!KEY) {
   console.error("[relay] RELAY_PRIVATE_KEY not set. Exiting.");
   process.exit(1);
@@ -135,6 +147,8 @@ const VAULT_ABI = [
   "function withdrawFor(address account, address recipient, uint256 deadline, bytes signature)",
   "function balanceOf(address) view returns (uint256)", // reward read for the withdraw guard
   "function withdrawFeeBps() view returns (uint16)",
+  "function tokenBalanceOf(address token, address account) view returns (uint256)", // relay's accrued fee (F6-swap)
+  "function withdrawToken(address token)",              // sweep the relay's own token balance out
 ];
 const vault = vaultAddr ? new Contract(vaultAddr, VAULT_ABI, relay) : null;
 const GAS_WITHDRAW = 200_000n;
@@ -157,7 +171,7 @@ const contextFor = (addr) => BigInt(keccak256(solidityPacked(["address"], [addr]
 // ── Reward reads + calldata decoding for the profitability guard ─────────────
 const ordersAddr = process.env.ORDERS_ADDRESS || addr.orders;
 const ORDERS_READ_ABI = [
-  "function orders(uint256) view returns (address customer, uint64 venueId, uint8 status, address driver, uint96 orderValue, uint96 tip, uint96 fare, uint96 maxFare, uint96 escrow, bytes32 dropCommit, uint64 createdAt, uint64 pickupWindowSecs, uint64 deliveryWindowSecs, uint64 pickupDeadline, uint64 deliveryDeadline, address token)",
+  "function orders(uint256) view returns (address customer, uint64 venueId, uint8 status, address driver, uint96 orderValue, uint96 tip, uint96 fare, uint96 maxFare, uint96 escrow, bytes32 dropCommit, uint64 createdAt, uint64 pickupWindowSecs, uint64 deliveryWindowSecs, uint64 pickupDeadline, uint64 deliveryDeadline, address token, uint96 serviceFee)",
   "function feeBps() view returns (uint16)",
   "function relayRebateBps() view returns (uint16)",
   // forwardable order actions — used to decode a /forward request's orderId
@@ -229,19 +243,21 @@ async function tokenDecimals(token) {
   try { d = Number(await new Contract(token, ["function decimals() view returns (uint8)"], provider).decimals()); } catch {}
   _dec.set(token, d); return d;
 }
-/// The relay's F6 rebate for settling an order, valued in NATIVE wei (so it can
-/// be compared to native gas). Native orders: rebate already native. TOKEN orders
-/// (gasless): the rebate is in the token — value it in native via the swap price
-/// (RELAY_TOKEN_PRICE / a live Hydration quote). Returns null when a token order
-/// has no price → the caller must DECLINE (it can't prove the fee covers gas).
-async function rebateForOrder(orderId) {
+/// The relay's TOTAL compensation for settling an order, valued in NATIVE wei (so
+/// it can be compared to native gas): the flat service fee (F6-flat, sized to
+/// cover the whole per-order cost) PLUS any bps rebate carved from the protocol
+/// fee. Native orders: already native. TOKEN orders (gasless): the comp is in the
+/// order token — value it in native via the price (RELAY_TOKEN_PRICE / a live
+/// asset-conversion quote). Returns null when a token order has no price → the
+/// caller must DECLINE (it can't prove the comp covers gas).
+async function relayCompForOrder(orderId) {
   if (!orders) return 0n;
   try {
     const [o, feeBps, rebBps] = await Promise.all([orders.orders(orderId), orders.feeBps(), orders.relayRebateBps()]);
-    const rebate = rebateWei(o.fare, feeBps, rebBps);
-    if (!o.token || o.token === ZERO) return rebate; // native — same currency as gas
+    const comp = rebateWei(o.fare, feeBps, rebBps) + BigInt(o.serviceFee ?? 0n); // rebate + flat service fee
+    if (!o.token || o.token === ZERO) return comp; // native — same currency as gas
     const dec = await tokenDecimals(o.token);
-    return rebateInNative(rebate, dec, NATIVE_DECIMALS, null); // null price → config RELAY_TOKEN_PRICE
+    return rebateInNative(comp, dec, NATIVE_DECIMALS, null); // null price → config RELAY_TOKEN_PRICE
   } catch { return 0n; }
 }
 async function withdrawFeeForAccount(account) {
@@ -443,18 +459,19 @@ const server = http.createServer(async (req, res) => {
       const cost = await estCostWei(() => settlement[method].estimateGas(...args), GAS_SETTLE);
 
       if (method === "confirmDropoffZK") {
-        // Reward-bearing: the F6 rebate must cover the fare's CUMULATIVE relayed
-        // gas (pickup + bids already recorded, + this dropoff) × margin.
+        // Reward-bearing: the relay's comp (flat service fee + any rebate) must
+        // cover the order's CUMULATIVE relayed gas (pickup + bids/forwards already
+        // recorded, + this dropoff) × margin.
         const cumulative = (gasSpent.get(String(orderId)) ?? 0n) + cost;
-        const rebate = await rebateForOrder(orderId); // valued in NATIVE (null = token order w/ no price)
-        if (PROFIT_GUARD && rebate === null) {
-          return decline(res, "no price to value the token rebate in native", {
-            action: "settle", hint: "set RELAY_TOKEN_PRICE (native per token) or enable Hydration swaps (SWAP_ENABLED)",
+        const comp = await relayCompForOrder(orderId); // valued in NATIVE (null = token order w/ no price)
+        if (PROFIT_GUARD && comp === null) {
+          return decline(res, "no price to value the relay comp in native", {
+            action: "settle", hint: "set RELAY_TOKEN_PRICE (native per token) or enable the asset-conversion quote",
           }, origin);
         }
-        if (PROFIT_GUARD && !coversCost(rebate, cumulative, MIN_MARGIN)) {
-          return decline(res, "fare reward below relayed cost", {
-            action: "settle", rebate: formatEther(rebate), cost: formatEther(cumulative), margin: MIN_MARGIN,
+        if (PROFIT_GUARD && !coversCost(comp, cumulative, MIN_MARGIN)) {
+          return decline(res, "relay comp below relayed cost", {
+            action: "settle", comp: formatEther(comp), cost: formatEther(cumulative), margin: MIN_MARGIN,
           }, origin);
         }
       } else if (PROFIT_GUARD && !budgetRoom(cost)) {
@@ -589,6 +606,38 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
+// ── Fee-recovery loop (F6-swap): sell accrued USDC → PAS when gas dips ────────
+// When the relay's native gas falls below treasury.cfg.floorWei, sweep its accrued
+// fee-token balance out of the vault and swap it to PAS on the local DEX (up to
+// cfg.targetWei), refuelling itself. Same sentinel rail as the burner coverage
+// swap; the relay's own EVM key signs. Gated by RELAY_FEE_RECOVERY=on.
+const feeTokenAddr = FEE_TOKEN || addr.stablecoin;
+async function feeRecoveryTick() {
+  if (FEE_ASSET_ID == null) return; // need the pallet-assets id to swap
+  try {
+    const gasWei = await provider.getBalance(relay.address);
+    if (!shouldTopUp(gasWei, swapCfg.floorWei)) return;
+    // 1. sweep the relay's accrued vault USDC to its own balance (so it's swappable)
+    if (vault) {
+      const vBal = await vault.tokenBalanceOf(feeTokenAddr, relay.address).catch(() => 0n);
+      if (vBal > 0n) await serialize(async () => {
+        const nonce = await provider.getTransactionCount(relay.address);
+        const tx = await vault.withdrawToken(feeTokenAddr, { gasLimit: GAS_WITHDRAW, nonce });
+        await tx.wait?.(); return tx;
+      });
+    }
+    // 2. price + plan (reuse treasury.planSwap) + swap USDC → PAS
+    const token = new Contract(feeTokenAddr, ["function balanceOf(address) view returns (uint256)"], provider);
+    const feeTokenWei = await token.balanceOf(relay.address);
+    const price = await assetConversionQuote(FEE_ASSET_ID, FEE_TOKEN_DECIMALS).catch(() => priceFraction());
+    const plan = planSwap({ gasWei, feeTokenWei, tokenDecimals: FEE_TOKEN_DECIMALS, nativeDecimals: 18, price });
+    if (!plan) return; // no price / nothing to swap / below min
+    const res = await serialize(() => executeRecoverySwap(plan, { signer: relay, assetId: FEE_ASSET_ID, gasLimit: GAS_SWAP }));
+    console.log(`[relay] fee-recovery: gas ${formatEther(gasWei)} < floor → swapped ${plan.swapTokenWei} fee-units → PAS (${res.txHash})`);
+  } catch (e) { console.error("[relay] fee-recovery error:", e?.shortMessage ?? e?.message ?? e); }
+}
+if (FEE_RECOVERY && FEE_ASSET_ID != null) setInterval(feeRecoveryTick, SWAP_POLL_MS).unref?.();
+
 server.listen(PORT, () => {
   console.log(`[relay] FARE venue relay on :${PORT}`);
   console.log(`[relay] relay account: ${relay.address}`);
@@ -599,4 +648,5 @@ server.listen(PORT, () => {
   console.log(`[relay] shield pool:   ${SHIELD_POOL}  (${SHIELD_FEE > 0n ? `fee mode, ${formatEther(SHIELD_FEE)} PAS` : "sponsor mode"})`);
   console.log(`[relay] onboarding:    ${ONBOARD_ENABLED ? `on (seed ${formatEther(ONBOARD_SEED)} PAS${ONBOARD_LAT != null ? `, region ${ONBOARD_RADIUS_KM}km` : ""})` : "off"}`);
   console.log(`[relay] profit guard:  ${PROFIT_GUARD ? `on (margin ${MIN_MARGIN}×, budget ${formatEther(GAS_BUDGET)} PAS / ${BUDGET_WINDOW_MS / 3_600_000}h)` : "OFF (sponsors everything)"}`);
+  console.log(`[relay] fee-recovery:  ${FEE_RECOVERY ? (FEE_ASSET_ID != null ? `on (USDC→PAS, asset ${FEE_ASSET_ID}, floor ${formatEther(swapCfg.floorWei)}/target ${formatEther(swapCfg.targetWei)} PAS, every ${SWAP_POLL_MS / 1000}s)` : "ON but RELAY_FEE_ASSET_ID unset — disabled") : "off"}`);
 });

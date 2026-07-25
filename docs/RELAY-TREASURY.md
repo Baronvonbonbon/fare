@@ -143,26 +143,129 @@ sub-dollar fare can't cover a fixed-ish gas cost. **Fix the fee model**, not jus
 the price: a **flat/minimum relay fee** per order (in USDC), or eliminate the
 relay-gas problem entirely (next point).
 
-### The bigger lever: sufficient-asset fee payment (verify for EVM)
-Because USDC is sufficient, `asset-conversion` can charge **fees in USDC**,
-auto-converting to native. If **pallet-revive EVM txs** support this
-(`ChargeAssetTxPayment` / a paymaster over `eth_transact`) then a burner **pays
-its own gas in USDC** and the relay/forwarder + fee-recovery swap are **unnecessary
-for the currency problem**. The docs are silent on EVM fee-in-asset — this is the
-single most valuable thing to confirm (pallet-revive runtime config). If it works,
-FARE's gasless model simplifies dramatically.
+### SETTLED (2026-07-24): EVM fee-in-asset is NOT available — probed on-chain
+Probed the live runtime (`asset-hub-paseo` spec 2004002, PAS 10-dp, EVM =
+`Revive`) directly (`@polkadot/api` metadata + storage). The hoped-for
+simplification — burner pays its own gas in USDC, drop the relay — is **blocked**,
+for two independent reasons:
 
-### Recommendations (priority order)
-1. **Verify EVM fee-in-asset** (sufficient-asset paymaster over pallet-revive). If
-   yes → burners pay gas in USDC; drop the relay-gas machinery.
-2. **If not** → keep the relay, but **price the rebate at the live pool rate**
-   (`assetConversionQuote`) and switch to a **flat/minimum relay fee** so it
-   actually covers gas; recover fees via the **local `asset-conversion` swap**
-   (execution: an asset-conversion precompile from EVM if one exists — TBD probe —
-   else a Paseo-faucet-funded substrate signer). No XCM/Hydration/Discord.
-3. **Broaden payments**: accept **USDt (1984)** too (also sufficient; pool exists)
+1. **`eth_transact` structurally can't select a fee asset.**
+   `revive.ethTransact(payload: Bytes)` wraps a raw Ethereum `TransactionSigned`;
+   the runtime rebuilds a `CheckedExtrinsic` by recovering the ECDSA signer. An
+   Ethereum tx has **no `assetId` field**, so the fee-asset selector is always
+   `None` → **fees settle in native PAS**. `ethCall`/`ethInstantiateWithCode`
+   confirm it: their params are `effectiveGasPrice`/`ethGasLimit`/`value` — pure
+   Ethereum gas semantics, native only. There is nowhere to say "charge me in USDC".
+2. **The substrate fee-in-asset path is present but unconfigured.** Signed-extension
+   pipeline is `era, nonce, tip, assetId, mode` — the `assetId` is
+   `pallet-asset-tx-payment`'s `ChargeAssetTxPayment`, and `AssetTxPayment` is
+   present. BUT this runtime uses the **`AssetRate`-driven** variant (not the
+   pool-based `AssetConversionTxPayment`, which is **absent**), and
+   **`AssetRate.conversionRateToNative` has ZERO entries** — so no asset (not USDC,
+   not USDt) is accepted for fees even from a native signer today.
+
+⇒ The fee-in-asset selector, even if it were configured, only rides on native
+substrate extrinsics — never on `eth_transact`. **The relay/forwarder stays
+required for gasless EVM.** Confirmed, not inferred.
+
+**What sufficiency still buys (take it):** USDC(1337)/USDt(1984) reconfirmed
+`isSufficient=true` (minBalance 0.07) → **ED elimination** only: a burner (and the
+relay account) can exist holding just the stablecoin, no PAS dust. Doesn't touch gas.
+
+**New lever found — `Pgas` (testnet free-gas rail):** custom pallet, `pgasAssetId
+= 2000000000` (a **sufficient** asset, "PGAS" = pay-gas, 3.8T supply / 397
+holders). `pgas.claimPgas(slotIndex, target)` mints 5 PGAS/claim gated by the
+**`AsPgas` extension verifying a ring-VRF proof** (anti-sybil proof-of-personhood),
+≤100 claims/person/period. Two caveats stop it being an architecture: (a)
+**testnet-only** — Polkadot mainnet AH has no `Pgas`; (b) `claimPgas` needs a
+**substrate signer + VRF proof**, so a pure EVM burner can't call it. Use it to
+fund the **demo** burner's gas for free on Paseo, not for the product.
+
+### Recommendations (priority order — updated post-probe)
+1. **Keep the relay** — EVM fee-in-asset is confirmed unreachable; the relay is
+   structurally required for gasless EVM UX.
+2. **Fix the fee model** (the real bug): switch the percentage `relayRebateBps` to a
+   **flat/minimum relay fee** in USDC, sized against real gas at the live pool rate
+   (`assetConversionQuote`), so the fee actually covers gas.
+3. **Wire local `asset-conversion` fee-recovery** (USDC/USDt → PAS on FARE's own
+   chain — no XCM/Hydration/Discord). Execution probed: **no asset-conversion
+   precompile** exists (only per-asset ERC20 precompiles via `AssetsPrecompiles`),
+   so the EVM relay drives `assetConversion.swapExactTokensForTokens` via the
+   **`RUNTIME_PALLETS_ADDR` sentinel** (an EVM tx whose calldata is a SCALE-encoded
+   runtime call → `eth_substrate_call`, dispatched under the signer's **fallback**
+   `Signed` origin) — no separate substrate key. Same rail as the wired burner-side
+   coverage swap below.
+4. **Broaden payments**: accept **USDt (1984)** too (also sufficient; pool exists)
    — a one-line `setAcceptedToken`.
-4. Drop the Hydration/XCM path to a documented fallback (cross-chain only).
+5. Use **PGAS** to fund the demo burner's gas for free on Paseo (substrate key +
+   VRF claim), keeping the relay out of the loop for the testnet showcase only.
+6. Drop the Hydration/XCM path to a documented fallback (cross-chain only).
+
+## Asset-conversion coverage layer — any asset → one shielded token → gas+fare+tip
+
+**The gap this closes.** The live Kusama Shield pool on Paseo is **native-PAS
+only** (`depositNative`). The combined e2e ([E2E-COMBINED-REPORT.md](E2E-COMBINED-REPORT.md))
+shields the burner's **gas** through it but leaves the **escrow USDC value
+linkable** — its "one genuinely-new mainnet gap": USDC can't route through a
+PAS-only pool, so the escrow traces back to `main`.
+
+**The fix (`venue-node/swap.mjs`).** Normalize on the ONE asset the pool supports.
+Everything shields as **PAS**; the burner then fans that PAS out through the local
+`asset-conversion` DEX into exactly what each cost needs:
+
+```
+any user asset ─swap→ PAS ─deposit→ KS pool ─proxy_withdraw(relay)→ burner (UNLINKED)
+                                          burner: keep PAS for gas
+                                                  swap PAS → USDC  (fare + tip)  ← asset-conversion
+                                          → gasless USDC order; relay recovers fee USDC→PAS
+```
+
+So the escrow USDC now originates from a **burner-side swap of shielded PAS**, not
+a `main→burner` transfer — no new pool, no XCM. PAS is the canonical settlement
+asset **by constraint** (the pool), and asset-conversion makes that invisible to
+the order layer.
+
+**Execution rail (shared with fee-recovery) — WIRED.** No asset-conversion
+precompile exists, so the EVM burner drives `assetConversion.swapTokensForExactTokens`
+through pallet-revive's **runtime-pallets sentinel**: an EVM tx whose `to` is
+`RUNTIME_PALLETS_ADDR` (`0x6d6f…0000` = `PalletId("py/paddr")`) has its calldata
+decoded as a SCALE-encoded `RuntimeCall` and dispatched under
+`RawOrigin::Signed(to_fallback_account_id(signer))` (revive `lib.rs`~2279 +
+`runtime.rs`~381). So the burner signs one ordinary EVM tx and the swap runs under
+its **fallback account** (`H160 ++ 0xEE×12`) — **no substrate key, no `mapAccount`**
+— which is exactly where its shielded PAS lands and where the bought USDC returns
+(`sendTo` = that fallback account).
+
+`swap.mjs` ships: live `quoteExactIn`/`priceNativePerToken` (verified 1 USDC =
+0.2496 PAS, 1 USDt = 0.2516 PAS); pure tested `planCoverage` (exact-out, keeps a
+gas reserve, bounds slippage) + `scaleAmount`; `encodeSwapCall` (builds the call on
+live metadata) and `executeSwap` (signs + submits the sentinel EVM tx). **Decimals
+gotcha handled:** the pallet denominates native PAS in the chain's **10-dp**, not
+the EVM's 18-dp, so `encodeSwapCall` rescales the native `amountInMax` (round-up)
+while the token `amountOut` (asset dp, shared) passes through. **Verified** by
+encoding a real coverage swap and decoding it back through the live Paseo registry
+(`assetConversion.swapTokensForExactTokens`, `sendTo` = fallback, `amountInMax`
+= 1.2606 PAS in 10-dp). **Live probe:** `node scripts/shield/coverage-swap.mjs`
+(needs `npm i @polkadot/api`; `DRY=1` plans+encodes without sending) runs the whole
+thing against a funded burner and confirms by effect — the USDC gain shows up at
+`balanceOf(burnerH160)` (the fallback account). Its read-only parts are verified
+(price, encode/decode, the asset-1337/1984 ERC20 precompiles); the money-moving tx
+is the one remaining confirmation, which the probe performs.
+
+### Privacy gaps (full-privacy target — what's shielded vs. what leaks)
+| Leg | Status | Gap / note |
+|---|---|---|
+| Burner gas (PAS) | ✅ shielded | via KS `proxy_withdraw`; no `main→burner` edge |
+| Order identity | ✅ unlinked | fresh per-order burner ≠ main |
+| Location | ✅ private | Poseidon commit + Groth16 dropoff (no coords on-chain) |
+| Escrow **value** (fare) | ◑ **amount leaks** | closed the *source* link (burner-side swap of shielded PAS), but the PAS→USDC swap amount reveals the fare **value** on-chain (identity hidden, amount not). Mitigate: standard order sizes / fixed denominations. |
+| Tip | ◑ amount leaks | same as fare; a separate note/swap is more unlinkable but doubles the correlation surface. |
+| Driver payout | ✗ **not shielded** | escrow→driver writes an edge, and the driver keeps a **persistent** identity (reputation/stake/payouts) — inherently linkable. Shielding it fights the reputation model. |
+| Relay fee-recovery swap | ✗ not shielded | relay's USDC→PAS swaps are from its persistent identity; timing/amount-correlatable to orders. |
+| Relay as observer | ✗ trust point | the relay submits the withdrawal, so it learns `burner ↔ withdrawal`. A decentralized/blind relayer would close this. |
+| Anonymity set | ✗ weak (testnet) | Paseo pool ~230 leaves; real privacy needs a large set + deposit/withdraw time-decorrelation (currently last-leaf immediate pattern). |
+| Fixed denominations | ◑ required | KS notes are fixed-denom; variable escrow amounts must be quantized (deposit standard units, change stays in-pool) or amounts correlate. |
+| Single-asset notes | ◑ by design | one note = one asset; shielding PAS + USDC separately = two correlatable withdrawals. The coverage layer avoids this by shielding **only PAS**. |
 
 ## Config (`venue-node/.env`)
 
