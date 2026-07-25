@@ -152,6 +152,19 @@ Design rules that make this hold:
   was. Hiding amounts needs confidential escrow — out of reach here (§8).
 - **T2's executor knows the pairing** if it also submitted T1. That is the T2
   threat, and phase 1 does not close it — phase 3 does (§7).
+- **A keeper can steal the buffer.** This is the sharpest edge in phase 1 and it
+  is inherent, not an oversight: the vault cannot check that a commitment in a
+  batch belongs to a ticket holder, because knowing that is exactly the pairing
+  the design exists to destroy. An authorized keeper that submits commitments it
+  controls consumes the tickets and keeps the notes. Phase 1 bounds this rather
+  than solving it — keepers are governance-authorized (`setShieldKeeper`), theft
+  is immediately visible to the victims (their note does not exist in the pool),
+  and the exposure is capped by what is queued at that moment. It is a genuine
+  custody escalation over today's vault, where a relay can submit but never
+  divert. Phase 3's ZK authorization is what removes it: once a ticket holder can
+  prove entitlement without naming themselves, the vault can verify the batch and
+  the keeper becomes untrusted again. **Do not enable a keeper you would not
+  trust with the queued balance.**
 - **USDC payouts.** The pool holds native PAS; the live USDC flow derives escrow
   by swapping shielded PAS → USDC on the local DEX (`venue-node/swap.mjs`). A
   shielded USDC *payout* needs the reverse swap, and it must happen at the
@@ -265,7 +278,8 @@ to be worth anything.
 
 | Phase | Contents | Contract change | Status |
 |---|---|---|---|
-| **1** | Batched shielded payouts (§4); encrypted registration metadata (§5); disclosure capsule (§7) | `FareVault` + keeper | **this branch** |
+| **1a** | Batched shielded payouts (§4) — vault queue, batch, reclaim | `FareVault` | **built** |
+| **1b** | Keeper in venue-node, client shielding UX, encrypted registration metadata (§5), disclosure capsule (§7) | no | in progress |
 | **2** | Denomination policy tuning, known-roots retry, batch telemetry, tier UX | no | next |
 | **3** | Relay hardening: multi-relay, blinded queue authorization (ZK), no-log posture | new circuit | spike first |
 | **4** | Private discovery (§6): coarse board, assignment-time reveal, drop the on-chain venue edge | `FareOrders` events | after 3 |
