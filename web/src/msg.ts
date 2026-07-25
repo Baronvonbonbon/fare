@@ -66,6 +66,35 @@ async function deriveAesKey(privateKey: string, theirPubKey: string, context: st
   );
 }
 
+/// The order thread's symmetric key as raw bytes — the same key `sealMessage`
+/// uses, exported so it can be escrowed in a disclosure capsule (capsule.ts).
+///
+/// Deliberately scoped: handing this over reveals ONE order's thread. It is not
+/// an account key and cannot sign, spend, or open any other order — which is
+/// what makes selective disclosure selective (docs/PRIVACY-TIERS.md §7).
+export async function exportOrderKey(
+  myPrivateKey: string, theirPubKey: string, orderId: string | bigint
+): Promise<string> {
+  const shared = new SigningKey(myPrivateKey).computeSharedSecret(theirPubKey);
+  const enc = new TextEncoder();
+  const base = await crypto.subtle.importKey("raw", buf(shared), "HKDF", false, ["deriveBits"]);
+  const bits = await crypto.subtle.deriveBits(
+    { name: "HKDF", hash: "SHA-256", salt: enc.encode(orderContext(orderId)), info: enc.encode("fare-msg") },
+    base,
+    256
+  );
+  return hexlify(new Uint8Array(bits));
+}
+
+/// Open a thread message with an exported order key rather than a keypair — the
+/// arbiter's path. Same AES-GCM key, so it reads exactly what the participants
+/// saw and nothing else.
+export async function openWithOrderKey(orderKeyHex: string, sealed: Sealed): Promise<string> {
+  const key = await crypto.subtle.importKey("raw", buf(orderKeyHex), { name: "AES-GCM" }, false, ["decrypt"]);
+  const pt = await crypto.subtle.decrypt({ name: "AES-GCM", iv: buf(sealed.iv) }, key, buf(sealed.ct));
+  return new TextDecoder().decode(pt);
+}
+
 /// Encrypt `plaintext` to the counterparty for a given order.
 export async function sealMessage(
   myPrivateKey: string,

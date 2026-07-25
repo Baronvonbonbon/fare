@@ -2,6 +2,9 @@ import { useCallback, useEffect, useState } from "react";
 import { ethers } from "ethers";
 import { contracts, fmt, parse, short, syncAddressesFromRouter, nodeLabel } from "../chain";
 import { ConsoleProps } from "./OpsApp";
+import { fetchCapsules, fetchSealedChat } from "../channel";
+import { openCapsule, evidenceMatches } from "../capsule";
+import { openWithOrderKey } from "../msg";
 
 // Arbiter console (integration-plan D1).
 //
@@ -157,6 +160,124 @@ export default function DisputesConsole({ session, busy, run, say }: ConsoleProp
   );
 }
 
+
+// ---------- disclosure capsules (PRIVACY-TIERS §7) ----------
+
+/// Order messages are unreadable by default; a capsule is the arbiter's scoped
+/// escape hatch. Opening one yields ONE order's thread key — not an account key,
+/// and nothing about any other order.
+///
+/// The **fail-closed** rule does the work a ZK proof of correct encryption
+/// would: the vault can't verify a capsule was honestly formed, so a party whose
+/// capsule is missing or won't open has simply not disclosed, and the ruling
+/// goes against them. That is a finding to act on, not an error to debug.
+function DisclosurePanel({ r }: { r: DisputeRow }) {
+  const [key, setKey] = useState("");
+  const [note, setNote] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [anchored, setAnchored] = useState<boolean | null>(null);
+  const [disclosed, setDisclosed] = useState<{ from: string; ok: boolean }[]>([]);
+  const [thread, setThread] = useState<{ from: string; ts: number; text: string }[] | null>(null);
+
+  async function reveal() {
+    setBusy(true);
+    setNote("");
+    try {
+      const posted = await fetchCapsules(r.orderId);
+      if (posted.length === 0) {
+        setNote("No capsules escrowed on this order — neither party disclosed.");
+        setDisclosed([]); setThread(null); setAnchored(null);
+        return;
+      }
+
+      // The on-chain evidenceURI pins WHICH capsules the dispute was opened
+      // over. A mismatch means the bundle was swapped after the fact, so it is
+      // worth no more than an absent one.
+      setAnchored(evidenceMatches(r.evidenceURI, posted.map((p) => p.capsule)));
+
+      const outcomes: { from: string; ok: boolean }[] = [];
+      let orderKey: string | null = null;
+      for (const p of posted) {
+        try {
+          const k = await openCapsule(key.trim(), p.capsule);
+          outcomes.push({ from: p.from, ok: true });
+          orderKey = orderKey ?? k;
+        } catch {
+          outcomes.push({ from: p.from, ok: false });
+        }
+      }
+      setDisclosed(outcomes);
+
+      if (!orderKey) {
+        setNote("No capsule opened with this key. Either it is not the arbiter key, or nothing was honestly disclosed.");
+        setThread(null);
+        return;
+      }
+      const sealed = await fetchSealedChat(r.orderId);
+      const out: { from: string; ts: number; text: string }[] = [];
+      for (const m of sealed) {
+        try { out.push({ from: m.from, ts: m.ts, text: await openWithOrderKey(orderKey, m) }); }
+        catch { out.push({ from: m.from, ts: m.ts, text: "· unreadable ·" }); }
+      }
+      setThread(out);
+    } catch (e: any) {
+      setNote(e?.message ?? String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const verdict = (addr: string) => {
+    const hit = disclosed.find((d) => d.from.toLowerCase() === addr.toLowerCase());
+    if (!hit) return "no capsule — fail closed against this party";
+    return hit.ok ? "disclosed ✓" : "capsule did not open — fail closed against this party";
+  };
+
+  return (
+    <div style={{ marginTop: 14, borderTop: "1px solid var(--line)", paddingTop: 14 }}>
+      <div className="section-note">Disclosure</div>
+      <p className="hint">
+        Opens this order&apos;s messages with the arbiter key. Scoped to this order only.
+        The key is used in this tab and never stored or sent anywhere.
+      </p>
+      <div className="btn-row" style={{ flexWrap: "wrap" }}>
+        <input style={{ flex: 1, minWidth: 200 }} type="password" placeholder="arbiter private key (0x…)"
+          value={key} onChange={(e) => setKey(e.target.value)} />
+        <button className="btn small" disabled={busy || !key.trim()} onClick={reveal}>
+          {busy ? "Opening…" : "Open capsules"}
+        </button>
+      </div>
+
+      {anchored === false && (
+        <p className="hint" style={{ color: "var(--danger, #f66)" }}>
+          ⚠ The escrowed capsules do not match the evidence anchored on-chain — this bundle is not
+          the one the dispute was opened over. Treat it as no evidence.
+        </p>
+      )}
+      {disclosed.length > 0 && (
+        <>
+          <div className="kv"><span className="k">customer</span><span className="v">{verdict(r.customer)}</span></div>
+          {r.driver !== ethers.ZeroAddress && (
+            <div className="kv"><span className="k">driver</span><span className="v">{verdict(r.driver)}</span></div>
+          )}
+        </>
+      )}
+      {thread && (
+        <div style={{ maxHeight: 200, overflowY: "auto", marginTop: 8, fontSize: 13, display: "flex", flexDirection: "column", gap: 4 }}>
+          {thread.length === 0 && <span className="hint">Thread opened — no messages were sent.</span>}
+          {thread.map((m, i) => (
+            <div key={i}>
+              <span className="mono" style={{ opacity: 0.7 }}>{short(m.from)}</span>{" "}
+              <span>{m.text}</span>
+            </div>
+          ))}
+        </div>
+      )}
+      {note && <p className="hint">{note}</p>}
+    </div>
+  );
+}
+
 // ---------- dispute card + ruling form ----------
 
 function DisputeCard({
@@ -211,6 +332,8 @@ function DisputeCard({
         <div className="kv"><span className="k">driver rep · stake</span><span className="v">{r.driverDelivered}✓ / {r.driverFailed}✗ · {fmt(r.driverStake)} PAS</span></div>
       )}
       <div className="kv"><span className="k">evidence</span><span className="v mono">{r.evidenceURI || "(none provided)"}</span></div>
+
+      {r.status === 1 && <DisclosurePanel r={r} />}
 
       {r.status === 1 && (
         <div style={{ marginTop: 14, borderTop: "1px solid var(--line)", paddingTop: 14 }}>

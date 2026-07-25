@@ -43,7 +43,7 @@ import {
   sweepToMain,
 } from "./wallets";
 import { isAddress, ZeroAddress } from "ethers";
-import { OrderThread, type ChatMsg, type LocUpdate } from "./channel";
+import { OrderThread, fetchCapsules, type ChatMsg, type LocUpdate } from "./channel";
 import { newPhotoKey, sealPhoto, openPhoto } from "./photo";
 import { notify, notifyPermission, enableNotifications, type NotifyPermission } from "./notify";
 import { pushConfigured, pushSubscribed, subscribePush, syncWatched } from "./push";
@@ -62,6 +62,7 @@ import {
   commitProfile, isCommitted, describeProfile, saveSelfProfile, loadSelfProfile,
   profilePayload, verifyPayload, type DriverProfile,
 } from "./regmeta";
+import { escrowCapsule, evidenceURI } from "./disclosure";
 import { usePasUsd, cachedRate, fiatOf, pasToUsd, formatUsd } from "./pricing";
 import {
   tokenOrdersEnabled, stablecoinAsset, assetOf, fmtAsset, parseAsset,
@@ -920,12 +921,25 @@ function DisputeControl({ o, handle, busy, act }: any) {
     );
   }
   if (o.status !== 2 && o.status !== 3) return null;
+
+  /// Anchor the escrowed disclosure capsules in the evidence field (§7). Without
+  /// the anchor the transport could swap a capsule after the fact, and the
+  /// fail-closed rule would punish whichever party was honest.
+  async function openWithAnchor() {
+    let uri = evidence;
+    try {
+      const capsules = (await fetchCapsules(o.id)).map((c) => c.capsule);
+      if (capsules.length > 0) uri = evidenceURI(capsules, evidence || undefined);
+    } catch { /* transport down — open the dispute anyway, unanchored */ }
+    return handle.disputes.openDispute(o.id, uri, { value: bond });
+  }
+
   return (
     <div className="btn-row" style={{ flexWrap: "wrap", marginTop: 8 }}>
       <input style={{ flex: 1, minWidth: 120 }} placeholder="evidence URI / note (optional)"
         value={evidence} onChange={(e) => setEvidence(e.target.value)} />
       <button className="btn ghost small" disabled={busy || !handle}
-        onClick={() => act("Open dispute", () => handle.disputes.openDispute(o.id, evidence, { value: bond }))}>
+        onClick={() => act("Open dispute", openWithAnchor)}>
         Dispute{bond > 0n ? ` · ${fmt(bond)} PAS bond` : ""}
       </button>
     </div>
@@ -1496,6 +1510,10 @@ function ChatPanel({ orderId, myPriv, myAddr, peerAddr, peerRegistryURI }: { ord
     threadRef.current = t;
     let alive = true;
     t.open().catch(() => {});
+    // Escrow a disclosure capsule (§7): normal operation never opens it, but a
+    // dispute has to be resolvable. Silent no-op when no arbiter key is
+    // configured — an unverifiable key must never be encrypted to.
+    escrowCapsule(orderId, myPriv, myAddr, peerAddr).catch(() => {});
     const tick = async () => {
       try { const nu = await t.poll(); if (alive && nu.length) setMsgs((m) => [...m, ...nu]); } catch { /* transient */ }
     };

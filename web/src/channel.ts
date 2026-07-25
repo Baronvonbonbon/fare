@@ -25,7 +25,7 @@ export function topicOf(orderId: string | bigint): string {
 export interface Envelope {
   from: string;
   seq: number;
-  kind: "hello" | "chat" | "loc" | "photo" | "profile";
+  kind: "hello" | "chat" | "loc" | "photo" | "profile" | "capsule";
   ts: number;
   pub?: string;
   iv?: string;
@@ -54,7 +54,7 @@ async function post(topic: string, msg: Envelope): Promise<boolean> {
   return false;
 }
 
-async function fetchThread(topic: string): Promise<Envelope[]> {
+export async function fetchThread(topic: string): Promise<Envelope[]> {
   for (const base of endpoints()) {
     try {
       const url = `${base}${base.includes("?") ? "&" : "?"}topic=${topic}&since=0`;
@@ -98,6 +98,31 @@ export interface PhotoRef {
 /// `myPriv` is the sender's per-order/session private key (needed for ECDH — so
 /// chat requires a local-key wallet, not an injected one); `peerAddr` is the
 /// on-chain counterparty used to authenticate the peer's pubkey.
+/// Every disclosure capsule escrowed on an order's thread, for the arbiter — who
+/// holds no account in the thread and only needs what is already encrypted to
+/// them. Returns the posting address alongside each capsule so the fail-closed
+/// rule can be applied per party.
+export async function fetchCapsules(
+  orderId: string | bigint
+): Promise<{ from: string; capsule: { epk: string; iv: string; ct: string } }[]> {
+  const thread = await fetchThread(topicOf(orderId));
+  return thread
+    .filter((e) => e.kind === "capsule" && e.pub && e.iv && e.ct)
+    .map((e) => ({ from: e.from, capsule: { epk: e.pub!, iv: e.iv!, ct: e.ct! } }));
+}
+
+/// The sealed chat envelopes on an order's thread, for an arbiter opening a
+/// dispute with a capsule key.
+export async function fetchSealedChat(
+  orderId: string | bigint
+): Promise<{ from: string; ts: number; iv: string; ct: string }[]> {
+  const thread = await fetchThread(topicOf(orderId));
+  return thread
+    .filter((e) => e.kind === "chat" && e.iv && e.ct)
+    .map((e) => ({ from: e.from, ts: e.ts, iv: e.iv!, ct: e.ct! }))
+    .sort((a, b) => a.ts - b.ts);
+}
+
 export class OrderThread {
   private topic: string;
   private peerPub: string | null = null;
@@ -167,6 +192,18 @@ export class OrderThread {
     }
     const sealed = await sealMessage(this.myPriv, this.peerPub, this.orderId, JSON.stringify({ key: photoKey, id }));
     await post(this.topic, { from: this.myAddr, seq: 0, kind: "photo", ts: Date.now(), iv: sealed.iv, ct: sealed.ct });
+    return true;
+  }
+
+  /// Escrow a disclosure capsule for this order (PRIVACY-TIERS §7). Posted in
+  /// the clear as far as the transport is concerned — it is already encrypted to
+  /// the arbiter, and only the arbiter can open it. Idempotent by design: posting
+  /// again simply supersedes, since the arbiter reads every capsule on the thread.
+  async sendCapsule(capsule: { epk: string; iv: string; ct: string }): Promise<boolean> {
+    await post(this.topic, {
+      from: this.myAddr, seq: 0, kind: "capsule", ts: Date.now(),
+      pub: capsule.epk, iv: capsule.iv, ct: capsule.ct,
+    });
     return true;
   }
 

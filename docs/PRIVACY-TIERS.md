@@ -6,7 +6,8 @@ Design note for extending FARE's privacy from "the customer is protected" to
 [SHIELDED-FUNDING.md](SHIELDED-FUNDING.md) (the funding-in path, shipped) and
 [KUSAMA-SHIELD-FINDINGS.md](KUSAMA-SHIELD-FINDINGS.md) (pool constraints).
 
-Status: **design + phase-1 slice**. Phases 2–4 are specified here, not built.
+Status: **phase 1 built** (§4, §5, §7 — see the phase table). Phases 2–4 are
+specified here, not built. Nothing here has run against the live pool yet.
 
 ---
 
@@ -258,6 +259,35 @@ expensive. Cheaper and sufficient: **fail closed.** A dispute in which a party's
 capsule does not open resolves against that party. No proof needed; the incentive
 does the work.
 
+**As built** (`web/src/capsule.ts`, `disclosure.ts`, arbiter UI in
+`ops/DisputesConsole.tsx`). No contract change: `openDispute`'s `evidenceURI` is
+free-form, so it carries the anchor.
+
+- **What a capsule discloses is one order's thread key**, exported from the same
+  per-order ECDH the messages already use (`msg.ts exportOrderKey`). It is not an
+  account key: it cannot sign, cannot spend, and cannot open any other order.
+  That scoping is what makes the disclosure selective rather than total.
+- **Escrowed at thread open**, before anyone knows whether there will be a
+  dispute — a party who could decide afterwards would simply decline.
+- **Sealed only to a verified arbiter.** An address can't be encrypted to, so the
+  pubkey comes from config (`VITE_ARBITER_PUBKEY`) and is used only once it
+  derives to the address `FareDisputes.arbiter()` names. A wrong or hostile key
+  is a no-op instead of a silent leak.
+- **Ephemeral sender key per capsule**, so two capsules from the same driver on
+  two orders aren't relatable.
+- **Anchored on-chain at dispute time**: `fare-capsule:v1:<digest>` pins which
+  capsules the dispute was opened over. Without it the transport could swap a
+  capsule afterwards and fail-closed would punish the honest party. The digest is
+  order-independent, since the two parties post separately.
+
+Known limitation: the capsules live on the relay-hosted thread, and the anchor
+only pins them at dispute time. **A malicious relay can drop a capsule and get an
+honest party ruled against.** A party can detect this (their own capsule is
+missing from the thread) and re-post, but a determined relay can keep dropping —
+one more reason multi-relay routing (§3 of the phase table) is not optional
+polish. Anchoring at assignment would close it, and that does need a contract
+change.
+
 **Relay hardening (phase 3).** Phase 1 leaves the keeper able to pair T1 with T2.
 Closing it needs the queue entry to be authorized *without* naming the account —
 a second circuit proving "I own ≥ `bucket` in the vault" against a balance
@@ -303,7 +333,7 @@ to be worth anything.
 | **1a** | Batched shielded payouts (§4) — vault queue, batch, reclaim | `FareVault` | **built** |
 | **1b** | Keeper (`venue-node/shieldkeeper.mjs`) + client queue/claim (`web/src/shieldpayout.ts`) | no | **built** |
 | **1c** | Encrypted registration metadata (§5) + driver-facing UI — commitment in `metadataURI`, reveal over the order thread | no | **built** |
-| **1d** | Disclosure capsule (§7) | no | open |
+| **1d** | Disclosure capsule (§7) — capsule crypto, escrow at thread open, on-chain anchor, arbiter console | no | **built** |
 | **2** | Denomination policy tuning, known-roots retry, batch telemetry, tier UX | no | next |
 | **3** | Relay hardening: multi-relay, blinded queue authorization (ZK), no-log posture | new circuit | spike first |
 | **4** | Private discovery (§6): coarse board, assignment-time reveal, drop the on-chain venue edge | `FareOrders` events | after 3 |
