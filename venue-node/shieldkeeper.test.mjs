@@ -117,3 +117,12 @@ test("store: a corrupt file does not stop the keeper booting", () => {
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("planBatch: respects the chain's per-transaction deposit ceiling", () => {
+  // Paseo rejects >2 pool deposits in one tx (proof size, not gas). Because the
+  // contract consumes tickets FIFO, that ceiling caps the anonymity set — so the
+  // keeper must submit several smaller batches rather than one oversized revert.
+  assert.equal(planBatch({ held: held(8), live: 8, minBatch: 2, maxBatch: 2 }).length, 2);
+  assert.equal(planBatch({ held: held(8), live: 8, minBatch: 8, maxBatch: 2 }), null);
+  assert.equal(planBatch({ held: held(8), live: 8, minBatch: 2 }).length, 8); // unset = no ceiling
+});

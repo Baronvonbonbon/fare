@@ -36,15 +36,22 @@ export function shuffle(items) {
 }
 
 /// Decide whether a bucket can be batched now.
-///   held  — commitments this keeper is holding for the bucket
-///   live  — tickets queued on-chain and not yet deposited or reclaimed
+///   held     — commitments this keeper is holding for the bucket
+///   live     — tickets queued on-chain and not yet deposited or reclaimed
+///   maxBatch — chain ceiling on deposits per transaction (see below)
 /// Returns the commitments to submit, or null to wait.
 ///
 /// `live` can be lower than `held` when another keeper batched first, and higher
 /// when drivers queued through a different relay — so the batch size is the
 /// smaller of the two, and it must still clear minBatch on its own.
-export function planBatch({ held, live, minBatch }) {
-  const n = Math.min(held.length, live);
+///
+/// `maxBatch` exists because Paseo Asset Hub rejects more than 2 pool deposits
+/// in one transaction, at gas far below any limit — a proof-size bound that EVM
+/// gas doesn't express (docs/PRIVACY-TIERS.md §8). Since the contract consumes
+/// tickets FIFO, the per-transaction batch size IS the anonymity set, so this
+/// ceiling is a privacy parameter, not a throughput knob.
+export function planBatch({ held, live, minBatch, maxBatch = Infinity }) {
+  const n = Math.min(held.length, live, maxBatch);
   if (n < minBatch) return null;
   return shuffle(held).slice(0, n);
 }
@@ -174,14 +181,14 @@ export async function dwellReady(vault, bucket, provider, now) {
 
 /// One keeper pass over every bucket that has commitments waiting.
 /// `submit` runs the transaction (the relay passes its nonce-serializing wrapper).
-export async function runOnce({ vault, pool, provider, store, submit, log = () => {} }) {
+export async function runOnce({ vault, pool, provider, store, submit, maxBatch, log = () => {} }) {
   const minBatch = Number(await vault.shieldMinBatch());
   const executed = [];
 
   for (const bucket of store.buckets()) {
     const held = store.heldFor(bucket);
     const live = Number(await vault.shieldPending(bucket));
-    const batch = planBatch({ held, live, minBatch });
+    const batch = planBatch({ held, live, minBatch, maxBatch });
     if (!batch) continue;
     if (!(await dwellReady(vault, bucket, provider))) {
       log(`shield-keeper: bucket ${bucket} has ${batch.length} ready but the oldest ticket is still dwelling`);

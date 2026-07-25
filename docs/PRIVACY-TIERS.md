@@ -6,8 +6,9 @@ Design note for extending FARE's privacy from "the customer is protected" to
 [SHIELDED-FUNDING.md](SHIELDED-FUNDING.md) (the funding-in path, shipped) and
 [KUSAMA-SHIELD-FINDINGS.md](KUSAMA-SHIELD-FINDINGS.md) (pool constraints).
 
-Status: **phase 1 built** (§4, §5, §7 — see the phase table). Phases 2–4 are
-specified here, not built. Nothing here has run against the live pool yet.
+Status: **phase 1 built and validated on Paseo** (§4, §5, §7 — see the phase
+table). Phases 2–4 are specified here, not built. Live results and the anonymity
+ceiling they exposed: [E2E-PRIVACY-LIVE.md](E2E-PRIVACY-LIVE.md).
 
 ---
 
@@ -151,6 +152,11 @@ Design rules that make this hold:
   its owner so the owner can reclaim a stalled one; that publishes only
   (account, bucket, position), which T1's event already revealed. What is never
   written anywhere is which commitment redeems which ticket.
+  **Superseded by the live run:** in isolation that is true, but FIFO consumption
+  *plus* public owners lets an observer read which tickets a batch consumed and
+  therefore which accounts its commitments belong to. See §8 and
+  [E2E-PRIVACY-LIVE.md](E2E-PRIVACY-LIVE.md) §2 — phase 2 must hide the owner
+  until reclaim.
 - **The buffer is fungible.** Value lives in one vault-held pool, not
   per-account, so the buffer balance itself reveals nothing about who queued.
 
@@ -316,6 +322,15 @@ to be worth anything.
 - **Amounts and timing stay public.** Order values, fees, and delivery times are
   in the clear and are strong correlators on their own. Delivery timing in
   particular signals when someone is home — PRIVACY.md risk #4, unchanged here.
+- **On Paseo a batch is capped at 2 deposits per transaction** — a proof-size
+  bound, not gas (a 2-deposit batch estimates ~40 k gas; raising the limit to
+  500 M changes nothing). Because the contract consumes tickets FIFO and ticket
+  owners are public, **the per-transaction batch size is the anonymity set**, so
+  the shipped `minBatch = 8` default is unreachable on this chain and a batched
+  payout is 2-anonymous. Measured in [E2E-PRIVACY-LIVE.md](E2E-PRIVACY-LIVE.md);
+  the phase-2 fix is to stop publishing the ticket→owner alignment (store
+  `keccak256(owner, salt)`, reveal only on reclaim), which makes the anonymity
+  set *all live tickets* rather than the few that fit in one transaction.
 - **Batching trades latency for privacy.** A driver wanting cash now and a large
   anonymity set cannot both be satisfied; the floor and delay are a product
   decision, not a parameter to tune quietly.
@@ -334,7 +349,7 @@ to be worth anything.
 | **1b** | Keeper (`venue-node/shieldkeeper.mjs`) + client queue/claim (`web/src/shieldpayout.ts`) | no | **built** |
 | **1c** | Encrypted registration metadata (§5) + driver-facing UI — commitment in `metadataURI`, reveal over the order thread | no | **built** |
 | **1d** | Disclosure capsule (§7) — capsule crypto, escrow at thread open, on-chain anchor, arbiter console | no | **built** |
-| **2** | Denomination policy tuning, known-roots retry, batch telemetry, tier UX | no | next |
+| **2** | Hide the ticket→owner alignment (the live run's finding), denomination tuning, known-roots retry, batch telemetry, tier UX | `FareVault` | next |
 | **3** | Relay hardening: multi-relay, blinded queue authorization (ZK), no-log posture | new circuit | spike first |
 | **4** | Private discovery (§6): coarse board, assignment-time reveal, drop the on-chain venue edge | `FareOrders` events | after 3 |
 
