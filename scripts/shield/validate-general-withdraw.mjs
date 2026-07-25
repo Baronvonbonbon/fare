@@ -18,13 +18,12 @@ import * as snarkjs from "snarkjs";
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
+import { WITHDRAW_WASM, loadWithdrawZkey } from "./zkey.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.join(__dirname, "..", "..");
 const RPC = process.env.TESTNET_RPC ?? "https://eth-rpc-testnet.polkadot.io/";
 const POOL = process.env.SHIELD_POOL ?? "0x7d5a496bD61b631025A828d9049f6A68e007e0dC";
-const WASM = path.join(ROOT, "web/public/shield/withdraw_v7.wasm");
-const ZKEY = path.join(ROOT, "web/public/shield/withdraw_v7.zkey");
 const BN254_R = 21888242871839275222246405745257275088548364400416034343698204186575808495617n;
 const AMOUNT = ethers.parseEther("0.5");
 
@@ -164,7 +163,7 @@ async function main() {
     newNullifier: change.nullifier.toString(), newSecret: change.secret.toString(),
     siblings, leafIndex: A.index.toString(),
   };
-  const { proof, publicSignals } = await snarkjs.groth16.fullProve(input, WASM, ZKEY);
+  const { proof, publicSignals } = await snarkjs.groth16.fullProve(input, WITHDRAW_WASM, loadWithdrawZkey());
   const nh = poseidon1([noteA.nullifier]).toString();
   console.log(`   proof ok; nullifierHash ${publicSignals[1].slice(0,14)}… (expect ${nh.slice(0,14)}…)`);
   const pB = [[proof.pi_b[0][1], proof.pi_b[0][0]], [proof.pi_b[1][1], proof.pi_b[1][0]]];

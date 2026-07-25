@@ -20,6 +20,7 @@ import * as snarkjs from "snarkjs";
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
+import { WITHDRAW_WASM, loadWithdrawZkey } from "./zkey.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.join(__dirname, "..", "..");
@@ -28,8 +29,6 @@ const ROOT = path.join(__dirname, "..", "..");
 const RPC = process.env.TESTNET_RPC ?? "https://eth-rpc-testnet.polkadot.io/";
 // Docs (PaseoAH.html) canonical pool; repo-v7 fresh is 0x7d5a49… (more leaves).
 const POOL = process.env.SHIELD_POOL ?? "0x73082Ac2833afD07D035c512031E6Af72B1bDEBD";
-const WASM = path.join(ROOT, "web/public/shield/withdraw_v7.wasm");
-const ZKEY = path.join(ROOT, "web/public/shield/withdraw_v7.zkey");
 const AMOUNT = ethers.parseEther("0.5"); // deposit + full withdraw
 const BN254_R = 21888242871839275222246405745257275088548364400416034343698204186575808495617n;
 const NATIVE = 0n; // asset signal for native PAS
@@ -213,7 +212,7 @@ async function main() {
     siblings: mp.siblings,
     leafIndex: idx.toString(),
   };
-  const { proof, publicSignals } = await snarkjs.groth16.fullProve(input, WASM, ZKEY);
+  const { proof, publicSignals } = await snarkjs.groth16.fullProve(input, WITHDRAW_WASM, loadWithdrawZkey());
   console.log(`   ✓ proof generated; publicSignals[${publicSignals.length}]`);
   console.log(`     [0] newCommitmentHash = ${publicSignals[0].slice(0, 16)}…`);
   console.log(`     [1] nullifierHash     = ${publicSignals[1].slice(0, 16)}…  (expected ${nullifierHashOf(note).toString().slice(0, 16)}…)`);

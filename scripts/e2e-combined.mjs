@@ -14,6 +14,7 @@ import { poseidon1, poseidon2, poseidon3 } from "poseidon-lite";
 import * as snarkjs from "snarkjs";
 import fs from "fs";
 import path from "path";
+import { WITHDRAW_WASM, loadWithdrawZkey } from "./shield/zkey.mjs";
 import { ROOT, provider, book, env, loadState, waitTx, leanGas, GAS_PRICE_WEI, KS_POOL, fmt, eth } from "./shield/e2e-lib.mjs";
 
 const BN254_R = 21888242871839275222246405745257275088548364400416034343698204186575808495617n;
@@ -100,7 +101,7 @@ async function main() {
     const change = { nullifier: rand(), secret: rand(), value: 0n };
     const context = ethers.toBigInt(ethers.keccak256(ethers.solidityPacked(["address"], [burner.address]))) % BN254_R;
     const input = { withdrawnValue: note.value.toString(), treeDepth: "128", context: context.toString(), root: root.toString(), asset: "0", existingValue: note.value.toString(), existingNullifier: note.nullifier.toString(), existingSecret: note.secret.toString(), newNullifier: change.nullifier.toString(), newSecret: change.secret.toString(), siblings, leafIndex: idx.toString() };
-    const { proof, publicSignals } = await snarkjs.groth16.fullProve(input, path.join(ROOT, "web/public/shield/withdraw_v7.wasm"), path.join(ROOT, "web/public/shield/withdraw_v7.zkey"));
+    const { proof, publicSignals } = await snarkjs.groth16.fullProve(input, WITHDRAW_WASM, loadWithdrawZkey());
     const pB = [[proof.pi_b[0][1], proof.pi_b[0][0]], [proof.pi_b[1][1], proof.pi_b[1][0]]];
     const tx = await ks.connect(R).proxy_withdraw([proof.pi_a[0], proof.pi_a[1]], pB, [proof.pi_c[0], proof.pi_c[1]], publicSignals, burner.address, { gasLimit: 8_000_000n, nonce: await prov.getTransactionCount(R.address) });
     await rec(prov, { step: "K.withdraw", party: "relay(venue-node)", action: "KS.proxy_withdraw→burner", hash: tx.hash });

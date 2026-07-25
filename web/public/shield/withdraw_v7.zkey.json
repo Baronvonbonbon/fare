@@ -1,0 +1,19 @@
+{
+  "name": "withdraw_v7.zkey",
+  "bytes": 34412253,
+  "sha256": "30e82f856b0b7d6c26b3d569260896579e783d02d7b9a2c1dc3a98d0073f71e8",
+  "parts": [
+    {
+      "name": "withdraw_v7.zkey.part0",
+      "bytes": 12582912
+    },
+    {
+      "name": "withdraw_v7.zkey.part1",
+      "bytes": 12582912
+    },
+    {
+      "name": "withdraw_v7.zkey.part2",
+      "bytes": 9246429
+    }
+  ]
+}

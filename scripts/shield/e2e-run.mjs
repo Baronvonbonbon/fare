@@ -13,6 +13,7 @@ import { poseidon1, poseidon2, poseidon3 } from "poseidon-lite";
 import * as snarkjs from "snarkjs";
 import fs from "fs";
 import path from "path";
+import { WITHDRAW_WASM, loadWithdrawZkey } from "./zkey.mjs";
 import {
   ROOT, provider, book, env, loadState, saveState, record, waitTx, leanGas, sleep,
   KS_POOL, fmt, eth,
@@ -78,8 +79,6 @@ async function main() {
   const chainId = st.chainId;
   const domain = { name: "FareSettlement", version: "1", chainId, verifyingContract: bk.settlement };
 
-  const WWASM = path.join(ROOT, "web/public/shield/withdraw_v7.wasm");
-  const WZKEY = path.join(ROOT, "web/public/shield/withdraw_v7.zkey");
   const PWASM = path.join(ROOT, "web/public/zk/proximity.wasm");
   const PZKEY = path.join(ROOT, "web/public/zk/proximity.zkey");
 
@@ -132,7 +131,7 @@ async function main() {
       newNullifier: change.nullifier.toString(), newSecret: change.secret.toString(),
       siblings: mp.siblings, leafIndex: idx.toString(),
     };
-    const { proof, publicSignals } = await snarkjs.groth16.fullProve(input, WWASM, WZKEY);
+    const { proof, publicSignals } = await snarkjs.groth16.fullProve(input, WITHDRAW_WASM, loadWithdrawZkey());
     const nh = poseidon1([note.nullifier]);
     console.log(`   proof ok; nullifierHash ${publicSignals[1].slice(0, 14)}… (expect ${nh.toString().slice(0, 14)}…)`);
     const { pA, pB, pC } = toSol(proof);
