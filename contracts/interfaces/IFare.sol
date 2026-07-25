@@ -47,6 +47,14 @@ interface IFareVenues {
     function recordPickup(uint64 venueId) external;
 }
 
+/// External shielded pool (Kusama Shield) — the only surface FareVault needs.
+/// `commitment` is Poseidon(Poseidon(value, asset), Poseidon(nullifier, secret))
+/// computed client-side; the pool learns nothing from it. See
+/// docs/SHIELDED-POOL-INTEGRATION.md.
+interface IFareShieldPool {
+    function depositNative(bytes32 commitment) external payable;
+}
+
 interface IFareOrders {
     enum Status {
         None,

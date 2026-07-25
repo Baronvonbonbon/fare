@@ -8,6 +8,7 @@ import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "./lib/PaseoSafeSender.sol";
 import "./lib/FareUpgradable.sol";
+import "./interfaces/IFare.sol";
 
 /// @title FareVault
 /// @notice Single pull-payment vault for every native-token payout in the
@@ -45,6 +46,60 @@ contract FareVault is Ownable2Step, PaseoSafeSender, FareUpgradable, EIP712 {
     bytes32 private constant WITHDRAW_TYPEHASH =
         keccak256("Withdraw(address account,address recipient,uint256 nonce,uint256 deadline)");
 
+    // ── shielded payouts (privacy phase 1) ───────────────────────────────────
+    // Drivers and venues are paid at persistent addresses, so `Withdrawn` builds
+    // a permanent revenue graph. Routing a payout into the Kusama Shield pool
+    // fixes that ONLY if the account and the pool commitment never appear
+    // together: a one-transaction withdrawToShield(commitment) emits both in the
+    // same receipt and the note is attributable before it is ever spent. See
+    // docs/PRIVACY-TIERS.md §3.
+    //
+    // So the payout is split in two, sharing no identity:
+    //   T1 queueShieldCredit — moves a FIXED bucket from balanceOf into the
+    //      shared buffer and takes a ticket. Public: (account, bucket). No
+    //      commitment exists on-chain yet.
+    //   T2 executeShieldBatch — a keeper deposits N commitments (N >= minBatch)
+    //      in one transaction, consuming the N oldest tickets FIFO. Public:
+    //      N equal-value deposits from the vault, with no account beside them.
+    //
+    // Pairing T1 with T2 means guessing which of the N commitments is whose, so
+    // the anonymity set is the batch on top of the pool's own. Bucketing is
+    // load-bearing: without fixed denominations the amounts re-identify the
+    // entries and the batch is decorative.
+    IFareShieldPool public shieldPool; // address(0) = shielded payouts off
+    uint96[] public shieldBuckets; // allowed denominations, ascending
+    uint16 public shieldMinBatch = 8; // refuse batches small enough to be linkable
+    uint32 public shieldMinDwell = 5 minutes; // a ticket must age before it can be batched
+    uint32 public shieldReclaimAfter = 24 hours; // liveness escape hatch if keepers stall
+    uint256 public shieldBuffer; // native value held against unconsumed tickets
+    mapping(address => bool) public shieldKeeper;
+    mapping(address => uint256) public shieldNonce; // separate from withdrawNonce
+
+    /// A queued bucket awaiting deposit. `owner` is only ever paired with the
+    /// bucket and a queue position — never with a commitment — so publishing it
+    /// leaks nothing the T1 event doesn't already. It buys a self-service
+    /// reclaim, which a fungible slot could not offer.
+    struct ShieldTicket {
+        address owner;
+        uint64 queuedAt;
+        bool reclaimed;
+    }
+    mapping(uint96 => mapping(uint64 => ShieldTicket)) public shieldTicket; // bucket => ticket# => ticket
+    mapping(uint96 => uint64) public shieldQueued; // bucket => tickets ever taken
+    mapping(uint96 => uint64) public shieldScanned; // bucket => FIFO cursor (deposited + skipped)
+    mapping(uint96 => uint64) public shieldLive; // bucket => tickets awaiting deposit
+
+    bytes32 private constant SHIELD_TYPEHASH =
+        keccak256("ShieldCredit(address account,uint96 bucket,uint256 nonce,uint256 deadline)");
+
+    event ShieldQueued(address indexed account, uint96 indexed bucket, uint64 ticket);
+    event ShieldBatchExecuted(address indexed keeper, uint96 indexed bucket, uint64 count, uint64 firstTicket);
+    event ShieldReclaimed(address indexed account, uint96 indexed bucket, uint64 ticket);
+    event ShieldPoolSet(address indexed pool);
+    event ShieldBucketsSet(uint96[] buckets);
+    event ShieldParamsSet(uint16 minBatch, uint32 minDwell, uint32 reclaimAfter);
+    event ShieldKeeperSet(address indexed keeper, bool enabled);
+
     event Credited(address indexed to, address indexed from, uint256 amount, uint256 newBalance);
     event Withdrawn(address indexed account, address indexed to, uint256 amount);
     event AuthorizedSet(address indexed account, bool enabled);
@@ -66,6 +121,65 @@ contract FareVault is Ownable2Step, PaseoSafeSender, FareUpgradable, EIP712 {
     /// @notice One-time binding to the FareGovernanceRouter (upgrade authority).
     function setRouter(address _router) external onlyOwner {
         _setRouterOnce(_router);
+    }
+
+    // ── shielded-payout governance ───────────────────────────────────────────
+
+    /// @notice Point at the external shielded pool. address(0) disables the
+    ///         feature (the default); queued tickets stay reclaimable either way.
+    function setShieldPool(address pool) external onlyOwner {
+        shieldPool = IFareShieldPool(pool);
+        emit ShieldPoolSet(pool);
+    }
+
+    /// @notice Set the allowed deposit denominations, ascending. Every payout is
+    ///         shielded as a sum of these, so the on-chain amounts carry no
+    ///         per-driver signal. Callers keep any remainder as a normal balance.
+    /// @dev Buckets must clear the Paseo eth-rpc rounding bug (PaseoSafeSender)
+    ///      or every deposit in that denomination would revert at submission.
+    function setShieldBuckets(uint96[] calldata buckets) external onlyOwner {
+        require(buckets.length > 0, "no-buckets");
+        for (uint256 i = 0; i < buckets.length; i++) {
+            require(buckets[i] > 0, "zero-bucket");
+            require(i == 0 || buckets[i] > buckets[i - 1], "not-ascending");
+            require(uint256(buckets[i]) % PASEO_UNIT < PASEO_REJECT_THRESHOLD, "bucket-unsendable");
+        }
+        shieldBuckets = buckets;
+        emit ShieldBucketsSet(buckets);
+    }
+
+    /// @notice Batch-privacy parameters. `minBatch` is the anonymity set a
+    ///         single batch provides — 1 would reproduce the linkable
+    ///         one-transaction design, so it is floored at 2. `minDwell` stops a
+    ///         keeper executing a batch the instant a ticket lands (which would
+    ///         re-link it by timing). `reclaimAfter` bounds how long a stalled
+    ///         queue can hold funds.
+    function setShieldParams(uint16 minBatch, uint32 minDwell, uint32 reclaimAfter) external onlyOwner {
+        require(minBatch >= 2, "batch-too-small");
+        require(reclaimAfter >= minDwell, "reclaim-before-dwell");
+        shieldMinBatch = minBatch;
+        shieldMinDwell = minDwell;
+        shieldReclaimAfter = reclaimAfter;
+        emit ShieldParamsSet(minBatch, minDwell, reclaimAfter);
+    }
+
+    /// @notice Authorize a batch executor (a venue-node relay acting as keeper).
+    /// @dev A keeper that queued a ticket knows which commitment it belongs to,
+    ///      so this closes the chain-observer leak, not the keeper itself.
+    ///      Blinding the keeper needs the phase-3 ZK authorization.
+    function setShieldKeeper(address keeper, bool enabled) external onlyOwner {
+        require(keeper != address(0), "zero-addr");
+        shieldKeeper[keeper] = enabled;
+        emit ShieldKeeperSet(keeper, enabled);
+    }
+
+    function shieldBucketCount() external view returns (uint256) {
+        return shieldBuckets.length;
+    }
+
+    /// @notice Tickets queued but not yet deposited or reclaimed, for `bucket`.
+    function shieldPending(uint96 bucket) public view returns (uint64) {
+        return shieldLive[bucket];
     }
 
     function setAuthorized(address account, bool enabled) external onlyOwner {
@@ -159,6 +273,115 @@ contract FareVault is Ownable2Step, PaseoSafeSender, FareUpgradable, EIP712 {
         totalWithdrawn += toRecipient;
         emit Withdrawn(account, recipient, toRecipient);
         _safeSend(recipient, toRecipient);
+    }
+
+    // ── shielded payouts: queue → batch → deposit ────────────────────────────
+
+    /// @notice Move `bucket` of your own balance into the shield buffer and take
+    ///         a ticket. Your commitment is NOT named here — you hand it to a
+    ///         keeper off-chain, which deposits it in a batch alongside others.
+    function queueShieldCredit(uint96 bucket) external nonReentrant {
+        _queueShieldCredit(msg.sender, bucket);
+    }
+
+    /// @notice Relay-submitted queueing, so a driver with no gas can shield
+    ///         earnings. Same EIP-712 shape as `withdrawFor`, separate nonce so
+    ///         queueing never invalidates a pending withdrawal authorization.
+    function queueShieldCreditFor(
+        address account,
+        uint96 bucket,
+        uint256 deadline,
+        bytes calldata signature
+    ) external nonReentrant {
+        require(block.timestamp <= deadline, "expired");
+        bytes32 digest = _hashTypedDataV4(
+            keccak256(abi.encode(SHIELD_TYPEHASH, account, bucket, shieldNonce[account], deadline))
+        );
+        require(digest.recover(signature) == account, "bad-sig");
+        shieldNonce[account] += 1;
+        _queueShieldCredit(account, bucket);
+    }
+
+    /// @notice Keeper: deposit `commitments` into the shielded pool, consuming
+    ///         the oldest tickets of `bucket` FIFO. One transaction, N equal
+    ///         deposits, no account named — that is the whole privacy argument,
+    ///         so the batch floor and dwell are enforced here rather than left
+    ///         to keeper discipline.
+    function executeShieldBatch(uint96 bucket, bytes32[] calldata commitments) external nonReentrant {
+        require(shieldKeeper[msg.sender], "not-keeper");
+        require(address(shieldPool) != address(0), "shield-off");
+        uint64 n = uint64(commitments.length);
+        require(n >= shieldMinBatch, "batch-too-small");
+        require(shieldLive[bucket] >= n, "not-enough-tickets");
+
+        // Walk the FIFO cursor forward over `n` live tickets, stepping past any
+        // that were reclaimed while queued. Skipping is paid once — the cursor
+        // stays advanced — so a burst of reclaims can't wedge the queue.
+        uint64 first = shieldScanned[bucket];
+        uint64 idx = first;
+        uint64 taken = 0;
+        while (taken < n) {
+            ShieldTicket storage t = shieldTicket[bucket][idx];
+            if (!t.reclaimed) {
+                require(t.queuedAt + shieldMinDwell <= block.timestamp, "dwell-not-met");
+                taken++;
+            }
+            idx++;
+        }
+
+        // Effects before the external calls: the tickets are spent even if a
+        // single deposit reverts, and the whole batch unwinds together.
+        shieldScanned[bucket] = idx;
+        shieldLive[bucket] -= n;
+        uint256 total = uint256(bucket) * n;
+        shieldBuffer -= total;
+        emit ShieldBatchExecuted(msg.sender, bucket, n, first);
+
+        for (uint256 i = 0; i < commitments.length; i++) {
+            shieldPool.depositNative{value: bucket}(commitments[i]);
+        }
+    }
+
+    /// @notice Liveness escape hatch: if no keeper has reached your ticket after
+    ///         `shieldReclaimAfter`, take the value back as a normal balance.
+    /// @dev Only a ticket the FIFO cursor has not passed can be reclaimed —
+    ///      `ticket >= shieldScanned` is exactly "no deposit was made against
+    ///      this one". Marking rather than removing keeps every other ticket at
+    ///      its index, so no owner is ever displaced out of their claim.
+    ///      Reclaiming publishes nothing new: the ticket already carried the
+    ///      owner, and no commitment was ever attached to it.
+    function reclaimShieldTicket(uint96 bucket, uint64 ticket) external nonReentrant {
+        ShieldTicket storage t = shieldTicket[bucket][ticket];
+        require(t.owner == msg.sender, "not-owner");
+        require(!t.reclaimed, "already-reclaimed");
+        require(ticket >= shieldScanned[bucket], "already-deposited");
+        require(t.queuedAt + shieldReclaimAfter <= block.timestamp, "too-early");
+
+        t.reclaimed = true;
+        shieldLive[bucket] -= 1;
+        shieldBuffer -= bucket;
+        balanceOf[msg.sender] += bucket;
+        emit ShieldReclaimed(msg.sender, bucket, ticket);
+    }
+
+    function _queueShieldCredit(address account, uint96 bucket) internal {
+        require(address(shieldPool) != address(0), "shield-off");
+        require(_isShieldBucket(bucket), "bad-bucket");
+        require(balanceOf[account] >= bucket, "insufficient-balance");
+
+        balanceOf[account] -= bucket;
+        shieldBuffer += bucket;
+        uint64 ticket = shieldQueued[bucket];
+        shieldTicket[bucket][ticket] =
+            ShieldTicket({owner: account, queuedAt: uint64(block.timestamp), reclaimed: false});
+        shieldQueued[bucket] = ticket + 1;
+        shieldLive[bucket] += 1;
+        emit ShieldQueued(account, bucket, ticket);
+    }
+
+    function _isShieldBucket(uint96 bucket) internal view returns (bool) {
+        for (uint256 i = 0; i < shieldBuckets.length; i++) if (shieldBuckets[i] == bucket) return true;
+        return false;
     }
 
     function _withdraw(address recipient) internal {
