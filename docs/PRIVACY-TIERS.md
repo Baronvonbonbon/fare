@@ -287,7 +287,8 @@ to be worth anything.
 | Phase | Contents | Contract change | Status |
 |---|---|---|---|
 | **1a** | Batched shielded payouts (§4) — vault queue, batch, reclaim | `FareVault` | **built** |
-| **1b** | Keeper in venue-node, client shielding UX, encrypted registration metadata (§5), disclosure capsule (§7) | no | in progress |
+| **1b** | Keeper (`venue-node/shieldkeeper.mjs`) + client queue/claim (`web/src/shieldpayout.ts`) | no | **built** |
+| **1c** | Encrypted registration metadata (§5), disclosure capsule (§7), driver-facing UI | `FareDrivers`/`FareVenues` | open |
 | **2** | Denomination policy tuning, known-roots retry, batch telemetry, tier UX | no | next |
 | **3** | Relay hardening: multi-relay, blinded queue authorization (ZK), no-log posture | new circuit | spike first |
 | **4** | Private discovery (§6): coarse board, assignment-time reveal, drop the on-chain venue edge | `FareOrders` events | after 3 |
