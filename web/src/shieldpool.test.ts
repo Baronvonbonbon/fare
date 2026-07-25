@@ -1,6 +1,8 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
+import { createHash } from "node:crypto";
+import { readFile } from "node:fs/promises";
 import { poseidon1, poseidon2 } from "poseidon-lite";
-import { authPath, subtreeRoot, commitmentOf, nullifierHashOf, contextFor } from "./shieldpool";
+import { authPath, subtreeRoot, commitmentOf, nullifierHashOf, contextFor, loadZkey } from "./shieldpool";
 
 // Reference LeanIMT128 (parent = Poseidon(l,r); lone node promotes; root = last
 // inserted node) — the same construction the pool uses. Used to cross-check the
@@ -76,5 +78,31 @@ describe("snapshot + right-scan reconstruction (KS Issue-1 workaround)", () => {
     expect(subtreeRoot(leaves, 100, (1n << 100n), 5)).toBeNull();
     expect(subtreeRoot(leaves, 0, 5n, 5)).toBe(99n);
     expect(subtreeRoot(leaves, 0, 6n, 5)).toBeNull();
+  });
+});
+
+// The 34 MB proving key ships as parts because Cloudflare Pages rejects any
+// single asset over 25 MiB. Exercise the reassembly against the REAL published
+// parts — a stale manifest or a part that never got regenerated would otherwise
+// only show up as an unexplainable invalid proof in production.
+describe("withdraw zkey reassembly", () => {
+  const shieldDir = new URL("../public/shield/", import.meta.url);
+  const serveLocally = () => {
+    vi.stubGlobal("fetch", async (url: string) => {
+      const file = new URL(url.replace(/^\/shield\//, ""), shieldDir);
+      const body = await readFile(file);
+      return new Response(body, { status: 200 });
+    });
+  };
+
+  it("rebuilds the key from its parts and matches the manifest digest", async () => {
+    serveLocally();
+    const key = await loadZkey();
+    const manifest = JSON.parse(await readFile(new URL("withdraw_v7.zkey.json", shieldDir), "utf8"));
+    expect(key.length).toBe(manifest.bytes);
+    expect(createHash("sha256").update(key).digest("hex")).toBe(manifest.sha256);
+    // .zkey magic header ("zkey" + version), i.e. snarkjs will accept these bytes.
+    expect(new TextDecoder().decode(key.subarray(0, 4))).toBe("zkey");
+    vi.unstubAllGlobals();
   });
 });

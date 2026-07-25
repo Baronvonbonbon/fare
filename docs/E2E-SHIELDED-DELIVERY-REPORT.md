@@ -312,7 +312,7 @@ node scripts/shield/e2e-scan.mjs     # → artifacts/e2e-live/scan.json
 ```
 
 Needs `DEPLOYER_PRIVATE_KEY` (funds everything) in `.env`; the ZK artifacts at
-`web/public/shield/withdraw_v7.{wasm,zkey}` and `web/public/zk/proximity.{wasm,zkey}`.
+`web/public/shield/withdraw_v7.{wasm,zkey.part*}` and `web/public/zk/proximity.{wasm,zkey}`.
 
 ## See also
 - [KUSAMA-SHIELD-FINDINGS.md](KUSAMA-SHIELD-FINDINGS.md) — the upstream issues (1–4) this run is gated on

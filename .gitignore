@@ -23,6 +23,11 @@ circuits/build/*.zkey
 circuits/build/proximity_js/
 circuits/build/sample-input.json
 
+# The 32.8 MiB withdraw proving key can never be published as one asset —
+# Cloudflare Pages rejects anything over 25 MiB. web/public/shield/ carries the
+# split parts + manifest instead; regenerate with scripts/shield/split-zkey.mjs.
+web/public/shield/*.zkey
+
 # venue node relay secrets
 venue-node/.env
 venue-node/node_modules/

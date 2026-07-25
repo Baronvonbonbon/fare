@@ -103,8 +103,12 @@ FARE customer can privately fund a throwaway wallet through Kusama Shield.
   `[newCommitmentHash, nullifierHash, contextHash]`. snarkjs emits public signals
   as **outputs-then-inputs**, giving the contract's exact 8-signal layout:
   `[newCommitmentHash, nullifierHash, contextHash, withdrawnValue, treeDepth, context, root, asset]`.
-- **Artifacts** vendored at `web/public/shield/withdraw_v7.{wasm,zkey}` (2.3 MB +
-  34 MB). Proofs via snarkjs (already a FARE dependency, from the ZK dropoff proof).
+- **Artifacts** vendored at `web/public/shield/`: `withdraw_v7.wasm` (2.3 MB) and
+  the 34 MB proving key, split into `withdraw_v7.zkey.part{0,1,2}` + a
+  `withdraw_v7.zkey.json` manifest because Cloudflare Pages rejects any single
+  asset over 25 MiB. Browser and node both reassemble the parts in memory and
+  pass snarkjs a `Uint8Array` — see `scripts/shield/{split-zkey,zkey}.mjs`.
+  Proofs via snarkjs (already a FARE dependency, from the ZK dropoff proof).
 
 ---
 
@@ -206,7 +210,7 @@ SHIELD_POOL=0x7d5a496bD61b631025A828d9049f6A68e007e0dC \
 node scripts/shield/diag.mjs
 ```
 
-Artifacts: `web/public/shield/withdraw_v7.{wasm,zkey}`. Deps: `ethers`,
+Artifacts: `web/public/shield/withdraw_v7.{wasm,zkey.part*}`. Deps: `ethers`,
 `snarkjs`, `poseidon-lite`.
 
 ## See also

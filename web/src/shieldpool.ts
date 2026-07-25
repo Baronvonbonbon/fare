@@ -29,8 +29,9 @@ export const KS_POOL_ABI = [
 ];
 
 const BN254_R = 21888242871839275222246405745257275088548364400416034343698204186575808495617n;
-const WASM = "/shield/withdraw_v7.wasm";
-const ZKEY = "/shield/withdraw_v7.zkey";
+const SHIELD_BASE = "/shield/";
+const WASM = `${SHIELD_BASE}withdraw_v7.wasm`;
+const ZKEY_MANIFEST = `${SHIELD_BASE}withdraw_v7.zkey.json`;
 const NATIVE = 0n;
 
 export interface Note {
@@ -156,6 +157,41 @@ export interface WithdrawalProof {
 let snarkjsP: Promise<any> | null = null;
 const loadSnarkjs = () => (snarkjsP ??= import("snarkjs"));
 
+// The 32.8 MiB proving key is served as chunks (see scripts/shield/split-zkey.mjs)
+// because Cloudflare Pages refuses any single asset over 25 MiB. Fetch the parts
+// in parallel and hand snarkjs the reassembled bytes — fastfile takes a
+// Uint8Array anywhere it takes a URL.
+let zkeyP: Promise<Uint8Array> | null = null;
+/// The withdraw proving key, reassembled from its published parts. Cached for
+/// the page's lifetime; a failed fetch clears the cache so the next proof retries.
+export const loadZkey = () => (zkeyP ??= fetchZkey().catch((e) => { zkeyP = null; throw e; }));
+
+interface ZkeyManifest { bytes: number; sha256: string; parts: { name: string; bytes: number }[] }
+
+async function fetchZkey(): Promise<Uint8Array> {
+  const get = async (url: string) => {
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`${url}: HTTP ${res.status}`);
+    return res;
+  };
+  const manifest: ZkeyManifest = await (await get(ZKEY_MANIFEST)).json();
+  const parts = await Promise.all(
+    manifest.parts.map(async (p) => new Uint8Array(await (await get(`${SHIELD_BASE}${p.name}`)).arrayBuffer()))
+  );
+  const key = new Uint8Array(manifest.bytes);
+  let off = 0;
+  for (const part of parts) { key.set(part, off); off += part.length; }
+  // A truncated part (flaky network, half-written SW cache entry) would otherwise
+  // surface much later as an inexplicably invalid proof.
+  if (off !== manifest.bytes) throw new Error(`zkey: got ${off} bytes, expected ${manifest.bytes}`);
+  if (crypto?.subtle) {
+    const digest = await crypto.subtle.digest("SHA-256", key);
+    const hex = [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
+    if (hex !== manifest.sha256) throw new Error(`zkey: sha256 ${hex} != ${manifest.sha256}`);
+  }
+  return key;
+}
+
 /// Build a Groth16 withdrawal proof directing `withdrawnValueWei` to `recipient`
 /// (the recipient is bound into the proof's context). Produces a change note for
 /// the remainder — persist it (via recordChangeNote) to spend later.
@@ -172,8 +208,8 @@ export async function buildWithdrawal(
     newNullifier: change.nullifier, newSecret: change.secret,
     siblings, leafIndex: record.index.toString(),
   };
-  const snarkjs = await loadSnarkjs();
-  const { proof, publicSignals } = await snarkjs.groth16.fullProve(input, WASM, ZKEY);
+  const [snarkjs, zkey] = await Promise.all([loadSnarkjs(), loadZkey()]);
+  const { proof, publicSignals } = await snarkjs.groth16.fullProve(input, WASM, zkey);
   return {
     pA: [proof.pi_a[0], proof.pi_a[1]],
     pB: [[proof.pi_b[0][1], proof.pi_b[0][0]], [proof.pi_b[1][1], proof.pi_b[1][0]]],

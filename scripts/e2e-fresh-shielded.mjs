@@ -29,6 +29,7 @@ import { ApiPromise, WsProvider } from "@polkadot/api";
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
+import { WITHDRAW_WASM, loadWithdrawZkey } from "./shield/zkey.mjs";
 import { priceNativePerToken, planCoverage, executeSwap, fallbackAccountId, RUNTIME_PALLETS_ADDR } from "../venue-node/swap.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -222,7 +223,7 @@ async function deliver() {
     const change = { nullifier: rand(), secret: rand(), value: 0n };
     const context = ethers.toBigInt(ethers.keccak256(ethers.solidityPacked(["address"], [burner.address]))) % BN254_R;
     const input = { withdrawnValue: KS_FUND.toString(), treeDepth: "128", context: context.toString(), root: root.toString(), asset: "0", existingValue: KS_FUND.toString(), existingNullifier: note.nullifier.toString(), existingSecret: note.secret.toString(), newNullifier: change.nullifier.toString(), newSecret: change.secret.toString(), siblings, leafIndex: idx.toString() };
-    const { proof, publicSignals } = await snarkjs.groth16.fullProve(input, path.join(ROOT, "web/public/shield/withdraw_v7.wasm"), path.join(ROOT, "web/public/shield/withdraw_v7.zkey"));
+    const { proof, publicSignals } = await snarkjs.groth16.fullProve(input, WITHDRAW_WASM, loadWithdrawZkey());
     const pB = [[proof.pi_b[0][1], proof.pi_b[0][0]], [proof.pi_b[1][1], proof.pi_b[1][0]]];
     const sw = await relayPost("/shield-withdraw", { pA: [proof.pi_a[0], proof.pi_a[1]], pB, pC: [proof.pi_c[0], proof.pi_c[1]], pubSignals: publicSignals, recipient: burner.address });
     await rec(prov, "relay", "KS.proxy_withdraw→burner (gasless)", sw.txHash);
