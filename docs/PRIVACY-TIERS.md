@@ -279,6 +279,24 @@ acceptSealedBid(orderId, driver, amount, salt)   the customer reveals the winner
 this removes is the losers, which is most of the graph. The open-bid path is
 untouched and still works, so this is additive.
 
+### Getting the terms to the customer without a third party learning them
+
+Three constraints have to hold at once, and each rules out an easier design:
+
+| Must not learn who bid | How |
+|---|---|
+| the **chain** | only a hash is committed, and a relay submits it — a driver-signed transaction names them as sender |
+| the **relay** | terms are sealed to the customer under a FRESH ephemeral key (`msg.ts sealAnon`), so the bid box holds ciphertext with no sender |
+| — | the **customer** verifies revealed terms against the on-chain commitment before they are shown, so a forged entry in the box can never be accepted |
+
+The customer's key comes from the `hello` they post on the order thread at
+creation, accepted only if it derives to the order's customer address — the same
+authentication `OrderThread.poll` already applies. Without that check a relay
+could hand out its own key and read every bid.
+
+The bid box is memory-held with a TTL: it is a delivery buffer, and a relay that
+retains bid traffic is precisely what this phase removes.
+
 ## 7. Selective disclosure and relay hardening
 
 **Disclosure capsule (phases 1–2).** At order creation the participants encrypt
@@ -379,7 +397,7 @@ to be worth anything.
 | **2b** | Denomination tuning, known-roots retry, batch telemetry, tier UX | no | next |
 | **3** | Relay hardening: multi-relay, blinded queue authorization (ZK), no-log posture | new circuit | spike first |
 | **4a** | Sealed bids (§6) — commit/reveal so losing bids name nobody | `FareOrders` | **built** |
-| **4b** | Sealed-bid client + relay channel carrying bid terms to the customer | no | open |
+| **4b** | Sealed-bid client + relay bid box carrying terms to the customer | no | **built** |
 | **4c** | Venue payouts entering the note pool as commitments (the only fix that hides the venue for good) | `FareOrders`/`FareSettlement` | research |
 
 Ordering was forced for §4 and §7 (a seal is meaningless before there is

@@ -2,6 +2,16 @@
 // Keep in sync with contracts/ (source of truth: the Solidity files).
 
 export const ORDERS_ABI = [
+  // Sealed bids (privacy phase 4): only a hash on-chain; the customer reveals
+  // the winner at accept.
+  "function bidHashOf(uint256 orderId, address driver, uint96 amount, bytes32 salt) pure returns (bytes32)",
+  "function sealedBid(uint256 orderId, bytes32 bidHash) view returns (bytes32 revokeHash, bool exists, bool revoked)",
+  "function sealedBidCount(uint256 orderId) view returns (uint32)",
+  "function MAX_SEALED_BIDS() view returns (uint32)",
+  "function acceptSealedBid(uint256 orderId, address driver, uint96 amount, bytes32 salt) payable",
+  "function acceptSealedBidERC20(uint256 orderId, address driver, uint96 amount, bytes32 salt)",
+  "event BidCommitted(uint256 indexed orderId, bytes32 bidHash)",
+  "event BidRevoked(uint256 indexed orderId, bytes32 bidHash)",
   "function nextOrderId() view returns (uint256)",
   "function orders(uint256) view returns (address customer, uint64 venueId, uint8 status, address driver, uint96 orderValue, uint96 tip, uint96 fare, uint96 maxFare, uint96 escrow, bytes32 dropCommit, uint64 createdAt, uint64 pickupWindowSecs, uint64 deliveryWindowSecs, uint64 pickupDeadline, uint64 deliveryDeadline, address token)",
   "function biddersOf(uint256) view returns (address[])",

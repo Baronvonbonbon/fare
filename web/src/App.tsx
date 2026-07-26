@@ -63,6 +63,9 @@ import {
 } from "./shieldnote";
 import { pickRelayAvoiding, relaySplitAvailable } from "./relaypick";
 import {
+  placeSealedBid, revokeSealedBid, fetchSealedBids, myBids, sealedBidsAvailable, type OpenedBid,
+} from "./sealedbid";
+import {
   commitProfile, isCommitted, describeProfile, saveSelfProfile, loadSelfProfile,
   profilePayload, verifyPayload, type DriverProfile,
 } from "./regmeta";
@@ -195,6 +198,11 @@ async function placeOrder(opts: {
   const isToken = !!token && token !== ZeroAddress;
   return act("Create order", async () => {
     const w = newOrderWallet();
+    // Announce this order wallet's public key on the order thread as soon as the
+    // order exists. Sealed bids are sealed TO the customer, and a driver has no
+    // other way to obtain the key of a wallet that has never spoken (phase 4).
+    const announce = (orderId: bigint) =>
+      new OrderThread(orderId, w.privateKey, w.address, ZeroAddress).open().catch(() => {});
     // KS-ONLY funding: the burner is funded solely through the Kusama Shield pool
     // (no faucet), so no non-shielded on-chain edge re-links it to the customer.
     // `fundBurner` throws if shielded funding isn't configured — there is no
@@ -217,9 +225,15 @@ async function placeOrder(opts: {
       return contracts(w).orders.createOrderERC20(token!, venueId, commit, orderValueWei, tipWei, maxFareWei, 0, 0);
     }
     await fundBurner(w.address, escrow + parse("0.2"));
-    return contracts(w).orders.createOrder(
+    const tx = await contracts(w).orders.createOrder(
       venueId, commit, orderValueWei, tipWei, maxFareWei, 0, 0, { value: escrow }
     );
+    const rec = await tx.wait();
+    const created = rec?.logs
+      ?.map((l: any) => { try { return contracts(w).orders.interface.parseLog(l); } catch { return null; } })
+      ?.find((e: any) => e?.name === "OrderCreated");
+    if (created) await announce(created.args.orderId);
+    return tx;
   });
 }
 
@@ -1795,6 +1809,20 @@ function CustomerOrder({ o, venues, act, busy, session, say }: any) {
   // commitment, and it is what a revealed profile must hash to before the app
   // shows it as verified.
   const [driverURI, setDriverURI] = useState<string>("");
+  // Sealed bids are addressed to this order's wallet, so only this device can
+  // read them (phase 4). Verified against the chain inside fetchSealedBids.
+  const [sealedBids, setSealedBids] = useState<OpenedBid[]>([]);
+  useEffect(() => {
+    const relay = activeRelayUrl();
+    const key = walletFor(o.customer)?.privateKey;
+    if (!relay || !key || o.status !== 1) return;
+    let alive = true;
+    const tick = () =>
+      fetchSealedBids(o.id, relay, key).then((b) => { if (alive) setSealedBids(b); }).catch(() => {});
+    tick();
+    const iv = setInterval(tick, 8000);
+    return () => { alive = false; clearInterval(iv); };
+  }, [String(o.id), o.status, o.customer]);
   useEffect(() => {
     if (!o.driver || o.driver === ZeroAddress) return;
     contracts().drivers.drivers(o.driver)
@@ -1878,7 +1906,35 @@ function CustomerOrder({ o, venues, act, busy, session, say }: any) {
       {o.status === 1 && (
         <>
           <div className="section-note">driver bids — you pick, price isn't everything</div>
-          {o.bidders.length === 0 && <p className="hint">Waiting for driver bids…</p>}
+          {o.bidders.length === 0 && sealedBids.length === 0 && <p className="hint">Waiting for driver bids…</p>}
+
+          {/* Sealed bids: readable only here, and only shown after the revealed
+              terms are checked against the on-chain commitment. */}
+          {sealedBids.map((b) => (
+            <div className="kv" key={b.hash}>
+              <span className="k mono">
+                {short(b.driver)}
+                <span className="hint"> · sealed — not published on-chain</span>
+              </span>
+              <span className="v">
+                <span className="amount">{fmtAsset(b.amountWei, o.token)} </span>
+                <button className="btn small" disabled={busy || orphaned}
+                  onClick={() => act("Accept sealed bid", async () => {
+                    if (assetOf(o.token).isToken) {
+                      await ensureGas(o.customer, parse("0.3"));
+                      const w = walletFor(o.customer)!;
+                      await mintStablecoin(w, o.customer, b.amountWei);
+                      await approveToken(w, o.token, ADDRESSES.orders, b.amountWei);
+                      return os!.orders.acceptSealedBidERC20(o.id, b.driver, b.amountWei, b.salt);
+                    }
+                    await ensureGas(o.customer, b.amountWei + parse("0.2"));
+                    return os!.orders.acceptSealedBid(o.id, b.driver, b.amountWei, b.salt, { value: b.amountWei });
+                  })}>
+                  Accept
+                </button>
+              </span>
+            </div>
+          ))}
           {o.bidders.map((b: any) => (
             <div className="kv" key={b.addr}>
               <span className="k mono">
@@ -2072,7 +2128,7 @@ function DriverView({ session, orders, venues, act, busy, signed, say, myLoc, ra
         </div>
       )}
       {shown.map(({ o, dist }: any) => (
-        <DriverBid key={String(o.id)} {...{ o, venues, act, busy, signed, session, dist }} />
+        <DriverBid key={String(o.id)} {...{ o, venues, act, busy, signed, session, dist, say }} />
       ))}
     </>
   );
@@ -2181,11 +2237,35 @@ function DriverAccount({ me, act, busy, signed, say }: any) {
   );
 }
 
-function DriverBid({ o, venues, act, busy, signed, session, dist }: any) {
+function DriverBid({ o, venues, act, busy, signed, session, dist, say }: any) {
   const [amount, setAmount] = useState("");
+  const [sealed, setSealed] = useState(false); // contract supports sealed bids?
+  const [mine, setMine] = useState(() => myBids(o.id));
+  const relay = activeRelayUrl();
   const myBid = o.bidders.find(
     (b: any) => session && b.addr.toLowerCase() === session.address.toLowerCase()
   );
+  useEffect(() => { sealedBidsAvailable().then(setSealed).catch(() => setSealed(false)); }, []);
+
+  /// Sealed by default when both the contract and a relay support it: an open
+  /// bid publishes this driver's price and availability to everyone, forever.
+  const canSeal = sealed && !!relay;
+
+  async function bid() {
+    if (!canSeal) {
+      return act("Place bid", () =>
+        relayForward("orders", signed.orders, "placeBid", [o.id, parseAsset(amount, o.token)]));
+    }
+    try {
+      await placeSealedBid(signed.orders.runner, relay!, o.id, o.customer, parseAsset(amount, o.token));
+      setMine(myBids(o.id));
+      setAmount("");
+      say("Sealed bid placed — only this customer can read it");
+    } catch (e: any) {
+      say(e?.reason ?? e?.shortMessage ?? e?.message ?? String(e), true);
+    }
+  }
+
   return (
     <div className="order">
       <div className="order-head">
@@ -2197,13 +2277,27 @@ function DriverBid({ o, venues, act, busy, signed, session, dist }: any) {
       {myBid && (
         <div className="kv"><span className="k">your bid</span><span className="v amount">{fmtAsset(myBid.amount, o.token)}</span></div>
       )}
+      {mine.map((b) => (
+        <div className="kv" key={b.hash}>
+          <span className="k">your sealed bid</span>
+          <span className="v amount">{fmtAsset(BigInt(b.amount), o.token)} · only this customer can read it</span>
+        </div>
+      ))}
       <div className="btn-row">
         <input style={{ flex: 1, minWidth: 120 }} placeholder={`≤ ${fmtAsset(o.maxFare, o.token)}`}
           value={amount} onChange={(e) => setAmount(e.target.value)} inputMode="decimal" />
-        <button className="btn small" disabled={busy || !amount}
-          onClick={() => act("Place bid", () => relayForward("orders", signed.orders, "placeBid", [o.id, parseAsset(amount, o.token)]))}>
-          {myBid ? "Rebid" : "Bid"}
+        <button className="btn small" disabled={busy || !amount} onClick={bid}>
+          {canSeal ? "Bid (sealed)" : myBid ? "Rebid" : "Bid"}
         </button>
+        {mine.map((b) => (
+          <button className="btn ghost small" key={b.hash} disabled={busy}
+            onClick={async () => {
+              try { await revokeSealedBid(relay!, b); setMine(myBids(o.id)); say("Sealed bid withdrawn"); }
+              catch (e: any) { say(e?.message ?? String(e), true); }
+            }}>
+            Withdraw sealed
+          </button>
+        ))}
         {myBid && (
           <button className="btn ghost small" disabled={busy}
             onClick={() => act("Withdraw bid", () => relayForward("orders", signed.orders, "withdrawBid", [o.id]))}>
@@ -2211,6 +2305,11 @@ function DriverBid({ o, venues, act, busy, signed, session, dist }: any) {
           </button>
         )}
       </div>
+      {!canSeal && sealed === false && (
+        <div className="hint">
+          open bid — this publishes your price and availability on-chain, permanently
+        </div>
+      )}
     </div>
   );
 }

@@ -18,7 +18,7 @@
 // needs infra. See docs/MESSAGING.md for the deferred relay design + the privacy
 // and resiliency recommendations.
 
-import { SigningKey, getBytes, hexlify } from "ethers";
+import { SigningKey, Wallet, getBytes, hexlify } from "ethers";
 
 export interface Sealed {
   iv: string; // hex, 12 bytes
@@ -64,6 +64,56 @@ async function deriveAesKey(privateKey: string, theirPubKey: string, context: st
     false,
     ["encrypt", "decrypt"]
   );
+}
+
+// ── anonymous sealing (one-way, sender not identified) ──────────────────────
+// `sealMessage` needs both parties' keys, which means the sender is identifiable
+// to whoever routes the message. A sealed bid must not be: the relay carrying it
+// would learn the bid graph the on-chain commitment exists to hide.
+//
+// So the sender uses a FRESH ephemeral keypair per message. The recipient
+// derives the shared key from the ephemeral public key that travels with it, and
+// the sender's real identity — if any — is inside the ciphertext.
+
+export interface AnonSealed {
+  epk: string; // ephemeral public key; carries no link to the sender
+  iv: string;
+  ct: string;
+}
+
+async function anonKey(privateKey: string, theirPubKey: string, context: string) {
+  const shared = new SigningKey(privateKey).computeSharedSecret(theirPubKey);
+  const enc = new TextEncoder();
+  const base = await crypto.subtle.importKey("raw", buf(shared), "HKDF", false, ["deriveKey"]);
+  return crypto.subtle.deriveKey(
+    { name: "HKDF", hash: "SHA-256", salt: enc.encode(context), info: enc.encode("fare-anon") },
+    base,
+    { name: "AES-GCM", length: 256 },
+    false,
+    ["encrypt", "decrypt"]
+  );
+}
+
+/// Seal `plaintext` to `theirPubKey` without identifying the sender.
+export async function sealAnon(
+  theirPubKey: string, context: string, plaintext: string
+): Promise<AnonSealed> {
+  const eph = Wallet.createRandom();
+  const key = await anonKey(eph.privateKey, theirPubKey, context);
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const data = toBuf(new TextEncoder().encode(plaintext));
+  const ct = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, data);
+  return { epk: new SigningKey(eph.privateKey).publicKey, iv: hexlify(iv), ct: hexlify(new Uint8Array(ct)) };
+}
+
+/// Open an anonymously-sealed message. Throws if it was not sealed to this key
+/// or was tampered with (GCM).
+export async function openAnon(
+  myPrivateKey: string, context: string, sealed: AnonSealed
+): Promise<string> {
+  const key = await anonKey(myPrivateKey, sealed.epk, context);
+  const pt = await crypto.subtle.decrypt({ name: "AES-GCM", iv: buf(sealed.iv) }, key, buf(sealed.ct));
+  return new TextDecoder().decode(pt);
 }
 
 /// The order thread's symmetric key as raw bytes — the same key `sealMessage`
