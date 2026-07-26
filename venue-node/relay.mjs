@@ -190,6 +190,14 @@ const GAS_SHIELD_BATCH = 3_000_000n;
 // pairing plus the pool deposit.
 const GAS_NOTE = 3_000_000n;
 const GAS_NOTE_SPEND = 5_000_000n;
+const GAS_BID = 500_000n;
+
+// Sealed-bid box: orderId → ciphertext the customer opens. Held in memory with a
+// TTL, because it is delivery buffer, not storage — and because a relay that
+// keeps bid traffic around is exactly what phase 4 is trying to avoid.
+const BID_TTL_MS = Number(process.env.BID_TTL_MS || 24 * 3_600_000);
+const bidBox = new Map();
+setInterval(() => { const now = Date.now(); for (const [k, v] of bidBox) if (v.exp < now) bidBox.delete(k); }, 3_600_000).unref?.();
 const keeperStore = SHIELD_KEEPER ? createStore(SHIELD_KEEPER_STORE) : null;
 
 // ── Kusama Shield pool (C4 shielded funding) ─────────────────────────────────
@@ -233,6 +241,14 @@ const ORDERS_READ_ABI = [
   "event OrderCreated(uint256 indexed orderId, address indexed customer, uint64 indexed venueId, uint96 orderValue, uint96 tip, uint96 maxFare, bytes32 dropCommit)",
 ];
 const orders = ordersAddr ? new Contract(ordersAddr, ORDERS_READ_ABI, provider) : null;
+// Signer-bound, for the two calls the relay makes on a bidder's behalf. The
+// relay is msg.sender for these BY DESIGN: a driver-signed commitBid would name
+// them on-chain, which is the whole thing sealed bids remove (phase 4).
+const ORDERS_BID_ABI = [
+  "function commitBid(uint256 orderId, bytes32 bidHash, bytes32 revokeHash)",
+  "function revokeBid(uint256 orderId, bytes32 bidHash, bytes32 revokeSecret)",
+];
+const ordersW = ordersAddr ? new Contract(ordersAddr, ORDERS_BID_ABI, relay) : null;
 const ordersIface = new Interface(ORDERS_READ_ABI);
 // Actions whose orderId is arg[0] (known at forward time).
 const ORDER_ACTIONS = new Set(["placeBid", "withdrawBid", "cancelOpen", "cancelAssigned", "abandonOrder", "acceptBidERC20", "increaseTipERC20"]);
@@ -651,6 +667,71 @@ const server = http.createServer(async (req, res) => {
       }
       recordBudget(cost);
       return send(res, 200, { queued: true, txHash: tx.hash, bucket: String(bucketWei) }, origin);
+    }
+
+    // ── Sealed bids (privacy phase 4) ────────────────────────────────────────
+    // The relay submits the commitment so the CHAIN never sees the bidder, and
+    // stores the sealed terms so the CUSTOMER can read them. The terms are
+    // sealed to the customer under an ephemeral key, so this node holds
+    // ciphertext with no sender — it cannot learn the bid graph either.
+    if (req.method === "POST" && url.pathname === "/commit-bid") {
+      if (!ordersW) return send(res, 503, { error: "orders not configured" }, origin);
+      const { orderId, bidHash, revokeHash, sealed } = await readJson(req);
+      if (!/^0x[0-9a-fA-F]{64}$/.test(bidHash ?? "")) return send(res, 400, { error: "bad bidHash" }, origin);
+      if (!/^0x[0-9a-fA-F]{64}$/.test(revokeHash ?? "")) return send(res, 400, { error: "bad revokeHash" }, origin);
+      if (!sealed?.epk || !sealed?.iv || !sealed?.ct) return send(res, 400, { error: "bad sealed terms" }, origin);
+      let id;
+      try { id = BigInt(orderId); } catch { return send(res, 400, { error: "bad orderId" }, origin); }
+
+      const cost = await estCostWei(
+        () => ordersW.commitBid.estimateGas(id, bidHash, revokeHash), GAS_BID
+      );
+      if (PROFIT_GUARD && !budgetRoom(cost)) {
+        return decline(res, "subsidy budget exhausted", { action: "commit-bid" }, origin);
+      }
+      let tx;
+      try {
+        tx = await serialize(async () => {
+          const nonce = await provider.getTransactionCount(relay.address);
+          return ordersW.commitBid(id, bidHash, revokeHash, { gasLimit: GAS_BID, nonce });
+        });
+      } catch (e) {
+        return send(res, 502, { error: e?.shortMessage ?? e?.reason ?? e?.message ?? String(e) }, origin);
+      }
+      recordBudget(cost);
+
+      const key = String(id);
+      const box = bidBox.get(key) ?? { bids: [], exp: Date.now() + BID_TTL_MS };
+      box.bids.push(sealed);
+      box.exp = Date.now() + BID_TTL_MS;
+      bidBox.set(key, box);
+      return send(res, 200, { committed: true, txHash: tx.hash }, origin);
+    }
+
+    // The bid box: opaque to this node, and to anyone who fetches it without the
+    // customer's key.
+    if (req.method === "GET" && url.pathname === "/bidbox") {
+      const key = url.searchParams.get("orderId") ?? "";
+      return send(res, 200, { bids: bidBox.get(key)?.bids ?? [] }, origin);
+    }
+
+    if (req.method === "POST" && url.pathname === "/revoke-bid") {
+      if (!ordersW) return send(res, 503, { error: "orders not configured" }, origin);
+      const { orderId, bidHash, revokeSecret } = await readJson(req);
+      if (!/^0x[0-9a-fA-F]{64}$/.test(bidHash ?? "")) return send(res, 400, { error: "bad bidHash" }, origin);
+      if (!/^0x[0-9a-fA-F]{64}$/.test(revokeSecret ?? "")) return send(res, 400, { error: "bad secret" }, origin);
+      let id;
+      try { id = BigInt(orderId); } catch { return send(res, 400, { error: "bad orderId" }, origin); }
+      let tx;
+      try {
+        tx = await serialize(async () => {
+          const nonce = await provider.getTransactionCount(relay.address);
+          return ordersW.revokeBid(id, bidHash, revokeSecret, { gasLimit: GAS_BID, nonce });
+        });
+      } catch (e) {
+        return send(res, 502, { error: e?.shortMessage ?? e?.reason ?? e?.message ?? String(e) }, origin);
+      }
+      return send(res, 200, { revoked: true, txHash: tx.hash }, origin);
     }
 
     // ── Shield notes (privacy phase 3) ───────────────────────────────────────
