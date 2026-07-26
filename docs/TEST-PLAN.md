@@ -17,11 +17,11 @@ All three tiers pass today.
 
 | Tier | Runner | Tests | Covers |
 |---|---|---|---|
-| `test/*.ts` | `npx hardhat test` | 157 | contracts, ZK verifiers, invariant fuzz, upgradability, **chain-backed relay endpoints** |
+| `test/*.ts` | `npx hardhat test` | 170 | contracts, ZK verifiers, invariant fuzz, upgradability, **chain-backed relay endpoints** |
 | `web/src/*.test.ts` | `cd web && npx vitest run` | 86 | 11 of 31 client modules |
 | `venue-node/*.test.mjs` | `cd venue-node && node --test` | 73 | economics, scorer, swap, treasury, agent, shieldkeeper, **relay HTTP surface** |
 
-**316 tests, all green**, and all of them now run in CI (§7 E1). The contract tier is the strong part and deserves
+**329 tests, all green**, and all of them now run in CI (§7 E1). The contract tier is the strong part and deserves
 saying so: a seeded-PRNG invariant campaign (`test/invariant.test.ts`) asserts
 escrow conservation and vault solvency after *every* operation and reproduces
 failures from a printed seed; the verifier tests pin fail-safe-before-VK and
@@ -33,7 +33,7 @@ Slither is in CI with zero high-severity findings ([SECURITY-REVIEW.md](SECURITY
 
 | Surface | Size | Tests |
 |---|---|---|
-| `venue-node/relay.mjs` — 16 HTTP endpoints, holds `RELAY_PRIVATE_KEY` | 953 lines | 🟡 35 across two tiers (§5 C1) |
+| ~~`venue-node/relay.mjs`~~ — 16 HTTP endpoints, holds `RELAY_PRIVATE_KEY` | 953 lines | ✅ 48 across two tiers (§5 C1) |
 | `web/src/ops/` — four consoles + shell (dispute resolve/slash, governance, pause, upgrade) | 1,385 lines | **0** |
 | `web/src/App.tsx` | 2,689 lines | **0** |
 | `chain.ts`, `shieldnote.ts`, `relay.ts`, `shield.ts`, `token.ts`, `wallets.ts`, `zk.ts` | ~1,700 lines | **0** |
@@ -136,7 +136,7 @@ correctness but never as a *decorrelator*, which is its actual purpose.
 
 ## 5. Security
 
-🟡 **C1 — Relay endpoint suite.** *The largest single gap.* All 16 endpoints —
+✅ **C1 — Relay endpoint suite.** *Was the largest single gap.* All 16 endpoints —
 `/health` `/msg` `/photo` `/fund` `/onboard` `/submit` `/forward` `/withdraw`
 `/shield-queue` `/commit-bid` `/bidbox` `/revoke-bid` `/shield-note`
 `/shield-note-spend` `/shield-claim` `/shield-withdraw` — against a matrix of:
@@ -198,9 +198,36 @@ One consequence for anyone writing more of these: `relay.mjs` prefers
 so a `PINE_RPC` in `.env` silently wins and the relay under test talks to a real
 node. Both relay suites now delete it explicitly.
 
-**Still remaining:** the four `/shield-*` endpoints, and `/submit` at the
-contract level (its method allowlist is covered; the attestation signatures it
-forwards are already covered by `fare.test.ts`).
+**Third chunk done** (`test/relay-shield-endpoints.test.ts`, 13 tests): the four
+shielded endpoints, where the relay is most trusted and least authorized.
+
+- `/shield-queue` — validation, the duplicate-commitment 409, and the rollback
+  that releases a held commitment when the chain rejects the authorization.
+  That rollback matters more than it looks: the commitment is recorded *before*
+  the ticket is spent, so without it a failed submission would 409 that
+  commitment forever and the payee could never queue it again.
+- **The pairing invariant, asserted against real calldata.** PRIVACY-TIERS §3
+  depends on the account and its commitment never sharing a transaction. The
+  test reads the mined queue transaction and requires the commitment absent —
+  with a positive control in the same assertion (the account *is* present), so
+  a broken matcher fails rather than passes.
+- `/shield-note` — inserts what the payee signed, and **cannot substitute a
+  commitment they did not**. Paired with the success case on the same path so
+  the two differ only in the commitment.
+- `/shield-note-spend` — input validation, and the retryable 409 for a stale
+  root (the tree moves while a payee proves, so that has to be recoverable
+  rather than a burned revert).
+- `/shield-withdraw` — refuses a proof whose `context` names a different
+  recipient, i.e. the relay will not submit a withdrawal whose destination it
+  cannot verify. Mutation-checked: disabling the context comparison in
+  `relay.mjs` fails exactly this test.
+
+Groth16 proving is not repeated at this layer — the real-proof paths are in
+`shieldnote-vault.test.ts`. What these add is the HTTP boundary in front of
+them.
+
+`/submit` is left at the method-allowlist level: the attestation signatures it
+forwards are already covered by `fare.test.ts`.
 
 ☐ **C2 — Relay key custody.** `/fund` cannot be drained as an unbounded faucet
 (the budget window holds under concurrency), and the profitability guard
@@ -272,9 +299,11 @@ gitignored; the job restores them from the byte-identical tracked copies under
 ## 8. Priority
 
 1. ✅ **E1 — wire CI.** Cheapest item here and it makes every other test real.
-2. 🟡 **C1 / C2 — relay endpoints.** Handler extraction, the no-chain half, and
-   the authorization/replay matrix are done across both tiers (35 tests), and
-   turned up a live nonce-collision defect. The `/shield-*` endpoints remain.
+2. ✅ **C1 — relay endpoints.** Done across both tiers (48 tests): handler
+   extraction, the no-chain surface, the authorization/replay matrix, and the
+   shielded endpoints. Turned up a live nonce-collision defect, still open.
+   🟡 **C2** has its first case (the withdraw decline); the remaining budget and
+   fee-recovery guards are not covered.
 3. **B1 / B2 — leak sweep + positive controls.** The privacy claims are the
    product; today they are asserted per-test and never negatively controlled.
 4. **A1 / A3 — gas snapshot + committed cost ledger.**
