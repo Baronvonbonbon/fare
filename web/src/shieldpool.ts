@@ -73,12 +73,18 @@ export async function depositAndSnapshot(
   const index = Number(await poolR.treeSize()); // our leaf will land here
   const note = makeNote(valueWei);
   const tx = await poolW.depositNative(b32(commitmentOf(note)), { value: valueWei, gasLimit });
-  await tx.wait();
+  const receipt = await tx.wait();
   // sideNodes[lv] at bit-set levels are UNCHANGED by our insert and never change
   // afterwards → snapshot them now as the permanent left path.
   const leftSnapshot: Record<number, string> = {};
   for (let lv = 0; lv < 128; lv++) if (bit(index, lv)) leftSnapshot[lv] = (await poolR.sideNodes(lv)).toString();
-  return { record: { ...note, index, leftSnapshot, depositBlock: tx.blockNumber ?? (await provider.getBlockNumber()) }, txHash: tx.hash };
+  // The RECEIPT's block, not the current one: `tx.blockNumber` can still be null
+  // after `wait()`, and falling back to `getBlockNumber()` puts depositBlock
+  // AHEAD of the deposit whenever a block lands in between — the later scan then
+  // starts past its own commitment and the note looks lost. Step back one block
+  // for good measure, since the scan is bounded either way.
+  const minedAt = receipt?.blockNumber ?? tx.blockNumber ?? (await provider.getBlockNumber());
+  return { record: { ...note, index, leftSnapshot, depositBlock: Math.max(0, Number(minedAt) - 1) }, txHash: tx.hash };
 }
 
 // ── batched deposits: deriving a note's left path after the fact ─────────────

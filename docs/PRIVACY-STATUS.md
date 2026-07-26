@@ -89,10 +89,36 @@ poseidon        0x1d165f6fE5A30422E0E2140e91C8A9B800380637   (Paseo precompile)
 buckets 1 / 5 / 25 PAS · minBatch 8 · dwell 300 s · no keeper authorized
 ```
 
-**Not yet exercised against this deployment.** The live verification runs behind
-[E2E-PRIVACY-LIVE.md](E2E-PRIVACY-LIVE.md) and [E2E-PRIVACY-ZK.md](E2E-PRIVACY-ZK.md)
-used standalone vaults, not this one, and the migration is hours old. The UI
-paths are wired and typechecked but have not been driven end to end here.
+**Exercised end to end** (`scripts/privacy/live-order-e2e.mjs`, order #3): one
+real delivery through every privacy path this work added —
+
+| Step | Result |
+|---|---|
+| Customer burner funded from Kusama Shield | 5 PAS, no edge from the funder |
+| Order created by that burner | #3 |
+| **Sealed bid** | commit named neither the driver nor the price — checked against the mined transaction |
+| Accept, pickup | assigned, picked up |
+| **ZK dropoff** | delivered; no drop coordinate in calldata or logs |
+| Payouts | driver credited 1.95 PAS (fare 2 less the 2.5% protocol fee) |
+| **ZK shielded payout** | note inserted, tree matched the client, spend named no account |
+| Pool withdrawal | 1.0 PAS to a fresh address |
+| Venue withdrawal | plain path still works |
+
+Three bugs surfaced, all fixed and none of them theoretical:
+
+- **`depositAndSnapshot` recorded the wrong block.** It fell back to
+  `getBlockNumber()` when `tx.blockNumber` was still null after `wait()`, so a
+  later scan could start *past* its own commitment and the note looked lost.
+  A client-side bug that would have hit a real customer.
+- **User transactions must size their own gas.** Paseo reserves
+  `gasLimit × gasPrice` at submission, so the 500 M weight limit reserves ~500
+  PAS — fine for a funded relay, impossible for a fresh driver.
+- **`positionCommit` is Poseidon(lat, lon, salt)**, a three-input hash. Nesting
+  two-input hashes produces a commitment the proximity circuit rejects.
+
+One artifact of the demo configuration worth knowing when reading the numbers:
+the treasury and the venue payout are the **same address** (the deployer), so the
+venue and treasury credits above are one balance read twice, not a split.
 
 ## If you only fix three things
 
