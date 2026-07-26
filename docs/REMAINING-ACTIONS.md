@@ -177,6 +177,7 @@ Full mainnet gate + rationale: [PRIVACY.md](PRIVACY.md) · [ROADMAP.md](ROADMAP.
   sponsored `setMetadata`, onboarding-fee recoup, Sybil + ED handling.
 
 ## See also
+- [TEST-PLAN.md](TEST-PLAN.md) — test-coverage gaps (costs, privacy, security, function) + the suite that closes them
 - [PRODUCT-INTEGRATION-PLAN.md](PRODUCT-INTEGRATION-PLAN.md) — the tracking board (A–F) + DoorDash journeys
 - [NETWORK-ARCHITECTURE.md](NETWORK-ARCHITECTURE.md) · [MESSAGING.md](MESSAGING.md) · [PHOTOS.md](PHOTOS.md)
 - [ROADMAP.md](ROADMAP.md) · [PRIVACY.md](PRIVACY.md) · [GPS.md](GPS.md) · [ARCHITECTURE.md](ARCHITECTURE.md)
