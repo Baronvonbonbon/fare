@@ -17,11 +17,11 @@ All three tiers pass today.
 
 | Tier | Runner | Tests | Covers |
 |---|---|---|---|
-| `test/*.ts` | `npx hardhat test` | 179 | contracts, ZK verifiers, invariant fuzz, upgradability, **chain-backed relay endpoints** |
+| `test/*.ts` | `npx hardhat test` | 198 | contracts, ZK verifiers, invariant fuzz, upgradability, **chain-backed relay endpoints** |
 | `web/src/*.test.ts` | `cd web && npx vitest run` | 86 | 11 of 31 client modules |
 | `venue-node/*.test.mjs` | `cd venue-node && node --test` | 73 | economics, scorer, swap, treasury, agent, shieldkeeper, **relay HTTP surface** |
 
-**338 tests, all green**, and all of them now run in CI (§7 E1). The contract tier is the strong part and deserves
+**357 tests, all green**, and all of them now run in CI (§7 E1). The contract tier is the strong part and deserves
 saying so: a seeded-PRNG invariant campaign (`test/invariant.test.ts`) asserts
 escrow conservation and vault solvency after *every* operation and reproduces
 failures from a printed seed; the verifier tests pin fail-safe-before-VK and
@@ -55,22 +55,50 @@ deployed live. Full dependency injection (provider, wallet, config) is still
 settings re-imports under a fresh query string (`./relay.mjs?rate-limit`). That
 works and is used, but a proper factory would be cleaner if this file grows.
 
-**There is no deterministic cost measurement.** No `hardhat-gas-reporter`, no
-`solidity-coverage`. `scripts/privacy/measure-costs.mjs` is the right work —
-the per-payer ledger and the phase-3b split assertion in particular — but it is
-uncommitted, needs three live relay processes plus a funded Paseo deployer, and
-emits a one-shot report. It cannot gate a pull request.
+**~~There is no deterministic cost measurement.~~** 🟡 Partly fixed. §3 A1 pins
+18 paths in `gas-snapshot.json` behind a ±5% CI gate, so gas regressions now
+surface in review.
+
+What is still missing is a *per-role cost ledger* that runs unattended.
+`scripts/privacy/measure-costs.mjs` is the right work — the per-payer accounting
+and the phase-3b split assertion in particular — but it needs three live relay
+processes and a funded Paseo deployer, and emits a one-shot report, so it cannot
+gate a pull request (A3). There is also still no `solidity-coverage` (E2).
 
 ---
 
 ## 3. Costs
 
-☐ **A1 — Gas snapshot, committed and CI-diffed.** Every user-facing path
-measured on a local chain into `gas-snapshot.json`; fail the build on >5%
-regression. Paths: `createOrder` (native + ERC-20), `commitBid`,
-`acceptSealedBid`, `confirmPickup`, `confirmDropoffZK`, `insertShieldNote`,
-note spend, `withdraw` / `withdrawFor`, shield queue + batch, driver/venue
-register, `openDispute` / `resolve`.
+✅ **A1 — Gas snapshot, committed and CI-diffed** (`test/gas-snapshot.test.ts`
+→ `gas-snapshot.json`, 18 paths). Drift beyond ±5% fails. Regenerate
+deliberately with `UPDATE_GAS_SNAPSHOT=1 npx hardhat test
+test/gas-snapshot.test.ts` and commit the diff — the review is the point. No CI
+change was needed: the contracts job already runs `npx hardhat test`.
+
+Determinism comes from running every measurement out of `loadFixture`, so each
+path starts from an identical chain state and warm/cold storage costs cannot
+depend on what an earlier test touched. Verified by running the comparison
+twice, and by mutating the baseline: a 10% shift and a stale entry both fail
+with the path named and the delta shown. The numbers are solc- and
+EVM-version-specific, deliberately — a compiler bump that moves gas should
+surface here and be recorded rather than pass silently.
+
+Two numbers worth knowing now that they are pinned:
+
+| Path | Gas |
+|---|---|
+| `vault.insertShieldNote` | **730,615** — a depth-16 Poseidon tree insert, by far the most expensive path in the protocol |
+| `FareLocationVerifier.verifyProximity` | **305,627** — the Groth16 pairing check |
+| `orders.createOrderERC20` | 256,597 |
+| `settlement.confirmPickup` / `confirmDropoffZK` | ~214,000 each |
+| `orders.createOrder` | 196,833 |
+| `vault.withdraw` | 55,350 |
+
+`confirmDropoffZK` is measured against the mock verifier, so it is settlement
+overhead only; the real proof cost is the separate verifier row, and the two
+move independently. The note *spend* is not yet measured — it needs a real
+Groth16 proof against a live tree root, which is covered functionally in
+`shieldnote-vault.test.ts` but is slow to reproduce here.
 
 ☐ **A2 — Relay break-even table.** A pure-function test over
 `venue-node/economics.mjs`: at what fare does the relay actually profit, given
@@ -354,7 +382,8 @@ gitignored; the job restores them from the byte-identical tracked copies under
    fee-recovery guards are not covered.
 3. ✅ **B1 / B2 — leak sweep + positive controls.** Done (8 tests). The privacy claims are the
    product; today they are asserted per-test and never negatively controlled.
-4. **A1 / A3 — gas snapshot + committed cost ledger.**
+4. 🟡 **A1 / A3 — gas snapshot + committed cost ledger.** A1 done (18 paths,
+   ±5% gate); A3 (splitting `measure-costs.mjs` into local + live modes) remains.
 5. **C5 / D1 — ops consoles.** Small surface, worst blast radius.
 6. **C3 — access-control matrix**, then **D3**, then the remainder.
 
