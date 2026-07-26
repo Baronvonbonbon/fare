@@ -1,0 +1,99 @@
+# Test gate (E1). Runs all three suites on every push / PR.
+#
+# Before this existed the only CI was Slither, path-filtered to contracts/**,
+# so a change to venue-node/ or web/src/ triggered nothing at all. Plan and
+# remaining coverage gaps: docs/TEST-PLAN.md.
+#
+# Deliberately NOT path-filtered per job: the tiers are coupled (the address
+# book is generated into web/src, the relay and the client share the endpoint
+# contract) and the whole thing runs in well under a minute of billable time.
+
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  contracts:
+    name: contracts (hardhat)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install deps
+        run: npm ci
+
+      # test/shieldnote-vault.test.ts proves against the REAL circuit, but
+      # circuits/build/*.zkey and circuits/build/shieldnote_js/ are gitignored
+      # as heavy regenerable intermediates. The identical artifacts DO ship
+      # tracked under web/public/shield/ (scripts/setup-shieldnote.mjs step 7
+      # copies them there for the PWA prover) — verified byte-identical by
+      # sha256. Restoring them here is far cheaper than rebuilding the circuit,
+      # which would need the circom binary and a powers-of-tau download.
+      - name: Restore ZK proving artifacts
+        run: |
+          mkdir -p circuits/build/shieldnote_js
+          cp web/public/shield/shieldnote.zkey circuits/build/shieldnote.zkey
+          cp web/public/shield/shieldnote.wasm circuits/build/shieldnote_js/shieldnote.wasm
+
+      - name: Test
+        run: npx hardhat test
+
+  web:
+    name: web (vitest + typecheck)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install deps
+        run: npm ci
+
+      - name: Test
+        run: npx vitest run
+
+      # `tsc -b && vite build`. The typecheck is the only automated check that
+      # touches App.tsx (2,689 lines) and web/src/ops/ (1,385), neither of
+      # which has tests — see docs/TEST-PLAN.md §6.
+      - name: Typecheck + build
+        run: npm run build
+
+  venue-node:
+    name: venue-node (node:test)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: venue-node
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: venue-node/package-lock.json
+
+      - name: Install deps
+        run: npm ci
+
+      # Covers the pure modules (economics, scorer, swap, treasury, agent,
+      # shieldkeeper). relay.mjs itself is untested and untestable as written —
+      # docs/TEST-PLAN.md §5 C1.
+      - name: Test
+        run: node --test
