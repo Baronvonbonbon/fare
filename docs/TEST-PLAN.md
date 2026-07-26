@@ -20,11 +20,11 @@ All three tiers pass today.
 
 | Tier | Runner | Tests | Covers |
 |---|---|---|---|
-| `test/*.ts` | `npx hardhat test` | 201 | contracts, ZK verifiers, invariant fuzz, upgradability, **chain-backed relay endpoints** |
-| `web/src/*.test.ts` | `cd web && npx vitest run` | 92 | 12 of 32 client modules, incl. **the arbiter ruling math** |
+| `test/*.ts` | `npx hardhat test` | 208 | contracts, ZK verifiers, invariant fuzz, upgradability, **chain-backed relay endpoints** |
+| `web/src/*.test.ts` | `cd web && npx vitest run` | 105 | 14 of 34 client modules, incl. **all four ops consoles' logic** |
 | `venue-node/*.test.mjs` | `cd venue-node && node --test` | 73 | economics, scorer, swap, treasury, agent, shieldkeeper, **relay HTTP surface** |
 
-**366 tests, all green**, and all of them now run in CI (§7 E1). The contract tier is the strong part and deserves
+**386 tests, all green**, and all of them now run in CI (§7 E1). The contract tier is the strong part and deserves
 saying so: a seeded-PRNG invariant campaign (`test/invariant.test.ts`) asserts
 escrow conservation and vault solvency after *every* operation and reproduces
 failures from a printed seed; the verifier tests pin fail-safe-before-VK and
@@ -37,7 +37,7 @@ Slither is in CI with zero high-severity findings ([SECURITY-REVIEW.md](SECURITY
 | Surface | Size | Tests |
 |---|---|---|
 | ~~`venue-node/relay.mjs`~~ — 16 HTTP endpoints, holds `RELAY_PRIVATE_KEY` | 953 lines | ✅ 49 across two tiers (§5 C1) |
-| `web/src/ops/` — four consoles + shell | 1,385 lines | 🟡 9 (the ruling math, extracted — §5 C5) |
+| ~~`web/src/ops/`~~ — four consoles + shell | 1,385 lines | ✅ 29 (all decision logic extracted — §5 C5) |
 | `web/src/App.tsx` | 2,689 lines | **0** |
 | `chain.ts`, `shieldnote.ts`, `relay.ts`, `shield.ts`, `token.ts`, `wallets.ts`, `zk.ts` | ~1,700 lines | **0** |
 
@@ -338,10 +338,29 @@ warning the console would promise damages that never arrive.
 The differential test was initially vacuous — see
 [TEST-FINDINGS.md](TEST-FINDINGS.md) #11.
 
-**Remaining:** the governance, pause and upgrade consoles. Their risk is input
-parsing (`parse`/`toInt` → on-chain units) and the `register` vs
-`upgradeContract` distinction; component rendering stays out of scope until the
-web tier gains a DOM testing dependency, which it currently has none of.
+**Governance, pause and upgrade** are now covered the same way, via
+`web/src/ops/govparams.ts` and `web/src/ops/upgrade.ts` (13 unit tests, 7
+differential). Each console duplicates a `require` from Solidity so it can
+disable Save instead of letting an operator broadcast a revert — which means the
+two copies can drift in *either* direction, so every boundary is probed on both
+sides and the verdicts compared:
+
+- `setParams` and `setGeoParams` bounds match their contracts exactly, at every
+  boundary. Mutation-checked: widening `FEE_BPS_MAX` to 2000 fails at 1001.
+- The pause console's authority model matches `FarePauseRegistry` — guardians
+  pause but cannot unpause, and the four listed categories are the four accepted.
+- The upgrade console's router keys resolve to the entries `scripts/deploy.ts`
+  registers, and its `upgradable` flag matches which entries the router accepts
+  `upgradeContract` for. Drift there would not error — it would silently address
+  a different registry slot.
+
+**This found a live defect:** a cleared numeric field parsed as `0` and Save
+stayed enabled, so blanking the protocol-fee box set the fee to zero. Fixed;
+[TEST-FINDINGS.md](TEST-FINDINGS.md) #13.
+
+**Out of scope:** component rendering. The web tier has no DOM testing
+dependency, and adding one is a decision rather than a gap — the logic that
+decides what a console *does* is now all outside the components.
 
 ☐ **C6 — Mythril nightly.** Currently documented as an on-demand deep-dive,
 which in practice means it never runs. Schedule it against `FareVault`,
@@ -402,7 +421,8 @@ gitignored; the job restores them from the byte-identical tracked copies under
    product; today they are asserted per-test and never negatively controlled.
 4. 🟡 **A1 / A3 — gas snapshot + committed cost ledger.** A1 done (18 paths,
    ±5% gate); A3 (splitting `measure-costs.mjs` into local + live modes) remains.
-5. **C5 / D1 — ops consoles.** Small surface, worst blast radius.
+5. ✅ **C5 / D1 — ops consoles.** Done (29 tests); found and fixed a defect
+   that set governance parameters to zero.
 6. **C3 — access-control matrix**, then **D3**, then the remainder.
 
 B3 is deliberately left as a decision rather than a recommendation: it is worth

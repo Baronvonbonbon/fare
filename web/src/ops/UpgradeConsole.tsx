@@ -3,6 +3,7 @@ import { ethers } from "ethers";
 import { ADDRESSES, readProvider, short, syncAddressesFromRouter, nodeLabel } from "../chain";
 import { ROUTER_ABI, UPGRADABLE_ABI } from "../abi";
 import { ConsoleProps, Run } from "./OpsApp";
+import { REGISTERED, routerKey, checkPromotion } from "./upgrade";
 
 // Upgrade console (integration-plan D4).
 //
@@ -20,16 +21,7 @@ import { ConsoleProps, Run } from "./OpsApp";
 // Registered names, mirroring scripts/deploy.ts. pauseRegistry is registered
 // for discovery only — it is not FareUpgradable, so it has no freeze state and
 // can only be re-pointed via register(), never upgradeContract().
-const NAMES: { name: string; upgradable: boolean }[] = [
-  { name: "orders", upgradable: true },
-  { name: "settlement", upgradable: true },
-  { name: "disputes", upgradable: true },
-  { name: "drivers", upgradable: true },
-  { name: "venues", upgradable: true },
-  { name: "vault", upgradable: true },
-  { name: "ratings", upgradable: true },
-  { name: "pauseRegistry", upgradable: false },
-];
+const NAMES = REGISTERED; // ./upgrade — differential-tested against the router
 
 interface Row {
   name: string;
@@ -57,7 +49,7 @@ export default function UpgradeConsole({ session, busy, run, say }: ConsoleProps
 
       const built = await Promise.all(
         NAMES.map(async ({ name, upgradable }): Promise<Row> => {
-          const key = ethers.encodeBytes32String(name);
+          const key = routerKey(name);
           const [addr, version, history] = await Promise.all([
             router.currentAddrOf(key),
             router.versionOf(key),
@@ -155,9 +147,7 @@ function RegistryRow({
   const [freezeOld, setFreezeOld] = useState(true);
   const [showHistory, setShowHistory] = useState(false);
 
-  const valid = ethers.isAddress(newAddr);
-  const sameAsCurrent = valid && newAddr.toLowerCase() === r.addr;
-  const canSubmit = authorized && valid && !sameAsCurrent;
+  const { sameAsCurrent, canSubmit } = checkPromotion(newAddr, r.addr, authorized);
 
   return (
     <div className="order">

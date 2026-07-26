@@ -13,6 +13,7 @@ Ordered by what a reader should act on, not by discovery order.
 | # | Finding | Severity | Status |
 |---|---|---|---|
 | 1 | Relay reused transaction nonces under concurrency | **High** | ✅ Fixed |
+| 13 | A cleared governance field silently wrote `0` on Save | **Medium** | ✅ Fixed |
 | 2 | `/fund` can double-fund inside a 250 ms window | Low | ☐ Open |
 | 3 | Oversized request body returns 500, not 413 | Cosmetic | ☐ Open |
 | 4 | CI ran nothing but Slither, path-filtered to `contracts/**` | **High** (process) | ✅ Fixed |
@@ -44,6 +45,32 @@ allocation happens inside `serialize()`.
 *Pinned by* `submits concurrent requests on distinct nonces` and `recovers its
 nonce after a failed submission` (`test/relay-endpoints.test.ts`).
 Mutation-checked: restoring the old one-line behaviour fails the first.
+
+## 13. A cleared governance field silently wrote `0` — **fixed**
+
+`GovernanceConsole`'s `toInt` was `Number(s.trim())` guarded by
+`Number.isFinite`. `Number("")` is **0**, not `NaN`, so a blank field parsed as a
+valid zero. Save stayed enabled and wrote it.
+
+That was harmless for the fields with a non-zero floor — windows and radii
+reject 0 on range — but silent for the five where zero is legal: `feeBps`,
+`assignedCancelBps`, `relayRebateBps`, `withdrawFeeBps` and `unbondingSeconds`.
+Clearing the protocol-fee box and pressing Save set the protocol fee to zero,
+and the chain accepted it without complaint because 0 is a perfectly valid fee.
+Nothing downstream could have caught it: the contract's job is to enforce
+bounds, and 0 is in bounds.
+
+The same parser also accepted `Number`'s other conveniences — `"0x10"` as 16 and
+`"1e3"` as 1000 — in a field an operator types decimals into.
+
+**Fixed** in `web/src/ops/govparams.ts`: `toInt` now requires a plain decimal and
+returns `NaN` for anything else, blank included. Setting a fee to zero takes
+typing a zero.
+
+*Pinned by* `toInt refuses blank input instead of reading it as zero`
+(`web/src/ops/govparams.test.ts`) and `a cleared field can no longer set a
+parameter to zero` (`test/ops-governance.test.ts`), which also demonstrates the
+chain *would* have taken the write.
 
 ## 2. `/fund` can double-fund inside a 250 ms window — **open**
 
@@ -176,6 +203,19 @@ Worth recording, because "we looked and it held" is a result:
 - **The arbiter's escrow preview matches the chain to the wei**, including the
   driver-takes-the-remainder form that keeps the two sides summing to the escrow
   exactly. Differential-tested against `FareOrders.resolveDisputed`.
+- **Every governance bound the console duplicates matches its contract**, probed
+  on both sides of every boundary in `setParams` and `setGeoParams`. The console
+  is neither stricter (which would make a legal setting unreachable) nor looser
+  (which would turn a warning into a revert). Mutation-checked: widening
+  `FEE_BPS_MAX` to 2000 fails the comparison at 1001.
+- **The pause console's authority model matches `FarePauseRegistry`**: a
+  guardian can pause but not unpause, the owner can do both, a stranger neither,
+  and the four listed categories are exactly the four the registry accepts.
+- **The upgrade console's router keys resolve to the entries `scripts/deploy.ts`
+  registers**, and its `upgradable` flag matches which entries the router will
+  actually accept `upgradeContract` for — `pauseRegistry` is not `FareUpgradable`
+  and correctly gets `register()` instead. A drift in either would not error; it
+  would silently address a different registry slot.
 - **Contract-level authorization holds** on `withdrawFor` (signature bound to the
   account, unsigned recipients rejected, replays rejected), `/forward` (target
   allowlist, no value, no forged sender), and `insertShieldNoteFor` (a relay

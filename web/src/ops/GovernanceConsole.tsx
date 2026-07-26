@@ -1,6 +1,12 @@
 import { useCallback, useEffect, useState } from "react";
 import { contracts, fmt, parse, short, syncAddressesFromRouter, nodeLabel } from "../chain";
 import { ConsoleProps, Run } from "./OpsApp";
+import {
+  toInt, pct, secsLabel, bpsValid,
+  feeBpsValid, cancelBpsValid, windowValid,
+  radiusValid, maxAgeValid, skewValid,
+  FEE_BPS_MAX, CANCEL_BPS_MAX, WINDOW_MIN, WINDOW_MAX,
+} from "./govparams";
 
 // Governance params console (integration-plan D2).
 //
@@ -10,23 +16,8 @@ import { ConsoleProps, Run } from "./OpsApp";
 // the connected wallet owns that contract, retune it. Each domain is its own
 // Ownable2Step, so authority is gated per-card, not globally.
 
-// ---- unit helpers ----
-
-const pct = (bps: number) => `${(bps / 100).toFixed(2)}%`;
-
-// Seconds → the coarsest exact unit (2700 → "45m", 86400 → "1d").
-function secsLabel(s: number): string {
-  if (s === 0) return "0s";
-  if (s % 86400 === 0) return `${s / 86400}d`;
-  if (s % 3600 === 0) return `${s / 3600}h`;
-  if (s % 60 === 0) return `${s / 60}m`;
-  return `${s}s`;
-}
-
-const toInt = (s: string): number => {
-  const n = Number(s.trim());
-  return Number.isFinite(n) ? Math.trunc(n) : NaN;
-};
+// Unit helpers, bounds and field parsing live in ./govparams, which is
+// differential-tested against the contracts in test/ops-governance.test.ts.
 
 interface Gov {
   feeBps: number;
@@ -246,9 +237,6 @@ function SaveRow({ authorized, busy, disabled, onSave, label }: { authorized: bo
 
 // ---------- orders: setParams (fee, cancel comp, default windows) ----------
 
-const WIN_MIN = 600; // 10 minutes
-const WIN_MAX = 86_400; // 24 hours
-
 function OrderEconomicsCard({ g, authorized, busy, run, signed, refresh }: { g: Gov } & CardProps) {
   const [fee, setFee] = useState(String(g.feeBps));
   const [cancel, setCancel] = useState(String(g.assignedCancelBps));
@@ -256,11 +244,10 @@ function OrderEconomicsCard({ g, authorized, busy, run, signed, refresh }: { g: 
   const [delivery, setDelivery] = useState(String(g.deliveryWindow));
 
   const fBps = toInt(fee), cBps = toInt(cancel), pW = toInt(pickup), dW = toInt(delivery);
-  const winOk = (w: number) => Number.isInteger(w) && w >= WIN_MIN && w <= WIN_MAX;
-  const feeErr = !(Number.isInteger(fBps) && fBps >= 0 && fBps <= 1000);
-  const cancelErr = !(Number.isInteger(cBps) && cBps >= 0 && cBps <= 5000);
-  const pickupErr = !winOk(pW);
-  const deliveryErr = !winOk(dW);
+  const feeErr = !feeBpsValid(fBps);
+  const cancelErr = !cancelBpsValid(cBps);
+  const pickupErr = !windowValid(pW);
+  const deliveryErr = !windowValid(dW);
   const invalid = feeErr || cancelErr || pickupErr || deliveryErr;
 
   return (
@@ -268,13 +255,13 @@ function OrderEconomicsCard({ g, authorized, busy, run, signed, refresh }: { g: 
       <h2>Order economics</h2>
       <p className="hint">Protocol fee, post-assignment cancel compensation, and default delivery deadlines. Applied atomically via setParams.</p>
       <Field label="feeBps — protocol fee on fare" cur={`${g.feeBps} (${pct(g.feeBps)})`} draft={fee} onDraft={setFee}
-        hint={`bps, ≤ 1000 (10%). ${!feeErr ? `= ${pct(fBps)}` : ""}`} warn={feeErr ? "Must be an integer 0–1000." : undefined} />
+        hint={`bps, ≤ ${FEE_BPS_MAX} (10%). ${!feeErr ? `= ${pct(fBps)}` : ""}`} warn={feeErr ? "Must be an integer 0–1000." : undefined} />
       <Field label="assignedCancelBps — driver comp on cancel" cur={`${g.assignedCancelBps} (${pct(g.assignedCancelBps)})`} draft={cancel} onDraft={setCancel}
-        hint={`bps of fare, ≤ 5000 (50%). ${!cancelErr ? `= ${pct(cBps)}` : ""}`} warn={cancelErr ? "Must be an integer 0–5000." : undefined} />
+        hint={`bps of fare, ≤ ${CANCEL_BPS_MAX} (50%). ${!cancelErr ? `= ${pct(cBps)}` : ""}`} warn={cancelErr ? "Must be an integer 0–5000." : undefined} />
       <Field label="defaultPickupWindow — seconds" cur={`${g.pickupWindow} (${secsLabel(g.pickupWindow)})`} draft={pickup} onDraft={setPickup}
-        hint={`seconds, 600–86400 (10m–24h). ${!pickupErr ? `= ${secsLabel(pW)}` : ""}`} warn={pickupErr ? "Out of range (600–86400)." : undefined} />
+        hint={`seconds, ${WINDOW_MIN}–${WINDOW_MAX} (10m–24h). ${!pickupErr ? `= ${secsLabel(pW)}` : ""}`} warn={pickupErr ? "Out of range (600–86400)." : undefined} />
       <Field label="defaultDeliveryWindow — seconds" cur={`${g.deliveryWindow} (${secsLabel(g.deliveryWindow)})`} draft={delivery} onDraft={setDelivery}
-        hint={`seconds, 600–86400 (10m–24h). ${!deliveryErr ? `= ${secsLabel(dW)}` : ""}`} warn={deliveryErr ? "Out of range (600–86400)." : undefined} />
+        hint={`seconds, ${WINDOW_MIN}–${WINDOW_MAX} (10m–24h). ${!deliveryErr ? `= ${secsLabel(dW)}` : ""}`} warn={deliveryErr ? "Out of range (600–86400)." : undefined} />
       <SaveRow authorized={authorized} busy={busy} disabled={invalid}
         onSave={() => run("Set order params", () => signed!.orders.setParams(fBps, cBps, pW, dW), refresh)} label="Save order params" />
     </div>
@@ -322,10 +309,9 @@ function GeoParamsCard({ g, authorized, busy, run, signed, refresh }: { g: Gov }
   const [skew, setSkew] = useState(String(g.futureSkew));
 
   const prN = toInt(pr), drN = toInt(dr), ageN = toInt(age), skewN = toInt(skew);
-  const radiusOk = (r: number) => Number.isInteger(r) && r >= 25 && r <= 2000;
-  const prErr = !radiusOk(prN), drErr = !radiusOk(drN);
-  const ageErr = !(Number.isInteger(ageN) && ageN >= 60 && ageN <= 7200);
-  const skewErr = !(Number.isInteger(skewN) && skewN >= 0 && skewN <= 1800);
+  const prErr = !radiusValid(prN), drErr = !radiusValid(drN);
+  const ageErr = !maxAgeValid(ageN);
+  const skewErr = !skewValid(skewN);
   const invalid = prErr || drErr || ageErr || skewErr;
 
   return (
@@ -356,7 +342,7 @@ function SingleBpsCard({
 } & CardProps) {
   const [draft, setDraft] = useState(String(cur));
   const v = toInt(draft);
-  const err = !(Number.isInteger(v) && v >= 0 && v <= max);
+  const err = !bpsValid(v, max);
   return (
     <div className="card">
       <h2>{title}</h2>
