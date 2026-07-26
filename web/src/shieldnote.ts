@@ -13,10 +13,11 @@
 //
 // Secrets never leave the device. The relay sees a commitment on the way in and
 // a proof on the way out, and can link neither to the other.
-import { Contract, toBeHex, toBigInt, randomBytes, type Provider, type Signer } from "ethers";
+import { Contract, ZeroAddress, toBeHex, toBigInt, randomBytes, type Provider, type Signer } from "ethers";
 import { poseidon1, poseidon2 } from "poseidon-lite";
 import { ADDRESSES, CHAIN_ID, readProvider } from "./chain";
 import { VAULT_ABI } from "./abi";
+import { postPadded } from "./relaypick";
 
 const BN254_R = 21888242871839275222246405745257275088548364400416034343698204186575808495617n;
 export const NOTE_DEPTH = 16; // must match the circuit and FareVault.NOTE_DEPTH
@@ -31,6 +32,10 @@ export interface ShieldNote {
   bucketWei: string;
   commitment: string; // decimal, as stored in the tree
   createdAt: number;
+  /// Which relay submitted the INSERT. The spend deliberately avoids it: that
+  /// relay already knows the account, and letting it see the proof too would
+  /// hand it the pairing (relaypick.ts).
+  insertedVia?: string;
 }
 
 const randField = (): bigint => toBigInt(randomBytes(31)) % BN254_R;
@@ -182,6 +187,18 @@ export async function proveSpend(
   };
 }
 
+/// Is the ZK path wired on-chain? Both the verifier and the Poseidon hasher must
+/// be set; without either, callers fall back to the ticket path.
+export async function zkShieldAvailable(provider: Provider = readProvider as any): Promise<boolean> {
+  try {
+    const vault = new Contract(ADDRESSES.vault, VAULT_ABI, provider as any);
+    const [verifier, poseidon] = await Promise.all([vault.shieldVerifier(), vault.shieldPoseidon()]);
+    return verifier !== ZeroAddress && poseidon !== ZeroAddress;
+  } catch {
+    return false; // old vault without the note pool
+  }
+}
+
 /// EIP-712 payload for a relay-submitted insertion. The signature covers the
 /// COMMITMENT, so a relay cannot swap in a note of its own.
 export const NOTE_TYPES = {
@@ -202,7 +219,7 @@ export async function insertShieldNote(
 ): Promise<{ note: ShieldNote; txHash: string }> {
   const account = await signer.getAddress();
   const vault = new Contract(ADDRESSES.vault, VAULT_ABI, readProvider as any);
-  const note = makeShieldNote(bucketWei);
+  const note = { ...makeShieldNote(bucketWei), insertedVia: relayUrl };
   rememberShieldNote(note);
 
   const nonce: bigint = await vault.shieldNonce(account);
@@ -213,11 +230,8 @@ export async function insertShieldNote(
     { account, bucket: bucketWei, commitment: BigInt(note.commitment), nonce, deadline }
   );
 
-  const res = await fetch(`${relayUrl}/shield-note`, {
-    method: "POST", headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      account, bucket: bucketWei.toString(), commitment: note.commitment, deadline, signature,
-    }),
+  const res = await postPadded(`${relayUrl}/shield-note`, {
+    account, bucket: bucketWei.toString(), commitment: note.commitment, deadline, signature,
   });
   const j = await res.json();
   if (!res.ok || !j.txHash) {
@@ -225,4 +239,56 @@ export async function insertShieldNote(
     throw new Error(`shield-note insert failed: ${JSON.stringify(j)}`);
   }
   return { note, txHash: j.txHash };
+}
+
+/// Spend a note into the shielded pool and adopt the resulting pool note.
+///
+/// Use a DIFFERENT relay than the insert went through where one is available:
+/// the insert names the account, the spend names the commitment, and a relay
+/// that sees both learns the pairing the proof exists to hide. The chain cannot
+/// link them; the transport can, if you let it.
+export async function spendShieldNote(
+  note: ShieldNote, relayUrl: string, poolAddr: string, provider: Provider = readProvider as any
+): Promise<{ txHash: string; ksNote: any }> {
+  const { makeNote, commitmentOf, batchNotePaths } = await import("./shieldpool");
+  const { adoptShieldedNote } = await import("./shield");
+
+  const bucket = BigInt(note.bucketWei);
+  const ksNote = makeNote(bucket); // the pool note this deposit will fund
+  const ksCommitment = commitmentOf(ksNote);
+
+  const leaves = await fetchNoteLeaves(provider);
+  const spend = await proveSpend(note, leaves, ksCommitment);
+
+  // Snapshot the pool's tree BEFORE the deposit: inside the transaction the
+  // insert overwrites the levels this leaf needs, and there is no after-the-fact
+  // read that recovers them (the same constraint phase 1 hit).
+  const pool = new Contract(
+    poolAddr,
+    ["function treeSize() view returns (uint256)", "function sideNodes(uint256) view returns (uint256)"],
+    provider as any
+  );
+  const startIndex = Number(await pool.treeSize());
+  const preSideNodes: Record<number, string> = {};
+  for (let lv = 0; lv < 128; lv++) preSideNodes[lv] = (await pool.sideNodes(lv)).toString();
+
+  const res = await postPadded(`${relayUrl}/shield-note-spend`, {
+    proof: spend.proof, root: spend.root, nullifierHash: spend.nullifierHash,
+    bucket: spend.bucketWei, ksCommitment: spend.ksCommitment,
+  });
+  const j = await res.json();
+  // 409 = the note tree moved past our root while we were proving. Recoverable:
+  // rebuild against a current root.
+  if (res.status === 409) throw new Error("note root went stale — retry the spend");
+  if (!res.ok || !j.txHash) throw new Error(`shield-note spend failed: ${JSON.stringify(j)}`);
+
+  // The vault's note is spent; the pool note is what we hold now.
+  forgetShieldNote(note.commitment);
+  const receipt = await (provider as any).waitForTransaction(j.txHash).catch(() => null);
+  const { index, leftSnapshot } = batchNotePaths(startIndex, preSideNodes, [ksCommitment])[0];
+  adoptShieldedNote({
+    ...ksNote, index, leftSnapshot,
+    depositBlock: receipt?.blockNumber ?? (await provider.getBlockNumber()),
+  });
+  return { txHash: j.txHash, ksNote };
 }

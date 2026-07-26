@@ -59,6 +59,10 @@ import {
   shieldBuckets, planShielding, queueShieldedPayout, claimShieldedPayouts, pendingShieldedPayouts,
 } from "./shieldpayout";
 import {
+  zkShieldAvailable, insertShieldNote, spendShieldNote, pendingShieldNotes,
+} from "./shieldnote";
+import { pickRelayAvoiding, relaySplitAvailable } from "./relaypick";
+import {
   commitProfile, isCommitted, describeProfile, saveSelfProfile, loadSelfProfile,
   profilePayload, verifyPayload, type DriverProfile,
 } from "./regmeta";
@@ -1001,10 +1005,13 @@ function VaultStrip({ vaultBal, vaultTokenBal, pendingDust, busy, act, signed, s
 function ShieldEarningsStrip({ vaultBal, busy, signed, say, refresh }: any) {
   const [buckets, setBuckets] = useState<bigint[]>([]);
   const [pending, setPending] = useState(() => pendingShieldedPayouts());
+  const [zkNotes, setZkNotes] = useState(() => pendingShieldNotes());
+  const [zk, setZk] = useState(false); // ZK path wired on-chain?
   const [working, setWorking] = useState(false);
   const relay = activeRelayUrl();
 
   useEffect(() => { shieldBuckets().then(setBuckets).catch(() => setBuckets([])); }, []);
+  useEffect(() => { zkShieldAvailable().then(setZk).catch(() => setZk(false)); }, []);
 
   // Deposited payouts only become spendable once this device replays the batch,
   // so sweep for claimable ones on mount rather than making it a manual step.
@@ -1025,11 +1032,48 @@ function ShieldEarningsStrip({ vaultBal, busy, signed, say, refresh }: any) {
     if (!signed) return say("Connect a wallet first", true);
     setWorking(true);
     try {
-      for (const bucket of plan) {
-        await queueShieldedPayout(signed.vault.runner, relay!, bucket);
-        setPending(pendingShieldedPayouts());
+      if (zk) {
+        // Phase 3: each bucket becomes a note, spendable with a proof that names
+        // nobody. No keeper, no batch to wait for.
+        for (const bucket of plan) {
+          await insertShieldNote(signed.vault.runner, relay!, bucket);
+          setZkNotes(pendingShieldNotes());
+        }
+        say(`Shielded ${fmt(shieldable)} PAS into ${plan.length} note${plan.length > 1 ? "s" : ""} — spend when ready`);
+      } else {
+        for (const bucket of plan) {
+          await queueShieldedPayout(signed.vault.runner, relay!, bucket);
+          setPending(pendingShieldedPayouts());
+        }
+        say(`Queued ${fmt(shieldable)} PAS — deposited once the batch fills`);
       }
-      say(`Queued ${fmt(shieldable)} PAS — deposited once the batch fills`);
+      await refresh();
+    } catch (e: any) {
+      say(e?.reason ?? e?.shortMessage ?? e?.message ?? String(e), true);
+    } finally {
+      setWorking(false);
+    }
+  }
+
+  /// Spend every held note into the pool. Routed through a DIFFERENT relay than
+  /// the insert where one exists: the insert named the account, this names the
+  /// commitment, and one relay seeing both learns what the proof hides.
+  async function spendAll() {
+    const pool = ((import.meta as any).env?.VITE_SHIELD_POOL as string | undefined)?.trim();
+    if (!pool) return say("No shielded pool configured", true);
+    setWorking(true);
+    try {
+      let n = 0;
+      for (const note of zkNotes) {
+        const via = pickRelayAvoiding("shield-spend", note.commitment, note.insertedVia) ?? relay!;
+        await spendShieldNote(note, via, pool);
+        setZkNotes(pendingShieldNotes());
+        n++;
+      }
+      say(
+        `Spent ${n} note${n > 1 ? "s" : ""} into the shielded pool` +
+        (relaySplitAvailable() ? "" : " — only one relay known, so it saw both halves")
+      );
       await refresh();
     } catch (e: any) {
       say(e?.reason ?? e?.shortMessage ?? e?.message ?? String(e), true);
@@ -1048,6 +1092,16 @@ function ShieldEarningsStrip({ vaultBal, busy, signed, say, refresh }: any) {
             {fmt(queued)} PAS queued in {pending.length} note{pending.length > 1 ? "s" : ""} — waiting for the batch to fill
           </div>
         )}
+        {zkNotes.length > 0 && (
+          <div className="hint">
+            {zkNotes.length} shielded note{zkNotes.length > 1 ? "s" : ""} held — spend them into the pool when you like
+          </div>
+        )}
+        {zk && (
+          <div className="hint" style={{ color: "var(--cyan)" }}>
+            zero-knowledge path: no keeper holds your note, and spending names nobody
+          </div>
+        )}
         {shieldable === 0n && queued === 0n && (
           <div className="hint">
             below the smallest denomination ({fmt(buckets[0])} PAS) — earn a little more to shield
@@ -1056,8 +1110,13 @@ function ShieldEarningsStrip({ vaultBal, busy, signed, say, refresh }: any) {
       </div>
       <div className="btn-row" style={{ flexWrap: "wrap" }}>
         <button className="btn small" disabled={busy || working || shieldable === 0n} onClick={shieldAll}>
-          {working ? "Shielding…" : `Shield ${fmt(shieldable)} PAS`}
+          {working ? "Working…" : `Shield ${fmt(shieldable)} PAS`}
         </button>
+        {zk && zkNotes.length > 0 && (
+          <button className="btn ghost small" disabled={busy || working} onClick={spendAll}>
+            Spend {zkNotes.length} note{zkNotes.length > 1 ? "s" : ""} → pool
+          </button>
+        )}
       </div>
     </div>
   );

@@ -25,7 +25,7 @@
 
 import http from "node:http";
 import { readFileSync } from "node:fs";
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { JsonRpcProvider, Wallet, Contract, Interface, parseEther, formatEther, isAddress, keccak256, solidityPacked } from "ethers";
 import { rebateWei, withdrawFeeWei, coversCost, withinBudget, windowSpent } from "./economics.mjs";
 import { rebateInNative, shouldTopUp, planSwap, assetConversionQuote, priceFraction, cfg as swapCfg } from "./treasury.mjs";
@@ -348,14 +348,32 @@ const isHex = (s) => typeof s === "string" && /^0x[0-9a-fA-F]*$/.test(s);
 const sha256Hex = (s) => "0x" + createHash("sha256").update(s).digest("hex");
 setInterval(() => { const now = Date.now(); for (const [k, v] of photos) if (v.exp < now) photos.delete(k); }, 3_600_000).unref?.();
 
-// ── crude per-IP rate limit ──────────────────────────────────────────────────
+// ── crude per-client rate limit, without holding client IPs ──────────────────
+// Privacy phase 3b: the relay is in the threat model (docs/PRIVACY-TIERS.md §1),
+// so it should not keep a table of who is talking to it. Rate limiting only
+// needs to tell clients APART, not identify them — so key on a keyed hash of the
+// address under a secret that rotates every window. After a rotation the old
+// keys are unrecoverable even from a memory dump, and nothing on this node ever
+// held a raw address beyond the length of one request.
+let rateSalt = randomBytes(16);
+let rateSaltAt = Date.now();
 const hits = new Map();
+function clientKey(ip) {
+  if (Date.now() - rateSaltAt > RATE_WINDOW_MS * 10) {
+    rateSalt = randomBytes(16);
+    rateSaltAt = Date.now();
+    hits.clear(); // old keys are meaningless under the new salt
+  }
+  return createHash("sha256").update(rateSalt).update(ip).digest("base64").slice(0, 16);
+}
 function rateLimited(ip) {
+  if (!ip) return false;
+  const key = clientKey(ip);
   const now = Date.now();
-  const rec = hits.get(ip) ?? { n: 0, t: now };
+  const rec = hits.get(key) ?? { n: 0, t: now };
   if (now - rec.t > RATE_WINDOW_MS) { rec.n = 0; rec.t = now; }
   rec.n += 1;
-  hits.set(ip, rec);
+  hits.set(key, rec);
   return rec.n > RATE_MAX;
 }
 
@@ -379,12 +397,19 @@ async function readJson(req) {
     if (size > 256 * 1024) throw new Error("body too large");
     chunks.push(c);
   }
-  return JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
+  const body = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
+  // Clients pad request bodies to fixed blocks so their SIZE carries no
+  // information (web/src/relaypick.ts). The padding is not data — drop it before
+  // anything downstream sees it.
+  if (body && typeof body === "object") delete body._pad;
+  return body;
 }
 
 const server = http.createServer(async (req, res) => {
   const origin = req.headers.origin;
   if (req.method === "OPTIONS") return send(res, 204, {}, origin);
+  // Read once, use for rate limiting, never store: `clientKey` hashes it under a
+  // rotating salt so this node keeps no table of who called (phase 3b).
   const ip = (req.headers["x-forwarded-for"]?.split(",")[0] ?? req.socket.remoteAddress ?? "").trim();
   const url = new URL(req.url, `http://localhost`);
 
