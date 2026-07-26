@@ -14,6 +14,7 @@ Ordered by what a reader should act on, not by discovery order.
 |---|---|---|---|
 | 1 | Relay reused transaction nonces under concurrency | **High** | ✅ Fixed |
 | 13 | A cleared governance field silently wrote `0` on Save | **Medium** | ✅ Fixed |
+| 14 | Ops docs require a faucet secret for a code path that no longer runs | Medium (docs) | ☐ Open |
 | 2 | `/fund` can double-fund inside a 250 ms window | Low | ☐ Open |
 | 3 | Oversized request body returns 500, not 413 | Cosmetic | ☐ Open |
 | 4 | CI ran nothing but Slither, path-filtered to `contracts/**` | **High** (process) | ✅ Fixed |
@@ -71,6 +72,38 @@ typing a zero.
 (`web/src/ops/govparams.test.ts`) and `a cleared field can no longer set a
 parameter to zero` (`test/ops-governance.test.ts`), which also demonstrates the
 chain *would* have taken the write.
+
+## 14. The faucet ops step is stale — **open, needs your decision**
+
+[REMAINING-ACTIONS.md](REMAINING-ACTIONS.md) §1 lists, as a required operational
+step:
+
+> ☐ **Faucet secret** — set `DRIP_PRIVATE_KEY` (funded) in Cloudflare Pages env
+> so `/api/drip` funds burners on demand (the "one manual secret step"). Without
+> it, gas top-ups fall back to the public faucet.
+
+Nothing calls it. `web/src/chain.ts` still exports `requestDrip`, and
+`web/functions/api/drip.ts` is still deployed, but `requestDrip` has **zero
+callers** — `relay.ts` `sponsorGas` says in its own comment that "the central
+`/api/drip` faucet has been removed (KS-only funding)" and tries only the region
+relay's `/fund`. `fundBurner` throws outright without shielded funding, by
+design, so burners are never faucet-funded either.
+
+Two things follow. An operator provisioning a **funded private key** — a real
+account with real value — is doing it for a path that never executes. And the
+promised degradation ("falls back to the public faucet") describes behaviour
+that no longer exists: with no relay, `sponsorGas` returns
+`{ funded: false, reason: "no-faucet (KS-only funding)" }` and that is the end
+of it.
+
+Left open because the fix is a decision, not a patch: either delete the dead
+faucet (`requestDrip`, `web/functions/api/drip.ts`, the ops step) or reconnect
+it. Deleting is the smaller change and matches the KS-only funding stance the
+code already takes.
+
+*Surfaced by* the degradation matrix (`web/src/degradation.test.ts`), which
+pins the actual behaviour — `sponsorGas` declining with `no-faucet` — so
+whichever way this is resolved, the test says what the code really does.
 
 ## 2. `/fund` can double-fund inside a 250 ms window — **open**
 

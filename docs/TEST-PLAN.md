@@ -21,10 +21,10 @@ All three tiers pass today.
 | Tier | Runner | Tests | Covers |
 |---|---|---|---|
 | `test/*.ts` | `npx hardhat test` | 211 | contracts, ZK verifiers, invariant fuzz, upgradability, **chain-backed relay endpoints** |
-| `web/src/*.test.ts` | `cd web && npx vitest run` | 105 | 14 of 34 client modules, incl. **all four ops consoles' logic** |
+| `web/src/*.test.ts` | `cd web && npx vitest run` | 117 | 15 of 34 client modules, incl. **all four ops consoles' logic** |
 | `venue-node/*.test.mjs` | `cd venue-node && node --test` | 73 | economics, scorer, swap, treasury, agent, shieldkeeper, **relay HTTP surface** |
 
-**389 tests, all green**, and all of them now run in CI (§7 E1). The contract tier is the strong part and deserves
+**401 tests, all green**, and all of them now run in CI (§7 E1). The contract tier is the strong part and deserves
 saying so: a seeded-PRNG invariant campaign (`test/invariant.test.ts`) asserts
 escrow conservation and vault solvency after *every* operation and reproduces
 failures from a printed seed; the verifier tests pin fail-safe-before-VK and
@@ -400,9 +400,31 @@ determinism bug there silently re-links orders, defeating the customer's primary
 protection. Then `chain.ts` (519 lines, runtime router resolution), `relay.ts`,
 `token.ts`, `zk.ts`.
 
-☐ **D3 — Degradation matrix.** KV unbound, no relay reachable, no IPFS, no
-faucet secret, no VAPID key. [REMAINING-ACTIONS.md](REMAINING-ACTIONS.md) §1
-claims each of these degrades gracefully; nothing tests it.
+✅ **D3 — Degradation matrix** (`web/src/degradation.test.ts`, 12 tests). Each
+optional backend removed, asserting the *documented* behaviour rather than
+merely "it didn't throw":
+
+- **Channel with no KV and no relay** — `open()` resolves, `poll()` returns an
+  empty thread, `sendLoc` reports `false`, and `send()` gives the friendly
+  "waiting for the other party" rather than a transport crash. The topic still
+  derives locally, so order identity never depends on a service.
+- **IPFS unconfigured** — `publishMenu` returns a `local://` URI with
+  `shared: false`, readable back on that device; an `ipfs://` menu read once
+  stays readable when every gateway dies; a legacy `demo://` URI returns null
+  instead of being guessed at.
+- **No relay** — `relayConfigured()` and `forwarderAvailable()` both false, so
+  callers take the direct gas-paying path; `sponsorGas` declines cleanly.
+- **No shielded funding** — `fundBurner` throws. This is the one case that must
+  *not* degrade quietly: a burner funded outside the pool carries an on-chain
+  edge back to the customer, so absence has to be an error, not a fallback.
+- **No VAPID key** — push reports itself off and subscribing is a no-op.
+
+Two things this turned up. It found that the **faucet ops step is stale**
+([TEST-FINDINGS.md](TEST-FINDINGS.md) #14) — `/api/drip` has no callers, so the
+documented "falls back to the public faucet" degradation does not exist. And a
+mutation showed the menu tests were covering only *one* of two failure branches:
+an unbound KV answers 503 (`res.ok`), a dead host rejects (`catch`), and
+removing the catch fallback survived the suite until a case was added for it.
 
 ☐ **D4 — Local-chain full-lifecycle e2e.** A hardhat-node variant of
 `scripts/privacy/live-order-e2e.mjs`, so the same lifecycle coverage runs per-PR
