@@ -25,6 +25,7 @@
 
 import http from "node:http";
 import { readFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
 import { createHash, randomBytes } from "node:crypto";
 import { JsonRpcProvider, Wallet, Contract, Interface, parseEther, formatEther, isAddress, keccak256, solidityPacked } from "ethers";
 import { rebateWei, withdrawFeeWei, coversCost, withinBudget, windowSpent } from "./economics.mjs";
@@ -108,9 +109,15 @@ const FEE_TOKEN_DECIMALS = Number(process.env.RELAY_FEE_TOKEN_DECIMALS || 6);
 const SWAP_POLL_MS = Number(process.env.SWAP_POLL_MS || 300_000);
 const GAS_SWAP = 2_000_000n;
 
+// Run-as-a-program vs. imported-by-a-test. The module binds a port and exits the
+// process on a missing key, both of which a test importing it must not inherit —
+// so every such side effect is gated on this. See relay.test.mjs.
+const IS_MAIN = !!process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url;
+
 if (!KEY) {
   console.error("[relay] RELAY_PRIVATE_KEY not set. Exiting.");
-  process.exit(1);
+  if (IS_MAIN) process.exit(1);
+  throw new Error("RELAY_PRIVATE_KEY not set");
 }
 
 const provider = new JsonRpcProvider(RPC, undefined, { staticNetwork: true });
@@ -421,7 +428,7 @@ async function readJson(req) {
   return body;
 }
 
-const server = http.createServer(async (req, res) => {
+async function handler(req, res) {
   const origin = req.headers.origin;
   if (req.method === "OPTIONS") return send(res, 204, {}, origin);
   // Read once, use for rate limiting, never store: `clientKey` hashes it under a
@@ -886,7 +893,9 @@ const server = http.createServer(async (req, res) => {
   } catch (e) {
     return send(res, 500, { error: e?.shortMessage ?? e?.message ?? String(e) }, origin);
   }
-});
+}
+
+const server = http.createServer(handler);
 
 // ── Fee-recovery loop (F6-swap): sell accrued USDC → PAS when gas dips ────────
 // When the relay's native gas falls below treasury.cfg.floorWei, sweep its accrued
@@ -939,7 +948,11 @@ async function shieldKeeperTick() {
 }
 if (SHIELD_KEEPER) setInterval(shieldKeeperTick, SHIELD_KEEPER_POLL_MS).unref?.();
 
-server.listen(PORT, () => {
+// Exported for tests: they listen on an ephemeral port themselves. Importing
+// this module must never bind PORT or the suite collides with a running relay.
+export { server, handler, relay, provider };
+
+if (IS_MAIN) server.listen(PORT, () => {
   console.log(`[relay] FARE venue relay on :${PORT}`);
   console.log(`[relay] relay account: ${relay.address}`);
   console.log(`[relay] settlement:    ${settlementAddr}`);

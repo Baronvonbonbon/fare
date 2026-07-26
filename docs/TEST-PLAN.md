@@ -19,9 +19,9 @@ All three tiers pass today.
 |---|---|---|---|
 | `test/*.ts` | `npx hardhat test` | 144 | contracts, ZK verifiers, invariant fuzz, upgradability |
 | `web/src/*.test.ts` | `cd web && npx vitest run` | 86 | 11 of 31 client modules |
-| `venue-node/*.test.mjs` | `cd venue-node && node --test` | 51 | economics, scorer, swap, treasury, agent, shieldkeeper |
+| `venue-node/*.test.mjs` | `cd venue-node && node --test` | 73 | economics, scorer, swap, treasury, agent, shieldkeeper, **relay HTTP surface** |
 
-**281 tests, all green.** The contract tier is the strong part and deserves
+**303 tests, all green**, and all of them now run in CI (§7 E1). The contract tier is the strong part and deserves
 saying so: a seeded-PRNG invariant campaign (`test/invariant.test.ts`) asserts
 escrow conservation and vault solvency after *every* operation and reproduces
 failures from a printed seed; the verifier tests pin fail-safe-before-VK and
@@ -33,25 +33,27 @@ Slither is in CI with zero high-severity findings ([SECURITY-REVIEW.md](SECURITY
 
 | Surface | Size | Tests |
 |---|---|---|
-| `venue-node/relay.mjs` — 16 HTTP endpoints, holds `RELAY_PRIVATE_KEY` | 953 lines | **0** |
+| `venue-node/relay.mjs` — 16 HTTP endpoints, holds `RELAY_PRIVATE_KEY` | 953 lines | 🟡 22 (no-chain surface only — §5 C1) |
 | `web/src/ops/` — four consoles + shell (dispute resolve/slash, governance, pause, upgrade) | 1,385 lines | **0** |
 | `web/src/App.tsx` | 2,689 lines | **0** |
 | `chain.ts`, `shieldnote.ts`, `relay.ts`, `shield.ts`, `token.ts`, `wallets.ts`, `zk.ts` | ~1,700 lines | **0** |
 
 Three structural facts behind that table:
 
-**All 281 tests run only when a human types the command.** CI is a single
-Slither job, path-filtered to `contracts/**` + `hardhat.config.ts`, with
-`fail-on: none`. A change to `relay.mjs`, `web/src/`, or `venue-node/` triggers
-nothing at all.
+**~~All 281 tests run only when a human types the command.~~** ✅ Fixed by
+`.github/workflows/test.yml` — three jobs, no path filter, real gates. The
+original problem: CI was a single Slither job, path-filtered to `contracts/**`,
+so a change to `relay.mjs` or `web/src/` triggered nothing at all.
 
-**The relay cannot be unit-tested as written.** `relay.mjs` exports nothing,
-calls `server.listen` at import, and reads 30 `process.env` vars at module
-scope. Extracting a `handler(req, res)` plus injectable deps (provider, wallet,
-config) is a hard prerequisite for §5 — and it is worth doing *before* more
-features land on that file, not after. It is also the network-facing service
-that holds a funded key, which makes it the highest-risk untested surface in
-the repo.
+**~~The relay cannot be unit-tested as written.~~** ✅ Fixed. `relay.mjs` bound
+its port at import and called `process.exit` on a missing key, so importing it
+from a test was impossible. Both side effects are now gated on an `IS_MAIN`
+check and the module exports `{ server, handler, relay, provider }` — a
+17-line change with no logic touched, deliberately minimal because this file is
+deployed live. Full dependency injection (provider, wallet, config) is still
+*not* done: config is read once at module scope, so a test needing different
+settings re-imports under a fresh query string (`./relay.mjs?rate-limit`). That
+works and is used, but a proper factory would be cleaner if this file grows.
 
 **There is no deterministic cost measurement.** No `hardhat-gas-reporter`, no
 `solidity-coverage`. `scripts/privacy/measure-costs.mjs` is the right work —
@@ -134,14 +136,38 @@ correctness but never as a *decorrelator*, which is its actual purpose.
 
 ## 5. Security
 
-☐ **C1 — Relay endpoint suite.** *The largest single gap.* All 16 endpoints —
+🟡 **C1 — Relay endpoint suite.** *The largest single gap.* All 16 endpoints —
 `/health` `/msg` `/photo` `/fund` `/onboard` `/submit` `/forward` `/withdraw`
 `/shield-queue` `/commit-bid` `/bidbox` `/revoke-bid` `/shield-note`
 `/shield-note-spend` `/shield-claim` `/shield-withdraw` — against a matrix of:
 authorization bound to the correct account, replay (nonce/deadline reuse
 rejected), malformed input returning 4xx rather than crashing, oversized bodies,
 rate limiting, and injection on the `/msg` and `/photo` topic parameters.
-Gated on the handler extraction in §2.
+
+**First chunk done** (`venue-node/relay.test.mjs`, 22 tests): everything
+reachable without a chain — routing, CORS origin handling, the `/msg` and
+`/photo` in-memory stores, the rate limiter, malformed transport, and the
+pre-chain validation branches of `/fund`, `/submit` and `/onboard`. The suite
+points the relay at an unroutable RPC, so every passing assertion also proves
+the path under test never reached for the chain.
+
+Two things that chunk turned up:
+
+- **An oversized body returns 500, not 413.** `readJson` throws past the
+  endpoint's own limit check, and the catch-all maps it to 500. The `/msg` and
+  `/photo` handlers do return a proper 413 for bodies within the 256 KiB
+  transport cap. Cosmetic, but it means a client cannot distinguish "too big"
+  from "relay broke". Not changed here — behavioral fix, not a test.
+- **A leak test of mine was vacuous** and only a positive control caught it: it
+  asserted `_pad` never lands in a stored message, but `_pad` is a body-level
+  key that never had a path into `msg`, so it passed against a deliberately
+  broken relay too. Rewritten to pin what is actually observable — that padded
+  and unpadded bodies behave identically, which is the property the client's
+  metadata defense depends on. This is B2 justifying itself on the first use.
+
+**Remaining (second chunk, needs a local chain):** the authorization, replay
+and signature matrix on `/submit`, `/forward`, `/withdraw` and the four
+`/shield-*` endpoints.
 
 ☐ **C2 — Relay key custody.** `/fund` cannot be drained as an unbounded faucet
 (the budget window holds under concurrency), and the profitability guard
@@ -198,7 +224,11 @@ matrix is cheap and complete.
 This is the multiplier — it converts 281 existing tests from decorative to
 load-bearing.
 
-☐ **E1** — CI runs all three suites on every PR. Hours of work.
+✅ **E1** — CI runs all three suites on every PR
+(`.github/workflows/test.yml`). Validated against a clean checkout, which
+caught that `test/shieldnote-vault.test.ts` needs proving artifacts that are
+gitignored; the job restores them from the byte-identical tracked copies under
+`web/public/shield/`.
 ☐ **E2** — `solidity-coverage` + `vitest --coverage`, with a floor.
 ☐ **E3** — Nightly: live Paseo e2e, cost ledger, Mythril, wide fuzz seeds
 (`for s in $(seq 1 50); do FUZZ_SEED=$s npx hardhat test test/invariant.test.ts; done`).
@@ -208,9 +238,11 @@ load-bearing.
 
 ## 8. Priority
 
-1. **E1 — wire CI.** Cheapest item here and it makes every other test real.
-2. **C1 / C2 — relay endpoints**, after the handler extraction. Largest
-   untested attack surface, and it holds a funded key.
+1. ✅ **E1 — wire CI.** Cheapest item here and it makes every other test real.
+2. 🟡 **C1 / C2 — relay endpoints.** The handler extraction and the no-chain
+   half are done; the authorization/replay matrix needs a local chain and is
+   the next thing to pick up. Largest untested attack surface, and it holds a
+   funded key.
 3. **B1 / B2 — leak sweep + positive controls.** The privacy claims are the
    product; today they are asserted per-test and never negatively controlled.
 4. **A1 / A3 — gas snapshot + committed cost ledger.**
