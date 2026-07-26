@@ -22,9 +22,9 @@ All three tiers pass today.
 |---|---|---|---|
 | `test/*.ts` | `npx hardhat test` | 211 | contracts, ZK verifiers, invariant fuzz, upgradability, **chain-backed relay endpoints** |
 | `web/src/*.test.ts` | `cd web && npx vitest run` | 117 | 15 of 34 client modules, incl. **all four ops consoles' logic** |
-| `venue-node/*.test.mjs` | `cd venue-node && node --test` | 73 | economics, scorer, swap, treasury, agent, shieldkeeper, **relay HTTP surface** |
+| `venue-node/*.test.mjs` | `cd venue-node && node --test` | 79 | economics + **break-even**, scorer, swap, treasury, agent, shieldkeeper, **relay HTTP surface** |
 
-**401 tests, all green**, and all of them now run in CI (§7 E1). The contract tier is the strong part and deserves
+**407 tests, all green**, and all of them now run in CI (§7 E1). The contract tier is the strong part and deserves
 saying so: a seeded-PRNG invariant campaign (`test/invariant.test.ts`) asserts
 escrow conservation and vault solvency after *every* operation and reproduces
 failures from a printed seed; the verifier tests pin fail-safe-before-VK and
@@ -103,11 +103,35 @@ move independently. The note *spend* is not yet measured — it needs a real
 Groth16 proof against a live tree root, which is covered functionally in
 `shieldnote-vault.test.ts` but is slow to reproduce here.
 
-☐ **A2 — Relay break-even table.** A pure-function test over
-`venue-node/economics.mjs`: at what fare does the relay actually profit, given
-`relayRebateBps`, `withdrawFeeBps` and the flat service fee? The profitability
-*guard* is tested today; the economics it encodes are not. Deterministic, no
-chain, no relay.
+✅ **A2 — Relay break-even table** (`venue-node/breakeven.test.mjs`, 6 tests).
+Adds `breakEvenFareWei` to `economics.mjs` — the exact inverse of the guard: the
+least fare at which settling an order pays for itself. The guard answers "is
+this one worth relaying?"; this answers "from what fare up is relaying worth
+doing at all?", which is the question an operator setting `relayRebateBps` or
+`relayServiceFee` actually has.
+
+Costs come from `gas-snapshot.json` (measured, §3 A1) at Paseo's 1000 gwei, not
+from an estimate. **The answer, at deployed parameters:**
+
+| | |
+|---|---|
+| Relayed gas per delivery (pickup + ZK dropoff incl. the real verify) | **0.7335 PAS** |
+| Break-even fare, `relayRebateBps=2000` rebate **alone** | **183.37 PAS** |
+| Flat service fee that removes fare-dependence entirely | **0.9168 PAS / order** |
+| Cash-out at which the 1% withdraw fee covers its own gas | **11.24 PAS** |
+
+The rebate is `fare × feeBps × relayRebateBps / 1e8` = **0.5% of the fare** at
+the deployed 250/2000 — half a percent of one order to cover that order's entire
+gas. A 183 PAS break-even fare is two orders of magnitude above any real food
+delivery, which is the quantified version of the warning already in
+[REMAINING-ACTIONS.md](REMAINING-ACTIONS.md) §1. **The flat service fee is not a
+tuning knob, it is the mechanism** — it is what makes a relay viable at all, and
+it needs to be ≈0.92 PAS at these gas prices.
+
+Correctness rests on an exactness property checked over 640 parameter
+combinations: at the returned fare the guard passes, and at one wei less it
+fails. Mutation-checked — and the first version of that property was vacuous
+(see [TEST-FINDINGS.md](TEST-FINDINGS.md) #8–11, sixth instance).
 
 ☐ **A3 — Promote `measure-costs.mjs`.** Split it into a local-chain mode (CI,
 stubbed relays) and a live-Paseo mode (nightly), both emitting the same ledger

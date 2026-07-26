@@ -23,6 +23,7 @@ Ordered by what a reader should act on, not by discovery order.
 | 7 | Tests need ZK artifacts that are gitignored | Medium (process) | ✅ Fixed |
 | 8–11 | Four assertions that passed for the wrong reason | — | ✅ All fixed |
 | 12 | `insertShieldNote` costs 730,615 gas | Informational | 📌 Pinned |
+| 15 | The bps rebate cannot pay for a relay at any realistic fare | **Medium** (economics) | 📌 Quantified |
 
 ---
 
@@ -240,6 +241,36 @@ From `gas-snapshot.json` (18 paths, ±5% CI gate):
 
 Not yet measured: the shielded note **spend**, which needs a real Groth16 proof
 against a live tree root (A1 follow-on).
+
+## 15. The bps rebate cannot pay for a relay — **quantified**
+
+Measured, not estimated: `gas-snapshot.json` at Paseo's 1000 gwei.
+
+| | |
+|---|---|
+| Relayed gas per delivery (pickup + ZK dropoff incl. the real verify) | **0.7335 PAS** |
+| Break-even fare on the `relayRebateBps=2000` rebate **alone** | **183.37 PAS** |
+| Flat service fee that removes fare-dependence entirely | **0.9168 PAS / order** |
+| Cash-out at which the 1% withdraw fee covers its own gas | **11.24 PAS** |
+
+The rebate is `fare × feeBps × relayRebateBps / 1e8`, which at the deployed
+250 / 2000 is **0.5% of the fare** — half a percent of one order, asked to cover
+that order's entire gas. Break-even lands at 183 PAS, two orders of magnitude
+above any real food delivery.
+
+This is not new in kind — REMAINING-ACTIONS §1 already warned that "with real
+(tiny) testnet fares the relay will decline settlement (rebate ≪ gas)". What is
+new is the number, and what the number implies: **the flat service fee is not a
+tuning knob, it is the mechanism.** A relay is viable because of F6-flat, not
+because of the bps rebate, and it needs to be set to ≈0.92 PAS per order at
+these gas prices. `relayRebateBps` is close to decorative by comparison.
+
+Worth revisiting if gas prices move: the whole table is a function of the
+snapshot, so re-running the suite after a gas change re-derives it.
+
+*Pinned by* `venue-node/breakeven.test.mjs`, including an assertion that a
+2 PAS fare does **not** cover — so a parameter change that alters this
+conclusion fails the suite rather than passing quietly.
 
 ---
 
