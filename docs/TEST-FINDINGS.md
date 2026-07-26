@@ -216,6 +216,10 @@ Worth recording, because "we looked and it held" is a result:
   actually accept `upgradeContract` for — `pauseRegistry` is not `FareUpgradable`
   and correctly gets `register()` instead. A drift in either would not error; it
   would silently address a different registry slot.
+- **All 60 gated functions reject all 10 roles that should not hold them** —
+  530 checks, each matched against the specific authorization error rather than
+  merely "it reverted". No missing modifier, no over-restriction. The table is
+  checked for completeness against the contracts, so it cannot fall behind them.
 - **Contract-level authorization holds** on `withdrawFor` (signature bound to the
   account, unsigned recipients rejected, replays rejected), `/forward` (target
   allowlist, no value, no forged sender), and `insertShieldNoteFor` (a relay

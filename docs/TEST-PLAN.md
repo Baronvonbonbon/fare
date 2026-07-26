@@ -20,11 +20,11 @@ All three tiers pass today.
 
 | Tier | Runner | Tests | Covers |
 |---|---|---|---|
-| `test/*.ts` | `npx hardhat test` | 208 | contracts, ZK verifiers, invariant fuzz, upgradability, **chain-backed relay endpoints** |
+| `test/*.ts` | `npx hardhat test` | 211 | contracts, ZK verifiers, invariant fuzz, upgradability, **chain-backed relay endpoints** |
 | `web/src/*.test.ts` | `cd web && npx vitest run` | 105 | 14 of 34 client modules, incl. **all four ops consoles' logic** |
 | `venue-node/*.test.mjs` | `cd venue-node && node --test` | 73 | economics, scorer, swap, treasury, agent, shieldkeeper, **relay HTTP surface** |
 
-**386 tests, all green**, and all of them now run in CI (§7 E1). The contract tier is the strong part and deserves
+**389 tests, all green**, and all of them now run in CI (§7 E1). The contract tier is the strong part and deserves
 saying so: a seeded-PRNG invariant campaign (`test/invariant.test.ts`) asserts
 escrow conservation and vault solvency after *every* operation and reproduces
 failures from a printed seed; the verifier tests pin fail-safe-before-VK and
@@ -311,10 +311,33 @@ forwards are already covered by `fare.test.ts`.
 (the budget window holds under concurrency), and the profitability guard
 declines with 402 rather than burning the key.
 
-☐ **C3 — Access-control matrix.** 94 external/public functions ×
-{owner, router, arbiter, guardian, keeper, stranger} → assert the exact set that
-succeeds. Individually covered in places today, but not systematically; a matrix
-catches a modifier dropped during the next upgrade.
+✅ **C3 — Access-control matrix** (`test/access-control.test.ts`). All 60 gated
+state-changing functions × 10 roles — **530 denial checks** plus 60 permission
+checks, in ~1 s.
+
+Three things make it worth more than the sum of its assertions:
+
+- **Denials are matched against the specific authorization error**, decoded from
+  raw revert data rather than read off Hardhat's inferred message (several of
+  these come back as "couldn't infer the reason"). A call that reverts because
+  the arguments were nonsense would otherwise pass as though authorization had
+  held — the failure mode that makes most such matrices decorative.
+- **The permitted role is checked too**, but only that it is not stopped *by the
+  access check*. It may still revert on state — `disputes.resolve` as the
+  arbiter hits `bad-status` because no dispute exists — and that is a different
+  question, owned by the suites that drive those flows.
+- **The table is checked for completeness against the contracts.** A modifier
+  dropped, or a new gated function added, breaks no other test in the repo,
+  because no other test calls that function as the wrong caller. It breaks this
+  one. Roles are held by *different* accounts throughout, so "authorized is
+  denied on an owner-gated call" is a real assertion rather than an artifact.
+
+Contract-held roles (settlement, disputes, router) need no impersonation: the
+sweep uses `eth_call` with an arbitrary `from`.
+
+Mutation-checked in both directions: removing `onlyOwner` from
+`setShieldKeeper` fails 9 of the 530 checks by name; deleting a row from the
+table fails the completeness check.
 
 ☐ 🔒 **C4 — Deployed-VK ↔ committed-zkey hash check.** `setVerifyingKey` is
 lock-once and both setups are still single-party, which makes a swapped zkey
@@ -423,7 +446,8 @@ gitignored; the job restores them from the byte-identical tracked copies under
    ±5% gate); A3 (splitting `measure-costs.mjs` into local + live modes) remains.
 5. ✅ **C5 / D1 — ops consoles.** Done (29 tests); found and fixed a defect
    that set governance parameters to zero.
-6. **C3 — access-control matrix**, then **D3**, then the remainder.
+6. ✅ **C3 — access-control matrix.** Done (530 denial checks, self-maintaining).
+   Then **D3**, then the remainder.
 
 B3 is deliberately left as a decision rather than a recommendation: it is worth
 adopting only if the privacy posture should be pinned by tests.
