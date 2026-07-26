@@ -405,6 +405,7 @@ something to seal). §6 turned out not to depend on them at all — see above.
 
 ## See also
 
+- [PRIVACY-STATUS.md](PRIVACY-STATUS.md) — what is actually protected today, by role
 - [PRIVACY.md](PRIVACY.md) — the risk analysis and what is already closed
 - [SHIELDED-FUNDING.md](SHIELDED-FUNDING.md) — funding-in, shipped
 - [KUSAMA-SHIELD-FINDINGS.md](KUSAMA-SHIELD-FINDINGS.md) — pool constraints (Issues 1–4)

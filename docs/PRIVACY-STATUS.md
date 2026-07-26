@@ -1,0 +1,113 @@
+# FARE — where privacy stands, by role
+
+Status as of the 2026-07-26 migration (`scripts/upgrade-privacy.ts`), which put
+privacy phases 1–4 on the live Paseo deployment.
+
+This is the "what is actually protected" reference. The *designs* live in
+[PRIVACY-TIERS.md](PRIVACY-TIERS.md), the original risk analysis in
+[PRIVACY.md](PRIVACY.md), and the live measurements in
+[E2E-PRIVACY-LIVE.md](E2E-PRIVACY-LIVE.md) and [E2E-PRIVACY-ZK.md](E2E-PRIVACY-ZK.md).
+
+**Read the Open columns first.** Everything closed is closed; the value of a
+document like this is in what still leaks.
+
+---
+
+## Customer
+
+| Closed | How |
+|---|---|
+| Identity across orders | A fresh burner wallet per order (`web/src/wallets.ts`), so consecutive orders share no on-chain identity |
+| Funding those burners | Shielded through Kusama Shield — the funding edge that would otherwise re-link a burner to the main wallet |
+| Drop location | ZK proximity proof: no coordinate ever enters calldata, storage, or an event |
+| Order contents and chat | End-to-end encrypted, per-order keys |
+
+| Open | Why it matters |
+|---|---|
+| **Order value and tip are public** | `OrderCreated` publishes both. Spend per order is legible forever. |
+| **Delivery timing is public** | When a delivery completes signals when someone is home — burglary and stalking relevance, independent of coordinates. PRIVACY.md's risk #4, still unaddressed. |
+| **Which venue an order is for** | `orders(orderId).venueId` is public **storage**, not merely an event. |
+
+One nuance on the last row: because per-order burners already shipped, that edge
+is *burner* ↔ venue, not *person* ↔ venue. It leaks a venue's order volume more
+than a customer's habits — which is why the phase-4 plan built against the older
+framing was retargeted (PRIVACY-TIERS §6).
+
+## Driver
+
+Drivers were the most exposed party a month ago and are now the most improved.
+
+| Closed | How |
+|---|---|
+| Revenue graph | Payouts enter the shielded pool. With the ZK path the anonymity set is every unspent note in the tree, not a batch. |
+| Name, vehicle, plate, contact | On-chain is `keccak256(profile)`; the details are revealed only to the order counterparty and refused unless they hash to that commitment |
+| Losing bids | Sealed: only a hash is committed, and a relay submits it, so the chain never sees who bid or how much |
+| Pickup coordinates | Coarsened to ~33 m and no longer emitted |
+
+| Open | Why it matters |
+|---|---|
+| **Persistent identity** | Stake, reputation, and the winning assignment are address-bound. Anonymous driver credentials (membership + reputation proof) were never in scope. |
+| **Per-order earnings** | `OrderDelivered` publishes the amount paid. |
+| **The winning bid is public** | Unavoidable in this design — the winner performs the delivery and is paid. Sealed bids remove the losers, which is most of the graph, not all of it. |
+| **The open-bid path still exists** | Sealed bids are additive. A driver bidding through the old path still publishes price and availability; the UI defaults to sealed and says so, but the choice is theirs. |
+
+## Venue
+
+| Closed | How |
+|---|---|
+| Payout destination | The same shielded paths drivers use |
+
+| Open | Why it matters |
+|---|---|
+| **Location and menu are public** | **By design.** A venue is a business address; encrypting it breaks discovery and navigation for no adversary-visible gain (PRIVACY-TIERS §2). |
+| **Order volume and timing** | Derivable from the venue edge above. |
+| **Settlement names the venue** | The payout credits `venues.payoutOf(venueId)`. Closing this means venue payouts entering the note pool as commitments so the venue is never named — research-scale, tracked as phase 4c. |
+
+## Cross-cutting
+
+| Open | Severity |
+|---|---|
+| **Both trusted setups are single-party** — the proximity circuit and the shield-note circuit | **Mainnet-blocking.** `setVerifyingKey` is lock-once, so a real multi-party ceremony with a published transcript must precede any mainnet deploy. This is the top item. |
+| **Relay metadata** | Request bodies are padded to fixed blocks, a note spend routes away from the relay that saw its insert, and client addresses are hashed under a rotating salt so no table of callers is kept. But with a single relay configured there is no split to make, and a malicious relay can still drop a disclosure capsule and get an honest party ruled against. |
+| **Anonymity is only as large as usage** | An empty note tree is an anonymity set of one. The mechanisms are right; the privacy is whatever adoption provides. |
+| **Amounts are public everywhere** | Order values, fees, and payouts. Hiding them needs confidential escrow, which nothing here provides. |
+| **A shield keeper can divert the ticket-path buffer** | Not currently reachable: no keeper is authorized on the live deployment, and the ZK path needs none. It becomes real the moment someone runs `setShieldKeeper`. |
+
+---
+
+## What is actually live
+
+Migrated 2026-07-26 (PR #11). The old vault stays live so existing balances
+remain withdrawable — the freeze-and-drain pattern.
+
+```
+vault           0x1ebE61af02d4b5E6083089f220e5D95766643a13   (old 0x51bD2e55… draining)
+orders          0x0e638033a89Fa4367acEbb57F62f59776d1c6437
+shieldVerifier  0x97C3DA8aD06E99B195D4B2B86dfa18d23387fDcD
+shieldPool      0x7d5a496bD61b631025A828d9049f6A68e007e0dC   (Kusama Shield)
+poseidon        0x1d165f6fE5A30422E0E2140e91C8A9B800380637   (Paseo precompile)
+buckets 1 / 5 / 25 PAS · minBatch 8 · dwell 300 s · no keeper authorized
+```
+
+**Not yet exercised against this deployment.** The live verification runs behind
+[E2E-PRIVACY-LIVE.md](E2E-PRIVACY-LIVE.md) and [E2E-PRIVACY-ZK.md](E2E-PRIVACY-ZK.md)
+used standalone vaults, not this one, and the migration is hours old. The UI
+paths are wired and typechecked but have not been driven end to end here.
+
+## If you only fix three things
+
+1. **Run a real trusted-setup ceremony.** Everything else is testnet-shaped
+   without it, and the lock-once VK means it cannot be retrofitted.
+2. **Get a second relay into the pool.** Half the phase-3b work is inert with
+   one — the split it performs has nowhere to route.
+3. **Decide about amounts.** Values, tips, and payouts are the largest remaining
+   public surface for every role, and no amount of identity privacy hides them.
+
+## See also
+
+- [PRIVACY-TIERS.md](PRIVACY-TIERS.md) — designs, threat model, phase table
+- [PRIVACY.md](PRIVACY.md) — the original location-exposure analysis
+- [E2E-PRIVACY-LIVE.md](E2E-PRIVACY-LIVE.md) — phases 1–2 live, and the
+  proof-size ceiling that reshaped them
+- [E2E-PRIVACY-ZK.md](E2E-PRIVACY-ZK.md) — phase 3 live, and why that ceiling
+  stopped applying
