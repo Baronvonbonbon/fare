@@ -81,8 +81,10 @@ describe("relay shielded endpoints", function () {
 
   const BUCKET = PAS(1);
 
-  // Spaced past the provider's nonce cache — see the KNOWN DEFECT case in
-  // relay-endpoints.test.ts for why every relayed submission needs this.
+  /// Spaced past the ~250 ms read cache in the relay's own provider (ethers
+  /// caches eth_call per tag), so each request sees the vault nonce the previous
+  /// one advanced. Not the nonce-allocation defect — that is fixed, and proven
+  /// unspaced in relay-endpoints.test.ts.
   const post = async (path: string, body: any, url = keeperUrl) => {
     await new Promise((r) => setTimeout(r, 300));
     return fetch(`${url}${path}`, {

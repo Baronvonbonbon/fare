@@ -276,7 +276,30 @@ function orderIdFromReceipt(rc) {
 // ── tx serialization: chain all sends so concurrent requests don't collide on
 //    the relay account's nonce ──────────────────────────────────────────────
 let chain = Promise.resolve();
-const serialize = (fn) => (chain = chain.then(fn, fn));
+const serialize = (fn) =>
+  (chain = chain.then(fn, fn).catch((e) => { resyncNonce(); throw e; }));
+
+// ── nonce allocation ─────────────────────────────────────────────────────────
+// Serializing the sends orders them but does NOT give them distinct nonces.
+// Asking the chain per send fails two ways at once: getTransactionCount
+// defaults to "latest", which excludes a submitted-but-unmined transaction,
+// and ethers caches that read for ~250 ms on top. Two requests inside the same
+// block window therefore drew the SAME nonce and the node rejected the second —
+// not a narrow race on a chain with multi-second blocks, but anything from two
+// users arriving together (test/relay-endpoints.test.ts pins it).
+//
+// Track it here instead: seed once from the chain — "pending", so a transaction
+// already in the mempool is counted — then hand out increments. Every allocation
+// happens inside `serialize`, so there is exactly one in flight and no lock is
+// needed. On any failure the counter is dropped and re-seeded next time: a send
+// that never landed must not leave a gap, because the node would then queue
+// every later transaction behind a nonce that never arrives.
+let nextNonce = null;
+const resyncNonce = () => { nextNonce = null; };
+async function allocNonce() {
+  if (nextNonce === null) nextNonce = await provider.getTransactionCount(relay.address, "pending");
+  return nextNonce++;
+}
 
 // ── profitability-guard state + helpers ──────────────────────────────────────
 const gasSpent = new Map(); // orderId(string) → cumulative relayed cost (wei)
@@ -500,7 +523,7 @@ async function handler(req, res) {
       const cost = await estCostWei(() => provider.estimateGas({ from: relay.address, to: address, value: FUND_AMOUNT }), GAS_FUND);
       if (PROFIT_GUARD && !budgetRoom(cost)) return decline(res, "subsidy budget exhausted", { action: "fund" }, origin);
       const tx = await serialize(async () => {
-        const nonce = await provider.getTransactionCount(relay.address);
+        const nonce = await allocNonce();
         return relay.sendTransaction({ to: address, value: FUND_AMOUNT, nonce, gasLimit: GAS_FUND });
       });
       recordBudget(cost);
@@ -534,7 +557,7 @@ async function handler(req, res) {
       const cost = await estCostWei(() => provider.estimateGas({ from: relay.address, to: address, value: ONBOARD_SEED }), GAS_ONBOARD);
       if (PROFIT_GUARD && !budgetRoom(cost + ONBOARD_SEED)) return decline(res, "onboarding budget exhausted", { action: "onboard" }, origin);
       const tx = await serialize(async () => {
-        const nonce = await provider.getTransactionCount(relay.address);
+        const nonce = await allocNonce();
         return relay.sendTransaction({ to: address, value: ONBOARD_SEED, nonce, gasLimit: GAS_ONBOARD });
       });
       onboarded.add(address.toLowerCase());
@@ -572,7 +595,7 @@ async function handler(req, res) {
       }
 
       const tx = await serialize(async () => {
-        const nonce = await provider.getTransactionCount(relay.address);
+        const nonce = await allocNonce();
         return settlement[method](...args, { gasLimit: GAS_SETTLE, nonce });
       });
       if (method === "confirmDropoffZK") gasSpent.delete(String(orderId)); // settled → clear ledger
@@ -596,7 +619,7 @@ async function handler(req, res) {
       const cost = await estCostWei(() => forwarder.execute.estimateGas(request), GAS_FORWARD);
       if (PROFIT_GUARD && !budgetRoom(cost)) return decline(res, "subsidy budget exhausted", { action: "forward" }, origin);
       const tx = await serialize(async () => {
-        const nonce = await provider.getTransactionCount(relay.address);
+        const nonce = await allocNonce();
         return forwarder.execute(request, { gasLimit: GAS_FORWARD, nonce });
       });
       recordBudget(cost);
@@ -623,7 +646,7 @@ async function handler(req, res) {
         }, origin);
       }
       const tx = await serialize(async () => {
-        const nonce = await provider.getTransactionCount(relay.address);
+        const nonce = await allocNonce();
         return vault.withdrawFor(account, recipient, deadline, signature, { gasLimit: GAS_WITHDRAW, nonce });
       });
       return send(res, 200, { withdrawn: true, txHash: tx.hash, account }, origin);
@@ -664,7 +687,7 @@ async function handler(req, res) {
       let tx;
       try {
         tx = await serialize(async () => {
-          const nonce = await provider.getTransactionCount(relay.address);
+          const nonce = await allocNonce();
           return vault.queueShieldCreditFor(account, bucketWei, deadline, signature, { gasLimit: GAS_WITHDRAW, nonce });
         });
       } catch (e) {
@@ -699,7 +722,7 @@ async function handler(req, res) {
       let tx;
       try {
         tx = await serialize(async () => {
-          const nonce = await provider.getTransactionCount(relay.address);
+          const nonce = await allocNonce();
           return ordersW.commitBid(id, bidHash, revokeHash, { gasLimit: GAS_BID, nonce });
         });
       } catch (e) {
@@ -732,7 +755,7 @@ async function handler(req, res) {
       let tx;
       try {
         tx = await serialize(async () => {
-          const nonce = await provider.getTransactionCount(relay.address);
+          const nonce = await allocNonce();
           return ordersW.revokeBid(id, bidHash, revokeSecret, { gasLimit: GAS_BID, nonce });
         });
       } catch (e) {
@@ -763,7 +786,7 @@ async function handler(req, res) {
       let tx;
       try {
         tx = await serialize(async () => {
-          const nonce = await provider.getTransactionCount(relay.address);
+          const nonce = await allocNonce();
           return vault.insertShieldNoteFor(account, bucketWei, commit, deadline, signature, { gasLimit: GAS_NOTE, nonce });
         });
       } catch (e) {
@@ -803,7 +826,7 @@ async function handler(req, res) {
       let tx;
       try {
         tx = await serialize(async () => {
-          const nonce = await provider.getTransactionCount(relay.address);
+          const nonce = await allocNonce();
           return vault.depositShieldNoteZK(proof, rootN, nh, bucketWei, ksCommitment, { gasLimit: GAS_NOTE_SPEND, nonce });
         });
       } catch (e) {
@@ -869,7 +892,7 @@ async function handler(req, res) {
       let tx;
       try {
         tx = await serialize(async () => {
-          const nonce = await provider.getTransactionCount(relay.address);
+          const nonce = await allocNonce();
           return shieldPool.proxy_withdraw(pA, pB, pC, pubSignals, recipient, { gasLimit: GAS_SHIELD, nonce });
         });
       } catch (e) {
@@ -883,7 +906,7 @@ async function handler(req, res) {
       // Fee mode: forward (withdrawnValue − fee) to the burner; keep the fee.
       const net = withdrawnValue - SHIELD_FEE;
       const ftx = await serialize(async () => {
-        const nonce = await provider.getTransactionCount(relay.address);
+        const nonce = await allocNonce();
         return relay.sendTransaction({ to: burner, value: net, nonce, gasLimit: GAS_FORWARD_PAS });
       });
       return send(res, 200, { submitted: true, txHash: tx.hash, forwardTxHash: ftx.hash, mode: "fee", burner, net: formatEther(net), fee: formatEther(SHIELD_FEE) }, origin);
@@ -912,7 +935,7 @@ async function feeRecoveryTick() {
     if (vault) {
       const vBal = await vault.tokenBalanceOf(feeTokenAddr, relay.address).catch(() => 0n);
       if (vBal > 0n) await serialize(async () => {
-        const nonce = await provider.getTransactionCount(relay.address);
+        const nonce = await allocNonce();
         const tx = await vault.withdrawToken(feeTokenAddr, { gasLimit: GAS_WITHDRAW, nonce });
         await tx.wait?.(); return tx;
       });
@@ -939,7 +962,7 @@ async function shieldKeeperTick() {
     await keeperTick({
       vault, pool: shieldPool, provider, store: keeperStore, maxPerTx: SHIELD_MAX_PER_TX,
       submit: (call) => serialize(async () => {
-        const nonce = await provider.getTransactionCount(relay.address);
+        const nonce = await allocNonce();
         return call({ gasLimit: GAS_SHIELD_BATCH, nonce });
       }),
       log: (m) => console.log(`[relay] ${m}`),

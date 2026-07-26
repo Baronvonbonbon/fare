@@ -17,11 +17,11 @@ All three tiers pass today.
 
 | Tier | Runner | Tests | Covers |
 |---|---|---|---|
-| `test/*.ts` | `npx hardhat test` | 170 | contracts, ZK verifiers, invariant fuzz, upgradability, **chain-backed relay endpoints** |
+| `test/*.ts` | `npx hardhat test` | 171 | contracts, ZK verifiers, invariant fuzz, upgradability, **chain-backed relay endpoints** |
 | `web/src/*.test.ts` | `cd web && npx vitest run` | 86 | 11 of 31 client modules |
 | `venue-node/*.test.mjs` | `cd venue-node && node --test` | 73 | economics, scorer, swap, treasury, agent, shieldkeeper, **relay HTTP surface** |
 
-**329 tests, all green**, and all of them now run in CI (§7 E1). The contract tier is the strong part and deserves
+**330 tests, all green**, and all of them now run in CI (§7 E1). The contract tier is the strong part and deserves
 saying so: a seeded-PRNG invariant campaign (`test/invariant.test.ts`) asserts
 escrow conservation and vault solvency after *every* operation and reproduces
 failures from a printed seed; the verifier tests pin fail-safe-before-VK and
@@ -33,7 +33,7 @@ Slither is in CI with zero high-severity findings ([SECURITY-REVIEW.md](SECURITY
 
 | Surface | Size | Tests |
 |---|---|---|
-| ~~`venue-node/relay.mjs`~~ — 16 HTTP endpoints, holds `RELAY_PRIVATE_KEY` | 953 lines | ✅ 48 across two tiers (§5 C1) |
+| ~~`venue-node/relay.mjs`~~ — 16 HTTP endpoints, holds `RELAY_PRIVATE_KEY` | 953 lines | ✅ 49 across two tiers (§5 C1) |
 | `web/src/ops/` — four consoles + shell (dispute resolve/slash, governance, pause, upgrade) | 1,385 lines | **0** |
 | `web/src/App.tsx` | 2,689 lines | **0** |
 | `chain.ts`, `shieldnote.ts`, `relay.ts`, `shield.ts`, `token.ts`, `wallets.ts`, `zk.ts` | ~1,700 lines | **0** |
@@ -180,18 +180,30 @@ balance) and an expired deadline; `/forward` enforces the target allowlist,
 refuses to carry value, and cannot forge a sender; `/fund` will not double-fund;
 and the profitability guard declines a withdrawal it cannot cover (C2).
 
-**A defect this surfaced —** the relay picks its transaction nonce with
-`getTransactionCount(relay, "latest")`. That excludes a submitted-but-unmined
-transaction, and ethers caches the read for ~250 ms on top, so two submissions
-inside that window reuse a nonce and the node rejects the second.
-`serialize()` orders the sends but does not give them distinct nonces. On a
-chain with multi-second blocks this is not a narrow race — any two users
-hitting the relay in the same block window can trigger it, and at least one
-gets a 500. Pinned as a characterization test (`KNOWN DEFECT: two submissions
-in the same moment collide on the relay's nonce`) to be inverted when fixed;
-the fix is a locally-tracked nonce, which is safe because every send already
-goes through `serialize()`. **Not fixed here** — that is a behavioral change to
-a live-deployed service, not a test.
+**A defect this surfaced, since fixed —** the relay picked its transaction
+nonce with `getTransactionCount(relay, "latest")`. That excludes a
+submitted-but-unmined transaction, and ethers caches the read for ~250 ms on
+top, so two submissions inside that window drew the same nonce and the node
+rejected the second. `serialize()` ordered the sends but did not give them
+distinct nonces. On a chain with multi-second blocks that was not a narrow race
+— any two users arriving together could trigger it, and at least one got a 500.
+
+Fixed by allocating nonces locally: seeded once from the chain at `"pending"`,
+handed out as increments, and dropped on any failure so a send that never
+landed cannot leave a gap that stalls every later transaction. Safe without a
+lock precisely because every allocation happens inside `serialize()`. The
+characterization test was inverted into `submits concurrent requests on
+distinct nonces` (five unspaced concurrent `/fund` calls, all of which must
+land) plus `recovers its nonce after a failed submission`. Mutation-checked:
+restoring the old one-line behaviour fails the first of those.
+
+**A second, separate read-freshness property** turned up when the spacing came
+out, and is *not* fixed: ethers also caches `eth_getBalance` / `eth_call` for
+~250 ms, so two `/fund` calls for the same address inside that window both
+observe a zero balance and both pay out. Bounded by the rate limiter and the
+subsidy budget, so it is a small leak rather than a drain, but it means
+`/fund`'s "already funded" check is not authoritative under bursts. The relay
+tests space their calls past it deliberately, and say so.
 
 One consequence for anyone writing more of these: `relay.mjs` prefers
 `PINE_RPC` over `RELAY_RPC_URL`, and `hardhat.config.ts` calls `dotenv.config()`,
@@ -299,9 +311,10 @@ gitignored; the job restores them from the byte-identical tracked copies under
 ## 8. Priority
 
 1. ✅ **E1 — wire CI.** Cheapest item here and it makes every other test real.
-2. ✅ **C1 — relay endpoints.** Done across both tiers (48 tests): handler
+2. ✅ **C1 — relay endpoints.** Done across both tiers (49 tests): handler
    extraction, the no-chain surface, the authorization/replay matrix, and the
-   shielded endpoints. Turned up a live nonce-collision defect, still open.
+   shielded endpoints. Turned up a nonce-collision defect in the live relay,
+   now fixed and regression-tested.
    🟡 **C2** has its first case (the withdraw decline); the remaining budget and
    fee-recovery guards are not covered.
 3. **B1 / B2 — leak sweep + positive controls.** The privacy claims are the

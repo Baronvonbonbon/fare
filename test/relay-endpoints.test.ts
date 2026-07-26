@@ -77,18 +77,25 @@ describe("relay endpoints (against a real chain)", () => {
       venueSigner: HardhatEthersSigner;
   let chainId: bigint;
 
-  /// Every relayed submission is spaced past the provider's nonce cache. See the
-  /// "submits back-to-back" test at the bottom for why this is necessary and
-  /// what it says about the relay — without the wait, the second submission in
-  /// any pair reuses a nonce and 500s.
-  const NONCE_CACHE_MS = 300;
-  const post = async (path: string, body: any, url = relayUrl) => {
-    await new Promise((r) => setTimeout(r, NONCE_CACHE_MS));
-    return fetch(`${url}${path}`, {
+  const rawPost = (path: string, body: any, url = relayUrl) =>
+    fetch(`${url}${path}`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(body),
     });
+
+  /// Spaced past the ~250 ms read cache in the relay's own provider — ethers
+  /// caches `eth_getBalance` / `eth_call` per tag, so a request that depends on
+  /// the relay *observing* state a previous request just changed needs the gap.
+  ///
+  /// This is NOT the nonce defect (fixed — see the concurrency tests, which use
+  /// rawPost precisely to prove submissions no longer need spacing). It is a
+  /// read-freshness property of ethers, and it is worth knowing that it is real:
+  /// two /fund calls for the same address inside that window both see a zero
+  /// balance and both pay out.
+  const post = async (path: string, body: any, url = relayUrl) => {
+    await new Promise((r) => setTimeout(r, 300));
+    return rawPost(path, body, url);
   };
 
   /// EIP-712 Withdraw, as FareVault.withdrawFor verifies it. `nonceOverride`
@@ -363,43 +370,51 @@ describe("relay endpoints (against a real chain)", () => {
     expect(await orders.bidOf(1n, customer.address)).to.equal(0n);
   });
 
-  // ── a defect this tier surfaced ──────────────────────────────────────────
+  // ── concurrency ──────────────────────────────────────────────────────────
 
-  it("KNOWN DEFECT: two submissions in the same moment collide on the relay's nonce", async () => {
-    // Every send picks its nonce with `provider.getTransactionCount(relay, "latest")`.
-    // Two problems compound: "latest" excludes a submitted-but-unmined
-    // transaction, and ethers caches that read for ~250 ms — so a second
-    // submission arriving inside that window reuses the first one's nonce and
-    // the node rejects it. `serialize()` orders the sends but does not give
-    // them distinct nonces.
+  it("submits concurrent requests on distinct nonces", async () => {
+    // This was a real defect: nonces came from getTransactionCount(relay,
+    // "latest"), which excludes a submitted-but-unmined transaction, and ethers
+    // caches that read for ~250 ms on top — so two requests inside the same
+    // block window drew the SAME nonce and the node rejected the second.
+    // `serialize()` ordered the sends but did not give them distinct nonces.
     //
-    // On a chain with multi-second blocks this is not a narrow race: any two
-    // users hitting the relay in the same block window can hit it, and the
-    // second gets a 500. It shows up here only because the rest of this file
-    // deliberately spaces its calls past the cache.
-    //
-    // Fix would be a locally-tracked nonce (the relay already serializes every
-    // send, so a counter seeded once and resynced on error is sufficient).
-    // INVERT THIS ASSERTION once that lands — a failure here means it is fixed.
-    const a = ethers.Wallet.createRandom().address;
-    const b = ethers.Wallet.createRandom().address;
-    const raw = (address: string) =>
-      fetch(`${relayUrl}/fund`, {
-        method: "POST", headers: { "content-type": "application/json" },
-        body: JSON.stringify({ address }),
-      });
+    // On a chain with multi-second blocks that is not a narrow race: any two
+    // users arriving together could trigger it, and at least one got a 500.
+    // The relay now allocates nonces locally (seeded "pending", resynced on
+    // failure), which is safe precisely because every send is serialized.
+    const burners = [0, 1, 2, 3, 4].map(() => ethers.Wallet.createRandom().address);
 
-    const [r1, r2] = await Promise.all([raw(a), raw(b)]);
-    const failures = [r1, r2].filter((r) => r.status === 500);
-    expect(failures.length).to.be.gte(1, "expected a concurrent submission to fail");
-    expect((await failures[0].json()).error).to.match(/nonce/i);
+    // rawPost: no spacing at all. That is the point — these five submissions
+    // land inside the window that used to guarantee a nonce collision.
+    const responses = await Promise.all(burners.map((address) => rawPost("/fund", { address })));
+    for (const [i, r] of responses.entries()) {
+      expect(r.status, `burner ${i}: ${await r.clone().text()}`).to.equal(200);
+      expect((await r.json()).funded).to.equal(true);
+    }
 
-    // The practical consequence: at least one burner goes unfunded. How many
-    // depends on where in the window the second request lands — sometimes the
-    // first survives, sometimes the collision takes both — which is itself the
-    // argument that this is not a benign race.
-    const funded = [await ethers.provider.getBalance(a), await ethers.provider.getBalance(b)];
-    expect(funded.filter((x) => x > 0n).length).to.be.lessThan(2, "both submissions should not succeed");
+    // Every burner actually received its transfer — no silent drops.
+    for (const [i, b] of burners.entries()) {
+      expect(await ethers.provider.getBalance(b), `burner ${i} went unfunded`).to.be.greaterThan(0n);
+    }
+  });
+
+  it("recovers its nonce after a failed submission", async () => {
+    // A send that never landed must not leave a gap — the node would queue
+    // every later transaction behind a nonce that never arrives, wedging the
+    // relay until restart. Drive a guaranteed failure, then a normal request.
+    const bad = await post("/withdraw", {
+      account: stranger.address, // no vault balance → reverts
+      recipient: stranger.address,
+      deadline: (await time.latest()) + 3600,
+      signature: await signWithdraw(stranger, stranger.address, (await time.latest()) + 3600),
+    });
+    expect(bad.status).to.be.gte(400);
+
+    const burner = ethers.Wallet.createRandom().address;
+    const res = await post("/fund", { address: burner });
+    expect(res.status).to.equal(200, "the relay did not recover from a failed send");
+    expect(await ethers.provider.getBalance(burner)).to.be.greaterThan(0n);
   });
 
   // ── C2: the profitability guard, on its own instance ─────────────────────
