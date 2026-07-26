@@ -419,9 +419,10 @@ merely "it didn't throw":
   edge back to the customer, so absence has to be an error, not a fallback.
 - **No VAPID key** — push reports itself off and subscribing is a no-op.
 
-Two things this turned up. It found that the **faucet ops step is stale**
-([TEST-FINDINGS.md](TEST-FINDINGS.md) #14) — `/api/drip` has no callers, so the
-documented "falls back to the public faucet" degradation does not exist. And a
+Two things this turned up. It found that the **faucet ops step was stale**
+([TEST-FINDINGS.md](TEST-FINDINGS.md) #14) — `/api/drip` had no callers, so the
+documented "falls back to the public faucet" degradation did not exist; the
+faucet has since been deleted rather than reconnected. And a
 mutation showed the menu tests were covering only *one* of two failure branches:
 an unbound KV answers 503 (`res.ok`), a dead host rejects (`catch`), and
 removing the catch fallback survived the suite until a case was added for it.

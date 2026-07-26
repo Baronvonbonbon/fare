@@ -6,7 +6,8 @@
 // changes, by doing the two things that are safe to relay:
 //
 //   POST /fund   — sponsor gas: top up a user's burner so it can transact
-//                  (a region-local, decentralized version of /api/drip).
+//                  (region-local and decentralized — this replaced the
+//                  central faucet, which has since been deleted).
 //   POST /submit — relay a settlement call. confirmPickup / confirmDropoffZK are
 //                  the ONLY allowlisted methods: they carry their own signatures
 //                  / ZK proof and don't check msg.sender, so the relay can submit

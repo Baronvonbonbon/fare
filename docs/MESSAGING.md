@@ -57,7 +57,7 @@ split as venue-hosted RPC.
 ### Recommended path (phased)
 1. **P1 — Simple relay (bootstrap).** A tiny store-and-forward keyed by
    `(orderId, seq)`: `POST /api/msg` to append a sealed blob, `GET /api/msg?order=`
-   to fetch the thread. A Cloudflare Function + KV (mirrors `/api/drip`,
+   to fetch the thread. A Cloudflare Function + KV (same pattern as `/api/menu`,
    `/api/menu`). Poll or SSE for delivery. Ships messaging in days.
 2. **P2 — Venue-node relay (decentralized).** Fold the relay into the venue
    appliance ([NETWORK-ARCHITECTURE.md](NETWORK-ARCHITECTURE.md)): region-scoped,

@@ -168,10 +168,10 @@ describe("relay: none configured", () => {
   });
 
   it("sponsorGas declines cleanly — there is no faucet to fall back to", async () => {
-    // NOTE: this is the CURRENT behaviour and it contradicts REMAINING-ACTIONS
-    // §1, which still tells an operator to set DRIP_PRIVATE_KEY so /api/drip
-    // can fund burners. `sponsorGas` no longer calls /api/drip at all; funding
-    // is relay-or-nothing. See TEST-FINDINGS.md #14.
+    // Relay-or-nothing, by design. There is no central faucet to fall back to:
+    // /api/drip was deleted once this test showed nothing had called it since
+    // funding went KS-only (TEST-FINDINGS.md #14). This assertion is what keeps
+    // a faucet from quietly reappearing as an unlinkability hole.
     vi.resetModules();
     allEndpointsDown();
     const relay = await import("./relay");

@@ -1,11 +1,6 @@
 # Cloudflare Pages Functions local secrets — copy to web/.dev.vars (gitignored).
 # In production these live in Cloudflare Pages → Settings → Environment variables.
 
-# --- Burner gas faucet (/api/drip) ---
-DRIP_PRIVATE_KEY=
-# DRIP_AMOUNT_PAS=5
-# DRIP_MIN_PAS=2
-
 # --- Menu publishing to IPFS (/api/menu) ---
 # The DATUM IPFS upload proxy /add endpoint + its Bearer token. Until both are
 # set, /api/menu returns { configured:false } and the app falls back to
@@ -19,4 +14,6 @@ IPFS_API_KEY=
 # Menu reads try this first, then public gateways (ipfs.io, dweb.link).
 # VITE_RELAY_URL     — venue gasless relay (venue-node/relay.mjs), e.g.
 #   https://relay.<venue-host>. Set → the app prefers it for gas sponsorship +
-#   settlement submission (gasless); unset → central faucet + direct submit.
+#   settlement submission (gasless). Unset → direct, gas-paying submission:
+#   there is no central faucet, so a burner needs gas from a relay, and escrow
+#   funding is shielded-pool only.

@@ -63,7 +63,7 @@ by doing the two things that are safe to relay:
 
 | Endpoint | Does |
 |---|---|
-| `POST /fund { address }` | **Sponsor gas** — top up a burner below `FUND_MIN_PAS` up to `FUND_AMOUNT_PAS` (a region-local, decentralized `/api/drip`). |
+| `POST /fund { address }` | **Sponsor gas** — top up a burner below `FUND_MIN_PAS` up to `FUND_AMOUNT_PAS` (region-local and decentralized; this is the only gas faucet — the central one was deleted). |
 | `POST /onboard { address, role, lat?, lon? }` | **Sponsored onboarding (Route A)** — seed a fresh driver/venue wallet (ED + register gas) so it can register and immediately earn. Opt-in (`ONBOARD_ENABLED=on`), one-per-address, budget-gated, venues region-gated. See [../docs/RELAY-SPONSORSHIP.md](../docs/RELAY-SPONSORSHIP.md). |
 | `POST /submit { method, args }` | **Relay a settlement call.** Only `confirmPickup` / `confirmDropoffZK` are allowlisted — they carry their own signatures / ZK proof and don't check `msg.sender`, so the relay submits them paying gas → those steps are fully gasless. |
 | `POST /forward { request }` | **Relay a gasless user action (F8).** Submits a user-signed EIP-2771 `ForwardRequest` through `FareForwarder`. Guarded: `value` must be 0 and `to` must be `FareOrders`/`FareRatings`, so the relay pays gas but never fronts a customer's escrow. |

@@ -14,7 +14,7 @@ Ordered by what a reader should act on, not by discovery order.
 |---|---|---|---|
 | 1 | Relay reused transaction nonces under concurrency | **High** | ✅ Fixed |
 | 13 | A cleared governance field silently wrote `0` on Save | **Medium** | ✅ Fixed |
-| 14 | Ops docs require a faucet secret for a code path that no longer runs | Medium (docs) | ☐ Open |
+| 14 | Ops docs required a faucet secret for a code path that no longer ran | Medium (docs) | ✅ Fixed |
 | 2 | `/fund` can double-fund inside a 250 ms window | Low | ☐ Open |
 | 3 | Oversized request body returns 500, not 413 | Cosmetic | ☐ Open |
 | 4 | CI ran nothing but Slither, path-filtered to `contracts/**` | **High** (process) | ✅ Fixed |
@@ -73,7 +73,7 @@ typing a zero.
 parameter to zero` (`test/ops-governance.test.ts`), which also demonstrates the
 chain *would* have taken the write.
 
-## 14. The faucet ops step is stale — **open, needs your decision**
+## 14. The faucet ops step was stale — **fixed by deleting the faucet**
 
 [REMAINING-ACTIONS.md](REMAINING-ACTIONS.md) §1 lists, as a required operational
 step:
@@ -82,12 +82,17 @@ step:
 > so `/api/drip` funds burners on demand (the "one manual secret step"). Without
 > it, gas top-ups fall back to the public faucet.
 
-Nothing calls it. `web/src/chain.ts` still exports `requestDrip`, and
-`web/functions/api/drip.ts` is still deployed, but `requestDrip` has **zero
+Nothing called it. `web/src/chain.ts` exported `requestDrip` and
+`web/functions/api/drip.ts` was deployed, but `requestDrip` had **zero
 callers** — `relay.ts` `sponsorGas` says in its own comment that "the central
 `/api/drip` faucet has been removed (KS-only funding)" and tries only the region
 relay's `/fund`. `fundBurner` throws outright without shielded funding, by
-design, so burners are never faucet-funded either.
+design, so burners were never faucet-funded either.
+
+**Operational note:** the drip account itself still exists and still holds
+funds (100 PAS was sent to it from the deployer). Deleting the code does not
+reclaim that — sweep it back to the deployer when convenient. Its key is in
+`web/.dev.vars`, which is gitignored.
 
 Two things follow. An operator provisioning a **funded private key** — a real
 account with real value — is doing it for a path that never executes. And the
@@ -96,14 +101,23 @@ that no longer exists: with no relay, `sponsorGas` returns
 `{ funded: false, reason: "no-faucet (KS-only funding)" }` and that is the end
 of it.
 
-Left open because the fix is a decision, not a patch: either delete the dead
-faucet (`requestDrip`, `web/functions/api/drip.ts`, the ops step) or reconnect
-it. Deleting is the smaller change and matches the KS-only funding stance the
-code already takes.
+**Resolved by deletion**, which matches the KS-only stance the code already
+took: `web/functions/api/drip.ts`, `chain.ts`'s `requestDrip`, the
+`DRIP_PRIVATE_KEY` entries in `web/.dev.vars.example`, and the ops step in
+REMAINING-ACTIONS §1 are gone. `DEMO-LAUNCH.md`'s "add a funded drip account"
+item is marked superseded — funding a burner from a shared account would re-link
+it to whoever refilled that account, which is the thing C4 exists to prevent.
+
+Deliberately kept: `DripResult` (the shape every funding path returns, including
+the relay's `/fund` and the shielded withdrawal) and `DRIP_MIN` (the
+low-gas threshold that drives the "Top up gas" button). `App.tsx`'s `maybeDrip`
+also stays — despite the name it calls `sponsorGas`, i.e. the relay. Those names
+are now archaeology and worth renaming, but that is a rename inside the largest
+untested file in the repo, so it is a separate change.
 
 *Surfaced by* the degradation matrix (`web/src/degradation.test.ts`), which
-pins the actual behaviour — `sponsorGas` declining with `no-faucet` — so
-whichever way this is resolved, the test says what the code really does.
+pins the behaviour that remains — `sponsorGas` declining with `no-faucet` — so
+a faucet cannot quietly reappear as an unlinkability hole.
 
 ## 2. `/fund` can double-fund inside a 250 ms window — **open**
 
