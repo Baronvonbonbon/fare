@@ -17,11 +17,11 @@ All three tiers pass today.
 
 | Tier | Runner | Tests | Covers |
 |---|---|---|---|
-| `test/*.ts` | `npx hardhat test` | 171 | contracts, ZK verifiers, invariant fuzz, upgradability, **chain-backed relay endpoints** |
+| `test/*.ts` | `npx hardhat test` | 179 | contracts, ZK verifiers, invariant fuzz, upgradability, **chain-backed relay endpoints** |
 | `web/src/*.test.ts` | `cd web && npx vitest run` | 86 | 11 of 31 client modules |
 | `venue-node/*.test.mjs` | `cd venue-node && node --test` | 73 | economics, scorer, swap, treasury, agent, shieldkeeper, **relay HTTP surface** |
 
-**330 tests, all green**, and all of them now run in CI (§7 E1). The contract tier is the strong part and deserves
+**338 tests, all green**, and all of them now run in CI (§7 E1). The contract tier is the strong part and deserves
 saying so: a seeded-PRNG invariant campaign (`test/invariant.test.ts`) asserts
 escrow conservation and vault solvency after *every* operation and reproduces
 failures from a printed seed; the verifier tests pin fail-safe-before-VK and
@@ -97,18 +97,53 @@ Assert every client-side call sizes its own gas.
 
 ## 4. Privacy
 
-☐ **B1 — Leak-sweep harness.** Generalize the ad-hoc blob assertions in
-`test/privacy-e2e.test.ts` and `test/shielded-payouts.test.ts` into one
-table-driven matcher: run a full delivery, capture *every* transaction's
-calldata and *every* event across the lifecycle, and assert a registry of
-secrets appears in none of them — drop coordinates, drop salt, losing bidders,
-the note↔account pairing, driver profile PII. Adding a new secret becomes one
-line instead of a new test.
+✅ **B1 — Leak-sweep harness** (`test/helpers/leaksweep.ts` +
+`test/leak-sweep.test.ts`, 8 tests). Runs a full delivery — order, sealed
+auction, accept, pickup, ZK dropoff — then scans *every block it produced*:
+each transaction's calldata and each log's data and topics. Secrets are a table;
+adding one is a line.
 
-☐ **B2 — Positive controls.** Every leak assertion paired with a deliberately
-leaky variant proving the matcher *would* have caught it. **This is the
-highest-value item in this section:** without it, a passing leak test proves
-only that the string was absent, not that the check works.
+The matcher searches every encoding a value plausibly takes. The load-bearing
+trick is that the **minimal-width** form is a substring of the padded form, so
+searching for it also catches wider and packed encodings; negatives get
+two's-complement forms at int32 and int256 width, since they are sign-extended
+rather than zero-padded.
+
+Claims pinned: no drop coordinate in any encoding (raw or Poseidon-offset)
+reaches the chain; the drop salt never leaves the device; the driver's exact
+pickup position is genuinely coarsened rather than merely unemitted; and a
+losing bid names neither its driver nor its price.
+
+Two design points worth keeping:
+
+- **Sweeps must be closed.** A live sweep runs to the current head every time it
+  is queried, so a later control that plants one of the same secrets would
+  retroactively fail an earlier absence claim. `stop()` freezes the window.
+- **Scope the claim to what is actually being claimed.** The losing-bidder sweep
+  covers only the auction window, because that driver's address is legitimately
+  on-chain from registration. The honest claim is that *bidding and losing adds
+  nothing*, not that they are invisible.
+
+✅ **B2 — Positive controls.** Three, ordered so the matcher proves it can see
+before anything trusts what it cannot:
+
+1. Values the protocol publishes on purpose — a `uint256` in a log, an address
+   in calldata, a **negative** int32 (the encoding the drop longitude would use),
+   the venue's public coordinates.
+2. A planted value, in calldata and in a log.
+3. **The sharpest one:** replay the calldata shape the dropoff had *before* the
+   ZK path — a `LocationAttestation` carrying the real coordinates — and require
+   the sweep to flag the very values it reports absent from the real run. Same
+   secrets, same encoding, opposite verdict. Plus a salt-reveal variant.
+
+Verified by mutating the protocol path, not just the harness: feeding
+`confirmPickup` the exact coordinates instead of the coarsened ones fails the
+absence test (both values, both encodings) *and* the presence control. Both
+sides fire.
+
+Fixture note: the drop must share no coordinate with the venue. The first run
+reported a longitude "leak" that was the venue's own published longitude,
+because the fixture reused the value.
 
 ☐ **B3 — Codify the Open list as expected-leak tests.** Assert that order value,
 tip, delivery timing, and `orders(orderId).venueId` *are* currently public.
@@ -317,7 +352,7 @@ gitignored; the job restores them from the byte-identical tracked copies under
    now fixed and regression-tested.
    🟡 **C2** has its first case (the withdraw decline); the remaining budget and
    fee-recovery guards are not covered.
-3. **B1 / B2 — leak sweep + positive controls.** The privacy claims are the
+3. ✅ **B1 / B2 — leak sweep + positive controls.** Done (8 tests). The privacy claims are the
    product; today they are asserted per-test and never negatively controlled.
 4. **A1 / A3 — gas snapshot + committed cost ledger.**
 5. **C5 / D1 — ops consoles.** Small surface, worst blast radius.
