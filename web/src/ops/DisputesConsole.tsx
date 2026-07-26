@@ -5,6 +5,7 @@ import { ConsoleProps } from "./OpsApp";
 import { fetchCapsules, fetchSealedChat } from "../channel";
 import { openCapsule, evidenceMatches } from "../capsule";
 import { openWithOrderKey } from "../msg";
+import { splitEscrow, slashExceedsStake } from "./ruling";
 
 // Arbiter console (integration-plan D1).
 //
@@ -304,15 +305,16 @@ function DisputeCard({
   const [driverAtFault, setDriverAtFault] = useState(false);
   const [slash, setSlash] = useState("0");
 
-  const customerAmt = (r.escrow * BigInt(bps)) / 10_000n;
-  const driverAmt = r.escrow - customerAmt;
+  // Mirrors FareOrders.resolveDisputed to the wei — see ops/ruling.ts, which is
+  // differential-tested against the contract in test/ops-ruling.test.ts.
+  const { customerAmt, driverAmt } = splitEscrow(r.escrow, bps);
   let slashWei = 0n;
   try {
     slashWei = parse(slash);
   } catch {
     /* keep 0 on unparseable input */
   }
-  const slashOverStake = slashWei > r.driverStake;
+  const slashOverStake = slashExceedsStake(slashWei, r.driverStake);
 
   return (
     <div className="order">

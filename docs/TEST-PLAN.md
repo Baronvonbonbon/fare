@@ -7,6 +7,9 @@ The contracts are well tested. This document is mostly about **everything
 around them** — the relay, the ops consoles, the client core, and the CI that
 would make any of it run.
 
+What this work has already turned up — defects, open items, and four assertions
+that passed for the wrong reason — is in [TEST-FINDINGS.md](TEST-FINDINGS.md).
+
 Legend: ☐ not started · 🟡 partial · 🔒 mainnet gate.
 
 ---
@@ -17,11 +20,11 @@ All three tiers pass today.
 
 | Tier | Runner | Tests | Covers |
 |---|---|---|---|
-| `test/*.ts` | `npx hardhat test` | 198 | contracts, ZK verifiers, invariant fuzz, upgradability, **chain-backed relay endpoints** |
-| `web/src/*.test.ts` | `cd web && npx vitest run` | 86 | 11 of 31 client modules |
+| `test/*.ts` | `npx hardhat test` | 201 | contracts, ZK verifiers, invariant fuzz, upgradability, **chain-backed relay endpoints** |
+| `web/src/*.test.ts` | `cd web && npx vitest run` | 92 | 12 of 32 client modules, incl. **the arbiter ruling math** |
 | `venue-node/*.test.mjs` | `cd venue-node && node --test` | 73 | economics, scorer, swap, treasury, agent, shieldkeeper, **relay HTTP surface** |
 
-**357 tests, all green**, and all of them now run in CI (§7 E1). The contract tier is the strong part and deserves
+**366 tests, all green**, and all of them now run in CI (§7 E1). The contract tier is the strong part and deserves
 saying so: a seeded-PRNG invariant campaign (`test/invariant.test.ts`) asserts
 escrow conservation and vault solvency after *every* operation and reproduces
 failures from a printed seed; the verifier tests pin fail-safe-before-VK and
@@ -34,7 +37,7 @@ Slither is in CI with zero high-severity findings ([SECURITY-REVIEW.md](SECURITY
 | Surface | Size | Tests |
 |---|---|---|
 | ~~`venue-node/relay.mjs`~~ — 16 HTTP endpoints, holds `RELAY_PRIVATE_KEY` | 953 lines | ✅ 49 across two tiers (§5 C1) |
-| `web/src/ops/` — four consoles + shell (dispute resolve/slash, governance, pause, upgrade) | 1,385 lines | **0** |
+| `web/src/ops/` — four consoles + shell | 1,385 lines | 🟡 9 (the ruling math, extracted — §5 C5) |
 | `web/src/App.tsx` | 2,689 lines | **0** |
 | `chain.ts`, `shieldnote.ts`, `relay.ts`, `shield.ts`, `token.ts`, `wallets.ts`, `zk.ts` | ~1,700 lines | **0** |
 
@@ -319,11 +322,26 @@ both undetectable and unrecoverable. Assert the deployed VK hashes to the
 committed artifact. Extend to transcript verification when the real MPC ceremony
 runs — that ceremony remains the top mainnet gate.
 
-☐ **C5 — Ops-console calldata tests.** The consoles issue
-`resolve(customerShareBps, openerWins, driverAtFault, slash)` and
-`upgradeContract`. Assert form input → exact calldata, and that the console's
-escrow-split *preview* agrees with the contract's real split. A wrong bps here
-slashes a real driver; 1,385 lines of it are untested.
+🟡 **C5 — Ops-console tests.** The riskiest logic — the escrow-split preview an
+arbiter reads before signing an irreversible `resolve()` — was inline in
+`DisputesConsole.tsx` and therefore untestable. Extracted to
+`web/src/ops/ruling.ts` (`splitEscrow`, `slashExceedsStake`) and covered twice:
+6 unit tests (`ruling.test.ts`) and 3 **differential** tests against the real
+`FareOrders.resolveDisputed` (`test/ops-ruling.test.ts`), which import the
+shipped module rather than reimplementing the formula.
+
+The preview matches the chain exactly, including the driver-takes-the-remainder
+form that keeps both sides summing to the escrow. `slashExceedsStake` exists
+because `FareDrivers.slash` **clamps rather than reverting**, so without the
+warning the console would promise damages that never arrive.
+
+The differential test was initially vacuous — see
+[TEST-FINDINGS.md](TEST-FINDINGS.md) #11.
+
+**Remaining:** the governance, pause and upgrade consoles. Their risk is input
+parsing (`parse`/`toInt` → on-chain units) and the `register` vs
+`upgradeContract` distinction; component rendering stays out of scope until the
+web tier gains a DOM testing dependency, which it currently has none of.
 
 ☐ **C6 — Mythril nightly.** Currently documented as an on-demand deep-dive,
 which in practice means it never runs. Schedule it against `FareVault`,
@@ -393,6 +411,7 @@ adopting only if the privacy posture should be pinned by tests.
 ## See also
 
 - [PRIVACY-STATUS.md](PRIVACY-STATUS.md) — what is actually protected today, by role
+- [TEST-FINDINGS.md](TEST-FINDINGS.md) — what this work found, with status
 - [SECURITY-REVIEW.md](SECURITY-REVIEW.md) — the Slither triage this extends
 - [REMAINING-ACTIONS.md](REMAINING-ACTIONS.md) — E2/E3 mainnet gates, ops prerequisites
 - [PRIVACY-TIERS.md](PRIVACY-TIERS.md) — the designs the §4 tests would pin
