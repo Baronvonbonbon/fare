@@ -22,6 +22,9 @@ import { createHash } from "node:crypto";
 // relay only needs a syntactically valid key to construct its Wallet.
 const TEST_KEY = "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d";
 
+// PINE_RPC takes priority over RELAY_RPC_URL inside relay.mjs, so an operator
+// with one exported would otherwise point these tests at a real node.
+delete process.env.PINE_RPC;
 process.env.RELAY_PRIVATE_KEY = TEST_KEY;
 process.env.RELAY_RPC_URL = "http://127.0.0.1:1"; // unroutable, on purpose (see above)
 process.env.RATE_MAX = "10000";                   // the limiter gets its own instance below

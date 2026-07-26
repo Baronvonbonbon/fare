@@ -17,11 +17,11 @@ All three tiers pass today.
 
 | Tier | Runner | Tests | Covers |
 |---|---|---|---|
-| `test/*.ts` | `npx hardhat test` | 144 | contracts, ZK verifiers, invariant fuzz, upgradability |
+| `test/*.ts` | `npx hardhat test` | 157 | contracts, ZK verifiers, invariant fuzz, upgradability, **chain-backed relay endpoints** |
 | `web/src/*.test.ts` | `cd web && npx vitest run` | 86 | 11 of 31 client modules |
 | `venue-node/*.test.mjs` | `cd venue-node && node --test` | 73 | economics, scorer, swap, treasury, agent, shieldkeeper, **relay HTTP surface** |
 
-**303 tests, all green**, and all of them now run in CI (§7 E1). The contract tier is the strong part and deserves
+**316 tests, all green**, and all of them now run in CI (§7 E1). The contract tier is the strong part and deserves
 saying so: a seeded-PRNG invariant campaign (`test/invariant.test.ts`) asserts
 escrow conservation and vault solvency after *every* operation and reproduces
 failures from a printed seed; the verifier tests pin fail-safe-before-VK and
@@ -33,7 +33,7 @@ Slither is in CI with zero high-severity findings ([SECURITY-REVIEW.md](SECURITY
 
 | Surface | Size | Tests |
 |---|---|---|
-| `venue-node/relay.mjs` — 16 HTTP endpoints, holds `RELAY_PRIVATE_KEY` | 953 lines | 🟡 22 (no-chain surface only — §5 C1) |
+| `venue-node/relay.mjs` — 16 HTTP endpoints, holds `RELAY_PRIVATE_KEY` | 953 lines | 🟡 35 across two tiers (§5 C1) |
 | `web/src/ops/` — four consoles + shell (dispute resolve/slash, governance, pause, upgrade) | 1,385 lines | **0** |
 | `web/src/App.tsx` | 2,689 lines | **0** |
 | `chain.ts`, `shieldnote.ts`, `relay.ts`, `shield.ts`, `token.ts`, `wallets.ts`, `zk.ts` | ~1,700 lines | **0** |
@@ -165,9 +165,42 @@ Two things that chunk turned up:
   and unpadded bodies behave identically, which is the property the client's
   metadata defense depends on. This is B2 justifying itself on the first use.
 
-**Remaining (second chunk, needs a local chain):** the authorization, replay
-and signature matrix on `/submit`, `/forward`, `/withdraw` and the four
-`/shield-*` endpoints.
+**Second chunk done** (`test/relay-endpoints.test.ts`, 13 tests): the
+authorization and replay matrix, in the hardhat tier rather than the venue-node
+one. These assertions are about what the *contracts* let the relay do, and the
+contracts already exist here — wiring hardhat into a suite whose only dependency
+is `ethers` purely to redeploy them would have cost more than the tests. The
+real `relay.mjs` runs unmodified against hardhat's in-process chain through a
+small JSON-RPC bridge.
+
+What it pins: `/withdraw` pays only on the account's own signature, cannot be
+re-pointed at an unsigned recipient, rejects a replayed signature (with the
+balance refilled first, so the guard under test is the nonce and not an empty
+balance) and an expired deadline; `/forward` enforces the target allowlist,
+refuses to carry value, and cannot forge a sender; `/fund` will not double-fund;
+and the profitability guard declines a withdrawal it cannot cover (C2).
+
+**A defect this surfaced —** the relay picks its transaction nonce with
+`getTransactionCount(relay, "latest")`. That excludes a submitted-but-unmined
+transaction, and ethers caches the read for ~250 ms on top, so two submissions
+inside that window reuse a nonce and the node rejects the second.
+`serialize()` orders the sends but does not give them distinct nonces. On a
+chain with multi-second blocks this is not a narrow race — any two users
+hitting the relay in the same block window can trigger it, and at least one
+gets a 500. Pinned as a characterization test (`KNOWN DEFECT: two submissions
+in the same moment collide on the relay's nonce`) to be inverted when fixed;
+the fix is a locally-tracked nonce, which is safe because every send already
+goes through `serialize()`. **Not fixed here** — that is a behavioral change to
+a live-deployed service, not a test.
+
+One consequence for anyone writing more of these: `relay.mjs` prefers
+`PINE_RPC` over `RELAY_RPC_URL`, and `hardhat.config.ts` calls `dotenv.config()`,
+so a `PINE_RPC` in `.env` silently wins and the relay under test talks to a real
+node. Both relay suites now delete it explicitly.
+
+**Still remaining:** the four `/shield-*` endpoints, and `/submit` at the
+contract level (its method allowlist is covered; the attestation signatures it
+forwards are already covered by `fare.test.ts`).
 
 ☐ **C2 — Relay key custody.** `/fund` cannot be drained as an unbounded faucet
 (the budget window holds under concurrency), and the profitability guard
@@ -239,10 +272,9 @@ gitignored; the job restores them from the byte-identical tracked copies under
 ## 8. Priority
 
 1. ✅ **E1 — wire CI.** Cheapest item here and it makes every other test real.
-2. 🟡 **C1 / C2 — relay endpoints.** The handler extraction and the no-chain
-   half are done; the authorization/replay matrix needs a local chain and is
-   the next thing to pick up. Largest untested attack surface, and it holds a
-   funded key.
+2. 🟡 **C1 / C2 — relay endpoints.** Handler extraction, the no-chain half, and
+   the authorization/replay matrix are done across both tiers (35 tests), and
+   turned up a live nonce-collision defect. The `/shield-*` endpoints remain.
 3. **B1 / B2 — leak sweep + positive controls.** The privacy claims are the
    product; today they are asserted per-test and never negatively controlled.
 4. **A1 / A3 — gas snapshot + committed cost ledger.**
