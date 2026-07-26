@@ -94,6 +94,15 @@ export const VAULT_ABI = [
   "function withdrawFor(address account, address recipient, uint256 deadline, bytes signature)",
   "function pendingPaseoDust(address) view returns (uint256)",
   "function claimPaseoDust()",
+  // Shield notes (privacy phase 3): balance → note → ZK spend into the pool.
+  "function insertShieldNote(uint96 bucket, uint256 commitment)",
+  "function insertShieldNoteFor(address account, uint96 bucket, uint256 commitment, uint256 deadline, bytes signature)",
+  "function depositShieldNoteZK(bytes proof, uint256 root, uint256 nullifierHash, uint96 bucket, bytes32 ksCommitment)",
+  "function noteRoot() view returns (uint256)",
+  "function isKnownNoteRoot(uint256 root) view returns (bool)",
+  "function nextNoteIndex() view returns (uint32)",
+  "function shieldNullifierSpent(uint256) view returns (bool)",
+  "event ShieldNoteInserted(address indexed account, uint96 indexed bucket, uint256 commitment, uint32 index)",
   // Shielded payouts (privacy phase 1): queue a bucket, then a keeper batches it.
   "function shieldNonce(address) view returns (uint256)",
   "function shieldBuckets(uint256) view returns (uint96)",

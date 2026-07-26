@@ -55,6 +55,24 @@ interface IFareShieldPool {
     function depositNative(bytes32 commitment) external payable;
 }
 
+/// Groth16 verifier for the shield-note circuit (privacy phase 3).
+/// Public signals: [root, nullifierHash, bucket, ksCommitment].
+interface IFareShieldVerifier {
+    function verifyShieldNote(bytes calldata proof, uint256[4] calldata pubSignals)
+        external
+        view
+        returns (bool);
+}
+
+/// Poseidon(2) over BN254 — the hash the note tree and the circuit share.
+/// Paseo Asset Hub exposes this as a PVM-native precompile at
+/// 0x1d165f6fE5A30422E0E2140e91C8A9B800380637 (`hash(uint256[2])`, selector
+/// 0x561558fe); pure-Solidity Poseidon would make on-chain insertion
+/// unaffordable. Tests deploy an equivalent behind the same ABI.
+interface IFarePoseidonT3 {
+    function hash(uint256[2] calldata input) external view returns (uint256);
+}
+
 interface IFareOrders {
     enum Status {
         None,
