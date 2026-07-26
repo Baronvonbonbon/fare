@@ -498,6 +498,121 @@ contract FareOrders is Ownable2Step, ReentrancyGuard, FareUpgradable, ERC2771Con
         emit BidWithdrawn(orderId, driver);
     }
 
+    // ── sealed bids (privacy phase 4) ────────────────────────────────────────
+    // `BidPlaced` publishes (order, driver, amount) for EVERY bid, including the
+    // ones that lose. Drivers are persistent identities, so that is a standing
+    // record of where each driver was willing to work and for how much — a
+    // coverage and availability profile assembled for free by anyone with an
+    // indexer, about people who never won the job.
+    //
+    // The customer needs the bid. The world does not. So a sealed bid puts only
+    // a HASH on-chain and carries (driver, amount) to the customer off-chain over
+    // the order channel; the customer reveals it when accepting. Losing bids are
+    // never attributable to anyone.
+    //
+    // The winner is necessarily public — they perform the delivery and get paid.
+    // What this removes is the losers, which is most of the graph.
+    //
+    // `commitBid` names nobody, so a relay submits it and the chain never sees
+    // the driver. That also means anyone can commit, hence the per-order cap.
+    struct SealedBid {
+        bytes32 revokeHash; // keccak256(revokeSecret) — lets the bidder retract
+        bool exists;
+        bool revoked;
+    }
+    mapping(uint256 => mapping(bytes32 => SealedBid)) public sealedBid;
+    mapping(uint256 => uint32) public sealedBidCount;
+    uint32 public constant MAX_SEALED_BIDS = 256; // storage-growth bound
+
+    event BidCommitted(uint256 indexed orderId, bytes32 bidHash);
+    event BidRevoked(uint256 indexed orderId, bytes32 bidHash);
+
+    /// @notice The hash a sealed bid commits to. Binds the driver AND the amount,
+    ///         so a customer cannot accept a bid at a different price or
+    ///         attribute it to a driver who never made it.
+    function bidHashOf(uint256 orderId, address driver, uint96 amount, bytes32 salt)
+        public
+        pure
+        returns (bytes32)
+    {
+        return keccak256(abi.encode(orderId, driver, amount, salt));
+    }
+
+    /// @notice Commit a sealed bid. Deliberately callable by anyone: the point is
+    ///         that this transaction does not name the bidder, so it is submitted
+    ///         by a relay. The bid's terms travel to the customer off-chain.
+    function commitBid(uint256 orderId, bytes32 bidHash, bytes32 revokeHash)
+        external
+        whenNotPaused
+        whenNotFrozen
+    {
+        require(orders[orderId].status == Status.Open, "bad-status");
+        require(bidHash != bytes32(0), "zero-hash");
+        require(sealedBidCount[orderId] < MAX_SEALED_BIDS, "too-many-bids");
+        SealedBid storage b = sealedBid[orderId][bidHash];
+        require(!b.exists, "already-committed");
+        b.exists = true;
+        b.revokeHash = revokeHash;
+        sealedBidCount[orderId] += 1;
+        emit BidCommitted(orderId, bidHash);
+    }
+
+    /// @notice Retract a sealed bid by proving knowledge of its revoke secret.
+    /// @dev Knowledge of the secret, not an identity, is the authorization —
+    ///      checking a signature would put the bidder's address on-chain and
+    ///      undo the whole point. Bid hashes are public, so without this the
+    ///      revoke would be open to anyone.
+    function revokeBid(uint256 orderId, bytes32 bidHash, bytes32 revokeSecret) external {
+        SealedBid storage b = sealedBid[orderId][bidHash];
+        require(b.exists && !b.revoked, "no-bid");
+        require(keccak256(abi.encode(revokeSecret)) == b.revokeHash, "bad-secret");
+        b.revoked = true;
+        emit BidRevoked(orderId, bidHash);
+    }
+
+    /// @notice Accept a sealed bid, revealing it. Native escrow.
+    function acceptSealedBid(uint256 orderId, address driver, uint96 amount, bytes32 salt)
+        external
+        payable
+        whenNotPaused
+        whenNotFrozen
+        nonReentrant
+    {
+        Order storage o = orders[orderId];
+        require(o.token == address(0), "use-erc20-accept");
+        _prepareSealedAccept(o, orderId, driver, amount, salt);
+        require(msg.value == amount, "bad-value");
+        _assign(o, orderId, driver, amount);
+    }
+
+    /// @notice Accept a sealed bid on a stablecoin order.
+    function acceptSealedBidERC20(uint256 orderId, address driver, uint96 amount, bytes32 salt)
+        external
+        whenNotPaused
+        whenNotFrozen
+        nonReentrant
+    {
+        Order storage o = orders[orderId];
+        require(o.token != address(0), "use-native-accept");
+        _prepareSealedAccept(o, orderId, driver, amount, salt);
+        IERC20(o.token).safeTransferFrom(msg.sender, address(this), amount);
+        _assign(o, orderId, driver, amount);
+    }
+
+    /// @dev Sealed-accept validation. The amount bounds are checked HERE rather
+    ///      than at commit time, because at commit time the amount is hidden.
+    function _prepareSealedAccept(
+        Order storage o, uint256 orderId, address driver, uint96 amount, bytes32 salt
+    ) internal view {
+        require(msg.sender == o.customer, "not-customer");
+        require(o.status == Status.Open, "bad-status");
+        require(amount > 0 && amount <= o.maxFare, "bad-amount");
+        require(drivers.isEligible(driver), "driver-not-eligible");
+        SealedBid storage b = sealedBid[orderId][bidHashOf(orderId, driver, amount, salt)];
+        require(b.exists, "no-bid");
+        require(!b.revoked, "bid-revoked");
+    }
+
     /// @notice Customer picks the winning driver — any bid, not forced-lowest,
     ///         so reputation and stake can outweigh a marginally cheaper bid.
     ///         The winning fare is escrowed with this call.

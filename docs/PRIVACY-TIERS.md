@@ -223,37 +223,61 @@ problem off-chain rather than solved it. Two consequences worth knowing:
 
 ---
 
-## 6. Private discovery (phase 4 — the expensive one)
+## 6. Order-graph privacy (phase 4)
 
-Goal: neither a chain observer nor a relay learns which customer ordered from
-which venue. `OrderCreated` indexes `customer` and `venueId` today, so the graph
-is published at creation.
+The original plan here was a private discovery board. **Tracing the actual leak
+showed the board is not the lever**, and the plan is recorded below as it was
+found to be wrong, because the reasoning matters more than the conclusion.
 
-**Recommended shape — two-phase reveal over an encrypted board, not PIR.** True
-private information retrieval is the wrong tool here: an open order is *meant* to
-be broadcast to every eligible driver, so there is no per-driver secret to
-protect in the query. The leak is the *pairing*, and that is cheaper to fix:
+### Why the board delivers nothing
 
-1. **Post coarse.** The board carries only what bidding needs — region bucket
-   (`OrderRegion`'s ~55 km cell already exists), fare, size, deadline. No venue,
-   no customer, no drop area.
-2. **Reveal on assignment.** Venue and drop details go to the *assigned* driver
-   over the E2E channel (§5). Nobody else ever learns the pairing.
-3. **Drop the on-chain edge.** `OrderCreated` stops indexing `venueId`; the
-   venue is a commitment until settlement.
-4. **Settlement must not re-reveal it.** Crediting the venue payout address at
-   settlement republishes the edge — which is why this phase *depends on* §4.
-   Shielded payouts and private discovery are not independent features; without
-   §4, §6 leaks at settlement anyway.
+1. **Discovery is already coarse.** Drivers find work through `OrderRegion`
+   (~55 km cells), not by venue. Nothing about discovery publishes the venue.
+2. **The venue is public because `orders(orderId).venueId` is public STORAGE.**
+   Moving discovery off-chain hides nothing while that field exists, and it
+   cannot simply go: `confirmPickup` needs `venues.signerOf(venueId)` and
+   settlement needs `venues.payoutOf(venueId)`.
+3. **The customer is already a burner.** With per-order wallets shipped, the
+   graph is *burner* ↔ venue, not *person* ↔ venue. What the original framing
+   described — "person X ordered from venue Y at time T" — stopped being true
+   when per-order wallets landed.
 
-Clients scan their region bucket and trial-match locally. Cost is O(orders in
-region), which is small and bounded; that is the whole reason to prefer it to PIR.
+Commit-and-reveal on the venue would hide it during the open/bidding window and
+then reveal it at pickup: a delay of minutes, bought with a change to
+escrow-critical code. Hiding it for good means the venue's payout entering the
+note pool as a commitment so the venue is never named at settlement — a
+research-scale change, and the honest full fix. Neither is built.
 
-Against T2, the board must be content-addressed and fetched with uniform request
-shapes, so the relay stores opaque blobs and learns "a driver in region R polled"
-rather than who bid on what.
+### What was built instead: sealed bids
 
----
+The largest remaining leak of the same kind, and it is about drivers rather than
+customers. `BidPlaced(orderId, driver, amount)` publishes **every** bid,
+including the ones that lose. Drivers are persistent identities, so an indexer
+assembles a standing record of where each driver was willing to work and for how
+much — about people who never won the job. The customer needs the bid; the world
+does not.
+
+```
+commitBid(orderId, bidHash, revokeHash)   only a hash on-chain; submitted by a
+                                          relay, so the bidder is not named
+   ...terms travel to the customer off-chain, over the order channel...
+acceptSealedBid(orderId, driver, amount, salt)   the customer reveals the winner
+```
+
+- `bidHash = keccak256(orderId, driver, amount, salt)` binds both the driver and
+  the price, so a customer cannot accept at a price nobody bid or attribute a bid
+  to a driver who never made it.
+- `maxFare` and driver eligibility are checked **at reveal**, because at commit
+  time the amount and the bidder are hidden.
+- Retraction takes a **secret**, not a signature: bid hashes are public, so
+  authorizing by signature would put the bidder's address on-chain and undo the
+  point.
+- `commitBid` is open to anyone (that is what keeps it anonymous), so commitments
+  are capped per order.
+
+**The winner is still public** — they perform the delivery and are paid. What
+this removes is the losers, which is most of the graph. The open-bid path is
+untouched and still works, so this is additive.
 
 ## 7. Selective disclosure and relay hardening
 
@@ -354,10 +378,12 @@ to be worth anything.
 | **2a** | Decouple sealing from depositing so the chain's per-tx deposit ceiling stops capping the anonymity set | `FareVault` | **built** |
 | **2b** | Denomination tuning, known-roots retry, batch telemetry, tier UX | no | next |
 | **3** | Relay hardening: multi-relay, blinded queue authorization (ZK), no-log posture | new circuit | spike first |
-| **4** | Private discovery (§6): coarse board, assignment-time reveal, drop the on-chain venue edge | `FareOrders` events | after 3 |
+| **4a** | Sealed bids (§6) — commit/reveal so losing bids name nobody | `FareOrders` | **built** |
+| **4b** | Sealed-bid client + relay channel carrying bid terms to the customer | no | open |
+| **4c** | Venue payouts entering the note pool as commitments (the only fix that hides the venue for good) | `FareOrders`/`FareSettlement` | research |
 
-Ordering is forced, not preferred: §6 leaks at settlement without §4, and §7's
-blinded queue is meaningless before §4 exists to blind.
+Ordering was forced for §4 and §7 (a seal is meaningless before there is
+something to seal). §6 turned out not to depend on them at all — see above.
 
 ## See also
 
