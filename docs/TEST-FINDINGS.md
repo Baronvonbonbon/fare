@@ -21,6 +21,7 @@ Ordered by what a reader should act on, not by discovery order.
 | 22 | Web coverage read 47% because untested files were not counted | Medium (metric) | ✅ Fixed |
 | 23 | Two state-matrix rows would have been refused before the guard they test | — | ✅ Fixed |
 | 24 | `regionsCovering` returned 3.6M cells near a pole, hanging the tab | **Medium** | ✅ Fixed |
+| 25 | New tests passed but broke `npm run build`, which CI gates on | Medium (process) | ✅ Fixed |
 | 2 | `/fund` can double-fund inside a 250 ms window | Low | ☐ Open |
 | 3 | Oversized request body returns 500, not 413 | Cosmetic | ☐ Open |
 | 4 | CI ran nothing but Slither, path-filtered to `contracts/**` | **High** (process) | ✅ Fixed |
@@ -598,6 +599,38 @@ the fix costs one `Math.min`.
 the ordinary case did not get coarser. Note the mutation evidence here is a hang
 rather than a clean red: reverting the cap makes the test time out, which is a
 failure but an ugly one.
+
+## 25. New tests passed but broke `npm run build` — **fixed**
+
+Self-inflicted, and worth recording because the shape recurs.
+
+The web CI job runs three things: `vitest run --coverage`, then `npm run build`,
+which is `tsc -b && vite build`. `tsc -b` typechecks **everything under `src/`,
+including test files**. So a test can pass under vitest — which transpiles
+without typechecking — and still fail the build.
+
+D2 shipped four test files that did exactly that. `vitest run` was green,
+coverage was green, and I did not run the build; the breakage sat in two
+commits before the D1 pass surfaced it. Roughly fifty errors, all of them
+ordinary type sloppiness in test code:
+
+- a `props()` helper whose `after` parameter was **narrower** than the `Run`
+  type it had to satisfy (contravariance — about forty of the fifty);
+- chai's numeric matchers are typed `number | Date`, so `.to.be.lessThan(aBigInt)`
+  does not compile even though it runs perfectly;
+- `vi.fn(() => true)` infers the literal type `true`, so a later reassignment to
+  `false` is a type error;
+- a mock declared with no parameters, later given an implementation that takes
+  one.
+
+**Fixed** by correcting the types rather than excluding tests from the build.
+Excluding them is the tempting one-line alternative and it is worse: these files
+are the only consumers of `ConsoleProps` and `Run` outside the components
+themselves, so typechecking them is what catches a prop contract drifting.
+
+**The lesson is about the command, not the types.** "The tests pass" is not the
+same claim as "the tier passes", whenever a tier's CI job runs more than its
+test runner. Run what CI runs.
 
 ---
 

@@ -148,7 +148,7 @@ describe("salt", () => {
     let sawLarge = false;
     for (let i = 0; i < 200; i++) {
       const v = BigInt(chain.randomSalt());
-      expect(v).to.be.lessThan(BN254);
+      expect(v < BN254, `salt ${v} is outside the field`).to.equal(true);
       if (v > 2n ** 100n) sawLarge = true;
     }
     expect(sawLarge, "salts look far too small — is randomBytes returning zeros?").to.equal(true);

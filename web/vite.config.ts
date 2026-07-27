@@ -60,15 +60,15 @@ export default defineConfig({
       // components and seven client-core modules are all counted at the zero
       // they are (TEST-PLAN §6 D1/D2). Raise these when work lands; never lower
       // one to make a build pass — a ratchet that turns both ways is a comment.
-      // Raised twice with D2: 17.40 → 20.19 (wallets, zk, token, chain glue)
-      // → 22.25 (relay, router resolution). `App.tsx` and the four console
-      // components are still in here at zero, which is what keeps the absolute
-      // number low — see §6 D1.
+      // Raised three times: 17.40 → 20.19 → 22.25 (D2) → 30.42 (D1, the four
+      // consoles and the ops shell). What is left below is overwhelmingly
+      // `App.tsx` — 2,689 lines with no tests, and the single biggest reason
+      // this number is not higher.
       thresholds: {
-        statements: 22,
-        branches: 14,
-        functions: 19,
-        lines: 23,
+        statements: 30,
+        branches: 28,
+        functions: 27,
+        lines: 32,
       },
     },
   },

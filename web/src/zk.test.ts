@@ -50,10 +50,10 @@ describe("ZK commitments, against the real circuit's output", () => {
     // negative input to Poseidon is the bug the encoding prevents, and the
     // southern/western hemispheres are where it would appear.
     for (const lat of [-90_000_000, -1, 0, 1, 90_000_000]) {
-      expect(encLat(lat)).to.be.greaterThanOrEqual(0n);
+      expect(encLat(lat) >= 0n, `encLat(${lat}) went negative`).to.equal(true);
     }
     for (const lon of [-180_000_000, -1, 0, 1, 180_000_000]) {
-      expect(encLon(lon)).to.be.greaterThanOrEqual(0n);
+      expect(encLon(lon) >= 0n, `encLon(${lon}) went negative`).to.equal(true);
     }
     expect(encLat(-90_000_000)).to.equal(0n);
     expect(encLon(-180_000_000)).to.equal(0n);

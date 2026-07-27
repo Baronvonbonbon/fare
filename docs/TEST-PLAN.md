@@ -21,10 +21,10 @@ All three tiers pass today.
 | Tier | Runner | Tests | Covers |
 |---|---|---|---|
 | `test/*.ts` | `npx hardhat test` | 255 | contracts, ZK verifiers, invariant fuzz, upgradability, **chain-backed relay endpoints**, **per-payer cost ledger**, **relay key custody**, **full-lifecycle e2e**, **order state machine** |
-| `web/src/*.test.ts` | `cd web && npx vitest run` | 195 | 23 of 36 client modules, incl. **all four ops consoles' logic**, **burner wallets**, **ZK commitments**, **relay client + router resolution** |
+| `web/src/*.test.ts` | `cd web && npx vitest run` | 249 | 28 of 36 client modules, incl. **all four ops consoles (logic + rendered)**, **burner wallets**, **ZK commitments**, **relay client + router resolution** |
 | `venue-node/*.test.mjs` | `cd venue-node && node --test` | 94 | economics + **break-even**, scorer, swap, treasury, agent, shieldkeeper + **decorrelation**, **relay HTTP surface + metadata** |
 
-**544 tests, all green**, and all of them now run in CI (§7 E1). The contract tier is the strong part and deserves
+**598 tests, all green**, and all of them now run in CI (§7 E1). The contract tier is the strong part and deserves
 saying so: a seeded-PRNG invariant campaign (`test/invariant.test.ts`) asserts
 escrow conservation and vault solvency after *every* operation and reproduces
 failures from a printed seed; the verifier tests pin fail-safe-before-VK and
@@ -37,7 +37,7 @@ Slither is in CI with zero high-severity findings ([SECURITY-REVIEW.md](SECURITY
 | Surface | Size | Tests |
 |---|---|---|
 | ~~`venue-node/relay.mjs`~~ — 16 HTTP endpoints, holds `RELAY_PRIVATE_KEY` | 953 lines | ✅ 58 across two tiers (§5 C1, C2) |
-| ~~`web/src/ops/`~~ — four consoles + shell | 1,385 lines | ✅ 29 (all decision logic extracted — §5 C5) |
+| ~~`web/src/ops/`~~ — four consoles + shell | 1,385 lines | ✅ 82 (logic §5 C5 + rendering §6 D1) |
 | `web/src/App.tsx` | 2,689 lines | **0** |
 | `shieldnote.ts`, `shield.ts` | ~520 lines | **0** |
 | ~~`wallets.ts`~~ · ~~`zk.ts`~~ · ~~`token.ts`~~ · ~~`chain.ts`~~ · ~~`relay.ts`~~ | ~1,180 lines | ✅ 71 (§6 D2) |
@@ -665,7 +665,48 @@ broken install rather than a config problem:
 
 ## 6. Function
 
-☐ **D1 — Ops console component tests.** Four consoles, zero coverage.
+✅ **D1 — Ops console component tests** (53 tests across five files). All four
+consoles plus the shell, rendered.
+
+**This required the decision C5 deferred**: the web tier had no DOM testing
+dependency. It now has `jsdom` + `@testing-library/react`, applied *per file*
+via `// @vitest-environment jsdom`, so the other 195 tests keep running in plain
+node and pay nothing for it.
+
+What component tests reach that C5's logic tests could not: **C5 proved the
+model, this proves the operator sees it.** Every control in these consoles is
+enabled by a boolean computed inside the component, and a wrong one is invisible
+to `ruling.ts` or `govparams.ts` because it does not live there.
+
+- **`PauseConsole` (100%)** — the fast-brake / slow-release split as *rendered*.
+  A guardian can click Pause and **cannot** click Resume: an enabled Resume
+  would promise a guardian something the registry refuses, during an incident.
+- **`GovernanceConsole` (83%)** — [TEST-FINDINGS.md](TEST-FINDINGS.md) #13's
+  regression, at the DOM. `toInt` returning `NaN` for a blank field is only half
+  the fix; a component that computed the error and rendered `disabled={false}`
+  anyway would pass every unit test and lose the protocol fee again. Also
+  per-domain authority: owning `orders` must not unlock the vault's card.
+- **`DisputesConsole` (59%)** — the escrow preview the arbiter signs against
+  tracks the slider and keeps summing to the escrow, and the slash warning fires
+  because `FareDrivers.slash` *clamps* rather than reverting.
+- **`UpgradeConsole` (94%)** — `pauseRegistry` gets `register()` and never
+  `upgradeContract()`, and re-registering the live address is **blocked**, not
+  warned about: a no-op promotion burns a version bump and, with `freezeOld`,
+  freezes the contract it just promoted.
+- **`OpsApp` (88%)** — the shell that actually sets `busy`. Worth its own file
+  because all four console suites assert "controls die while busy" while
+  *passing `busy` in as a prop*; without this they describe a flag nobody sets.
+  Also pins that `busy` is released after a **failure** (otherwise one revert
+  locks the console until a reload) and that the receipt is awaited *before* the
+  reload (otherwise the refresh reads pre-transaction state).
+
+Web coverage 22.25% → **30.42%** of statements, and branches 14.35% → **28.39%**.
+
+**One deliberate non-fix, recorded rather than changed:** `toInt` admits
+`\d+(\.\d+)?` and truncates, so typing `1.5` into a bps field submits `1`. That
+is what the source says today and the test pins it — but it sits awkwardly
+beside #13's own rule that setting the fee to zero should take typing a zero. If
+that reasoning holds, setting it to 1 should take typing 1. Left as a decision.
 
 ✅ **D2 — Client core units.** Six modules covered (71 tests):
 `wallets.test.ts` (10), `zk.test.ts` (11), `token.test.ts` (10),
@@ -986,14 +1027,16 @@ coverage of product code rather than plumbing.
 11. ✅ **D2 — client core.** Six modules (71 tests), web coverage 17.40% →
     22.25%; found and fixed a polar blow-up in the region cover.
 
-**What is left is the UI.** **D1** — the four console components and `App.tsx` —
-needs a DOM testing dependency, which is a decision rather than just a gap: the
-logic that decides what a console *does* was already extracted and tested (C5),
-so what remains is rendering. `App.tsx` at 2,689 lines, plus those components,
-is what keeps the web floor at 22%. Also open: `shieldnote.ts` and `shield.ts`
-(~520 lines), **E4**'s circuit-constraint snapshot (small, worth doing alongside
-any circuit work), **C4** behind the MPC ceremony, and **B3** as a decision
-rather than a recommendation.
+12. ✅ **D1 — ops consoles, rendered.** All four plus the shell (53 tests); web
+    coverage 22.25% → 30.42%, branches 14.35% → 28.39%.
+
+**What is left is `App.tsx`** — 2,689 lines, no tests, and now by far the single
+largest reason the web floor sits at 30% rather than higher. The jsdom
+dependency D1 added makes it reachable; it is a big enough job to be its own
+item rather than a footnote. Also open: `shieldnote.ts` and `shield.ts` (~520
+lines), **E4**'s circuit-constraint snapshot (small, worth doing alongside any
+circuit work), **C4** behind the MPC ceremony, and **B3** as a decision rather
+than a recommendation.
 
 B3 is deliberately left as a decision rather than a recommendation: it is worth
 adopting only if the privacy posture should be pinned by tests.

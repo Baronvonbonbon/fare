@@ -19,7 +19,9 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 const { poolStub, shieldStub, chainStub } = vi.hoisted(() => ({
   poolStub: { relayPool: () => [] as string[] },
   shieldStub: {
-    shieldedFundingAvailable: () => true,
+    // Typed as `boolean`, not inferred as the literal `true` — these are
+    // reassigned per test.
+    shieldedFundingAvailable: (): boolean => true,
     fundViaShield: async () => ({ funded: true }),
   },
   chainStub: {
@@ -79,7 +81,7 @@ describe("relay selection", () => {
     poolStub.relayPool = () => [RELAY];
     expect(forwarderAvailable()).to.equal(true);
 
-    chainStub.ADDRESSES.forwarder = "" as any;
+    (chainStub.ADDRESSES as any).forwarder = "";
     expect(forwarderAvailable(), "claimed gasless with no forwarder deployed").to.equal(false);
     chainStub.ADDRESSES.forwarder = "0x" + "f0".repeat(20);
 
@@ -173,7 +175,7 @@ describe("the decline protocol", () => {
     // 402 is the relay's profitability guard, not a fault. The user is asked,
     // and a yes means the same call goes out paying its own gas.
     stubFetch(() => json(402, { declined: true, error: "relay comp below relayed cost", action: "settle" }));
-    const confirm = vi.fn(() => true);
+    const confirm = vi.fn((_msg?: string) => true);
     vi.stubGlobal("window", { confirm });
 
     const tx = await relaySettle(runner, "confirmDropoffZK", [{ orderId: 1n }]);
@@ -210,7 +212,7 @@ describe("the decline protocol", () => {
     // own gas?" for a transport fault trains users to click through real
     // problems — and the caller should see the error.
     stubFetch(() => json(500, { error: "boom" }));
-    const confirm = vi.fn(() => true);
+    const confirm = vi.fn((_msg?: string) => true);
     vi.stubGlobal("window", { confirm });
 
     await expect(relaySettle(runner, "confirmPickup", [{ orderId: 1n }])).rejects.toThrow(/boom/);
@@ -243,7 +245,7 @@ describe("the decline protocol", () => {
 
   it("goes direct without asking when no relay is configured", async () => {
     poolStub.relayPool = () => [];
-    const confirm = vi.fn(() => true);
+    const confirm = vi.fn((_msg?: string) => true);
     vi.stubGlobal("window", { confirm });
     (globalThis as any).fetch = vi.fn(async () => { throw new Error("should not be called"); });
 

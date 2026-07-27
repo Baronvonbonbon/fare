@@ -23,7 +23,7 @@ import { Wallet } from "ethers";
 // providers and reads the address book.
 const { vaultStub, providerStub } = vi.hoisted(() => ({
   vaultStub: {
-    balanceOf: vi.fn(async () => 0n),
+    balanceOf: vi.fn(async (_addr?: string) => 0n),
     withdraw: vi.fn(async () => ({ wait: async () => ({}) })),
   },
   providerStub: { getBalance: vi.fn(async () => 0n) },
@@ -223,7 +223,7 @@ describe("per-order burner wallets", () => {
     const b = newOrderWallet();
     const c = newOrderWallet();
     providerStub.getBalance.mockResolvedValue(PAS("3"));
-    vaultStub.balanceOf.mockImplementation(async (addr: string) =>
+    vaultStub.balanceOf.mockImplementation(async (addr?: string) =>
       addr === b.address ? Promise.reject(new Error("node exploded")) : 0n
     );
 
