@@ -60,15 +60,15 @@ export default defineConfig({
       // components and seven client-core modules are all counted at the zero
       // they are (TEST-PLAN §6 D1/D2). Raise these when work lands; never lower
       // one to make a build pass — a ratchet that turns both ways is a comment.
-      // Raised three times: 17.40 → 20.19 → 22.25 (D2) → 30.42 (D1, the four
-      // consoles and the ops shell). What is left below is overwhelmingly
-      // `App.tsx` — 2,689 lines with no tests, and the single biggest reason
-      // this number is not higher.
+      // Raised four times: 17.40 → 20.19 → 22.25 (D2) → 30.42 (D1) → 33.19
+      // (App.tsx's order-flow decisions, extracted to orderflow.ts). What is
+      // left below is `App.tsx`'s ~2,500 remaining lines, which are rendering
+      // rather than decisions, plus shieldnote.ts / shield.ts.
       thresholds: {
-        statements: 30,
-        branches: 28,
-        functions: 27,
-        lines: 32,
+        statements: 33,
+        branches: 30,
+        functions: 30,
+        lines: 35,
       },
     },
   },

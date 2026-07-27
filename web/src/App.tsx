@@ -1,4 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+// The decisions this file used to bury — deadline hygiene, the driver board,
+// receipts, and order placement — live in orderflow.ts so they can be asserted
+// without a DOM. Same move C5 made for the ops consoles.
+import {
+  type OrderRow, type VenueRow, type ReceiptData,
+  STATUS, badgeClass, TERMINAL_STATUS,
+  orderExpiry, fmtLeft, driverBoard,
+  dropStoreKey, receiptKey, loadReceipt, placeOrder,
+} from "./orderflow";
 import {
   ADDRESSES,
   readProvider,
@@ -7,7 +16,6 @@ import {
   SignerMode,
   connect,
   contracts,
-  computeDropCommit,
   currentBlock,
   ratingsEnabled,
   decodePayload,
@@ -36,7 +44,6 @@ import {
   waitForFunding,
 } from "./chain";
 import {
-  newOrderWallet,
   orderWalletAddresses,
   contractsForOrder,
   walletFor,
@@ -73,7 +80,7 @@ import { escrowCapsule, evidenceURI } from "./disclosure";
 import { usePasUsd, cachedRate, fiatOf, pasToUsd, formatUsd } from "./pricing";
 import {
   tokenOrdersEnabled, stablecoinAsset, assetOf, fmtAsset, parseAsset,
-  mintStablecoin, approveToken, stablecoinBalance, gaslessCreateOrderERC20,
+  mintStablecoin, approveToken, stablecoinBalance,
 } from "./token";
 import { MicroDeg, distanceMeters, fmtCoord, fmtDist, getPosition, snapToGrid } from "./geo";
 import { QRScan, QRShow } from "./qr";
@@ -82,160 +89,17 @@ import { AreaMap, PinMap } from "./tilemap";
 
 // ---- shared types ----
 
-interface OrderRow {
-  id: bigint;
-  customer: string;
-  venueId: bigint;
-  status: number;
-  driver: string;
-  orderValue: bigint;
-  tip: bigint;
-  fare: bigint;
-  maxFare: bigint;
-  dropCommit: string;
-  createdAt: bigint;
-  pickupWindowSecs: bigint;
-  pickupDeadline: bigint;
-  deliveryDeadline: bigint;
-  token: string; // escrow asset — address(0) native PAS, else the stablecoin (C3)
-  bidders: { addr: string; amount: bigint; delivered: number; failed: number; ratingX100: number; ratingN: number }[];
-}
-
-interface VenueRow {
-  id: bigint;
-  operator: string;
-  signer: string;
-  payout: string;
-  lat: number;
-  lon: number;
-  active: boolean;
-  pickups: number;
-  metadataURI: string;
-}
-
-const STATUS = ["—", "Open", "Assigned", "PickedUp", "Delivered", "Cancelled", "Disputed", "Resolved"];
-const badgeClass = (s: number) => STATUS[s]?.toLowerCase() ?? "";
-
-// ---- deadline hygiene ----
-// Open orders have no on-chain deadline until assigned, so we treat an unbid
-// open order older than its own pickup window as stale (had it been taken at
-// creation it would already be past pickup — nobody is coming). Assigned /
-// picked-up orders have real on-chain deadlines.
-type Expiry = { late: boolean; label: string } | null;
-function orderExpiry(o: OrderRow, nowSec: number): Expiry {
-  if (o.status === 1) {
-    const staleAt = Number(o.createdAt + o.pickupWindowSecs);
-    return nowSec > staleAt ? { late: true, label: "stale" } : null;
-  }
-  if (o.status === 2) {
-    return nowSec > Number(o.pickupDeadline) ? { late: true, label: "pickup overdue" } : null;
-  }
-  if (o.status === 3) {
-    return nowSec > Number(o.deliveryDeadline) ? { late: true, label: "delivery overdue" } : null;
-  }
-  return null;
-}
 function ExpiryBadge({ o }: { o: OrderRow }) {
   const e = orderExpiry(o, Math.floor(Date.now() / 1000));
   return e ? <span className="badge expired">{e.label}</span> : null;
 }
 
 type Role = "customer" | "driver" | "venue";
-
-// Order lifecycle end-states — never re-read once cached.
-const TERMINAL_STATUS = new Set([4, 5, 7]); // Delivered, Cancelled, Resolved
 // First-load log backfill window (~46 days at 2s blocks) — well past our
 // deploy, and within Paseo's getLogs range. Incremental after that.
 const INITIAL_LOOKBACK = 2_000_000;
 
-// Drop-location secrets the customer holds until dropoff.
-const dropStoreKey = (commit: string) => `fare.drop.${commit.toLowerCase()}`;
-
-// B7 — order receipts. Cart line items are off-chain (privacy), so we stash a
-// receipt locally at checkout keyed by the order's dropCommit; the receipt view
-// and reorder read it back. Falls back to on-chain amounts when absent (legacy).
-const receiptKey = (commit: string) => `fare.receipt.${commit.toLowerCase()}`;
-interface ReceiptData {
-  venueId: string;
-  venueName: string;
-  items: { name: string; price: string; qty: number }[];
-  orderValue: string; // PAS decimal
-  tip: string;
-  maxFare: string;
-  placedAt?: number;
-  rateUsd?: number; // PAS/USD captured at checkout — locks the receipt's fiat value (C2)
-}
-function loadReceipt(commit: string): ReceiptData | null {
-  try {
-    const r = localStorage.getItem(receiptKey(commit));
-    return r ? (JSON.parse(r) as ReceiptData) : null;
-  } catch {
-    return null;
-  }
-}
-
-/// Shared order-placement: fresh per-order wallet, faucet-funded, escrows the
-/// order. Used by both first-time checkout and reorder. Persists the drop secret
 /// + the receipt keyed by the (fresh) commit.
-async function placeOrder(opts: {
-  venueId: bigint;
-  orderValueWei: bigint;
-  tipWei: bigint;
-  maxFareWei: bigint;
-  lat: number;
-  lon: number;
-  receipt: ReceiptData;
-  token?: string; // undefined / address(0) = native PAS; else stablecoin escrow (C3)
-  act: (label: string, fn: () => Promise<any>) => Promise<any>;
-  say: (m: string, err?: boolean) => void;
-}) {
-  const { venueId, orderValueWei, tipWei, maxFareWei, lat, lon, receipt, token, act, say } = opts;
-  const salt = randomSalt();
-  const commit = computeDropCommit(lat, lon, salt);
-  localStorage.setItem(dropStoreKey(commit), JSON.stringify({ lat, lon, salt }));
-  localStorage.setItem(receiptKey(commit), JSON.stringify({ ...receipt, placedAt: Date.now() }));
-  const escrow = orderValueWei + tipWei;
-  const isToken = !!token && token !== ZeroAddress;
-  return act("Create order", async () => {
-    const w = newOrderWallet();
-    // Announce this order wallet's public key on the order thread as soon as the
-    // order exists. Sealed bids are sealed TO the customer, and a driver has no
-    // other way to obtain the key of a wallet that has never spoken (phase 4).
-    const announce = (orderId: bigint) =>
-      new OrderThread(orderId, w.privateKey, w.address, ZeroAddress).open().catch(() => {});
-    // KS-ONLY funding: the burner is funded solely through the Kusama Shield pool
-    // (no faucet), so no non-shielded on-chain edge re-links it to the customer.
-    // `fundBurner` throws if shielded funding isn't configured — there is no
-    // faucet fallback anymore.
-    say("Funding the private wallet through the shielded pool…");
-    if (isToken) {
-      // Token order: the burner needs only a little gas (for the stablecoin mint);
-      // the order itself is GASLESS (Option C) — permit + forwarded creation, the
-      // relay pays. Escrow value is the stablecoin.
-      await fundBurner(w.address, parse("0.5"));
-      say("Minting stablecoin escrow to the private wallet…");
-      await mintStablecoin(w, w.address, escrow);
-      if (forwarderAvailable()) {
-        return gaslessCreateOrderERC20(contracts(w).orders, token!, {
-          venueId, dropCommit: commit, orderValue: orderValueWei, tip: tipWei, maxFare: maxFareWei,
-        });
-      }
-      // No forwarder → the (KS-funded) burner pays its own gas the direct way.
-      await approveToken(w, token!, ADDRESSES.orders, escrow);
-      return contracts(w).orders.createOrderERC20(token!, venueId, commit, orderValueWei, tipWei, maxFareWei, 0, 0);
-    }
-    await fundBurner(w.address, escrow + parse("0.2"));
-    const tx = await contracts(w).orders.createOrder(
-      venueId, commit, orderValueWei, tipWei, maxFareWei, 0, 0, { value: escrow }
-    );
-    const rec = await tx.wait();
-    const created = rec?.logs
-      ?.map((l: any) => { try { return contracts(w).orders.interface.parseLog(l); } catch { return null; } })
-      ?.find((e: any) => e?.name === "OrderCreated");
-    if (created) await announce(created.args.orderId);
-    return tx;
-  });
-}
 
 export default function App() {
   const [session, setSession] = useState<Session | null>(null);
@@ -1391,13 +1255,6 @@ const TRACK_STEPS = [
   { s: 4, label: "Delivered" },
 ];
 
-function fmtLeft(sec: number): string {
-  if (sec <= 0) return "now";
-  const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60;
-  if (h > 0) return `${h}h ${m}m`;
-  if (m > 0) return `${m}m ${s}s`;
-  return `${s}s`;
-}
 
 // B2 — live order tracking. The status stepper + ETA are derived entirely from
 // on-chain data (order status + deadlines); a live driver-location dot needs the
@@ -2045,42 +1902,24 @@ function DriverView({ session, orders, venues, act, busy, signed, say, myLoc, ra
     contracts().drivers.drivers(session.address).then(setMe).catch(() => {});
   }, [session, orders]);
 
-  const jobs = orders.filter(
-    (o: OrderRow) =>
-      session &&
-      o.driver.toLowerCase() === session.address.toLowerCase() &&
-      (o.status === 2 || o.status === 3 || o.status === 6)
-  );
-
-  // Open orders, tagged with pickup distance (from my location to the public
-  // venue pin). With a radius set we hide out-of-town pickups; either way we
-  // sort nearest-first so the closest jobs surface.
+  // Which jobs are mine, which open orders are worth showing, and in what
+  // order — all of it in orderflow.ts, where it is tested directly.
   const nowSec = Math.floor(Date.now() / 1000);
-  const venueOf = (o: OrderRow) => venues.find((v: VenueRow) => v.id === o.venueId);
-  // Drop stale (abandoned) open orders — a driver shouldn't chase them.
-  const openLive = orders.filter((o: OrderRow) => o.status === 1 && !orderExpiry(o, nowSec));
-  const staleCount = orders.filter((o: OrderRow) => o.status === 1).length - openLive.length;
-  const openTagged = openLive.map((o: OrderRow) => {
-    const v = venueOf(o);
-    const dist = myLoc && v ? distanceMeters(myLoc, { lat: v.lat, lon: v.lon }) : null;
-    return { o, dist };
-  });
+  const { jobs, shown, hidden, staleCount, openByVenue: openCounts } = driverBoard(
+    orders as OrderRow[],
+    venues as VenueRow[],
+    { me: session?.address ?? null, myLoc, radiusKm, nowSec }
+  );
   const filtering = !!myLoc && radiusKm > 0;
-  const shown = (filtering
-    ? openTagged.filter((x: any) => x.dist != null && x.dist <= radiusKm * 1000)
-    : openTagged
-  ).sort((a: any, b: any) => (a.dist ?? Infinity) - (b.dist ?? Infinity));
-  const hidden = openTagged.length - shown.length;
+  const openLive = orders.filter((o: OrderRow) => o.status === 1 && !orderExpiry(o, nowSec));
 
   // Venue pins for the proximity map, tagged with their live open-order count.
-  const openByVenue = new Map<string, number>();
-  for (const o of openLive) openByVenue.set(String(o.venueId), (openByVenue.get(String(o.venueId)) ?? 0) + 1);
   const venuePins: VenuePin[] = venues.map((v: VenueRow) => ({
     id: String(v.id),
     lat: v.lat,
     lon: v.lon,
     name: v.metadataURI.replace(/^\w+:\/\//, ""),
-    openCount: openByVenue.get(String(v.id)) ?? 0,
+    openCount: openCounts.get(String(v.id)) ?? 0,
   }));
 
   if (session && me && !me.registered) return <DriverRegister {...{ act, busy, signed }} />;

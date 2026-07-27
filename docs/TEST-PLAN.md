@@ -21,10 +21,10 @@ All three tiers pass today.
 | Tier | Runner | Tests | Covers |
 |---|---|---|---|
 | `test/*.ts` | `npx hardhat test` | 255 | contracts, ZK verifiers, invariant fuzz, upgradability, **chain-backed relay endpoints**, **per-payer cost ledger**, **relay key custody**, **full-lifecycle e2e**, **order state machine** |
-| `web/src/*.test.ts` | `cd web && npx vitest run` | 249 | 28 of 36 client modules, incl. **all four ops consoles (logic + rendered)**, **burner wallets**, **ZK commitments**, **relay client + router resolution** |
+| `web/src/*.test.ts` | `cd web && npx vitest run` | 277 | 29 of 36 client modules, incl. **all four ops consoles (logic + rendered)**, **burner wallets**, **ZK commitments**, **relay client + router resolution**, **order flow** |
 | `venue-node/*.test.mjs` | `cd venue-node && node --test` | 94 | economics + **break-even**, scorer, swap, treasury, agent, shieldkeeper + **decorrelation**, **relay HTTP surface + metadata** |
 
-**598 tests, all green**, and all of them now run in CI (§7 E1). The contract tier is the strong part and deserves
+**626 tests, all green**, and all of them now run in CI (§7 E1). The contract tier is the strong part and deserves
 saying so: a seeded-PRNG invariant campaign (`test/invariant.test.ts`) asserts
 escrow conservation and vault solvency after *every* operation and reproduces
 failures from a printed seed; the verifier tests pin fail-safe-before-VK and
@@ -38,7 +38,7 @@ Slither is in CI with zero high-severity findings ([SECURITY-REVIEW.md](SECURITY
 |---|---|---|
 | ~~`venue-node/relay.mjs`~~ — 16 HTTP endpoints, holds `RELAY_PRIVATE_KEY` | 953 lines | ✅ 58 across two tiers (§5 C1, C2) |
 | ~~`web/src/ops/`~~ — four consoles + shell | 1,385 lines | ✅ 82 (logic §5 C5 + rendering §6 D1) |
-| `web/src/App.tsx` | 2,689 lines | **0** |
+| `web/src/App.tsx` — rendering only; its decisions now live in `orderflow.ts` | 2,511 lines | 🟡 29 (§6 D6) |
 | `shieldnote.ts`, `shield.ts` | ~520 lines | **0** |
 | ~~`wallets.ts`~~ · ~~`zk.ts`~~ · ~~`token.ts`~~ · ~~`chain.ts`~~ · ~~`relay.ts`~~ | ~1,180 lines | ✅ 71 (§6 D2) |
 
@@ -888,6 +888,49 @@ order is refused by a token check before the status is ever read, and `Cancelled
 reached via `cancelOpen` leaves no driver, so `abandonOrder` answers on identity
 instead. Which *path* reaches a status decides which guard replies.
 
+🟡 **D6 — `App.tsx`** (`web/src/orderflow.ts` + `orderflow.test.ts`, 29 tests).
+The largest file in the repo had no tests, and the reason is structural: every
+decision worth asserting was welded to a 2,689-line component.
+
+**The fix was C5's move again** — pull the logic that decides what the UI *does*
+out of the thing that renders it. `orderflow.ts` now holds the four decisions
+that were buried, and covers **98.85%** of its own statements:
+
+- **Deadline hygiene.** An open order carries no on-chain deadline (one is only
+  written at assignment), so an unbid order older than its own pickup window is
+  treated as stale — the only signal that nobody is coming. Assigned and
+  picked-up orders switch to their real deadlines, and terminal orders are never
+  marked late.
+- **The driver board** — which jobs are mine, which open orders are live rather
+  than abandoned, radius filtering, and a nearest-first sort with unknown
+  distances **last**. Three failures here are all silent: a driver who sees
+  nothing assumes the market is empty, one shown stale orders chases pickups
+  nobody waits for, and a driver who declined location must still see the whole
+  board rather than an empty one.
+- **Drop secrets and receipts**, keyed case-insensitively on the commitment —
+  a case-sensitive key loses the drop secret and with it the ability to prove
+  the dropoff at all — and returning `null` rather than throwing on corrupt
+  storage, since these run during render.
+- **`placeOrder`, the customer's money path.** Its *ordering* is load-bearing
+  and is asserted directly: the drop secret is written **before** the
+  transaction, because a secret for an order that never existed is harmless
+  while a missing secret for one that did makes the escrow unrecoverable. Also
+  pinned: escrow is value **plus tip** with a gas margin on top, the coordinates
+  never appear in the call, the order wallet announces its key (without which no
+  sealed bid can ever be sealed to it), the native/token/gasless branches pick
+  correctly, `address(0)` is treated as native, and a funding failure surfaces
+  rather than producing an unfunded order.
+
+Mutation-checked, one test each: reversing the sort, moving the secret write
+after the transaction, and shifting the stale boundary to `>=`.
+
+☐ **What remains of D6** is `App.tsx`'s ~2,500 remaining lines, which are
+genuinely rendering rather than decisions — plus one more extraction worth
+doing: the per-role **order discovery** in `App`'s refresh callback (a customer
+matches the local burner registry, a venue its own ids, a driver a region query
+with a full-stream fallback). It sits inside a `useCallback` closure, so it is a
+second refactor rather than a test.
+
 ---
 
 ## 7. Harness
@@ -1030,13 +1073,16 @@ coverage of product code rather than plumbing.
 12. ✅ **D1 — ops consoles, rendered.** All four plus the shell (53 tests); web
     coverage 22.25% → 30.42%, branches 14.35% → 28.39%.
 
-**What is left is `App.tsx`** — 2,689 lines, no tests, and now by far the single
-largest reason the web floor sits at 30% rather than higher. The jsdom
-dependency D1 added makes it reachable; it is a big enough job to be its own
-item rather than a footnote. Also open: `shieldnote.ts` and `shield.ts` (~520
-lines), **E4**'s circuit-constraint snapshot (small, worth doing alongside any
-circuit work), **C4** behind the MPC ceremony, and **B3** as a decision rather
-than a recommendation.
+13. 🟡 **D6 — `App.tsx`.** Its four buried decisions extracted to
+    `orderflow.ts` and covered at 98.85% (29 tests); web coverage 30.42% →
+    33.19%. The remaining ~2,500 lines are rendering.
+
+**What is left is genuinely smaller than it looks.** `App.tsx`'s remainder is
+markup rather than decisions, with one more extraction worth doing — the
+per-role **order discovery** in its refresh callback. Then `shieldnote.ts` and
+`shield.ts` (~520 lines), **E4**'s circuit-constraint snapshot (small, worth
+doing alongside any circuit work), **C4** behind the MPC ceremony, and **B3** as
+a decision rather than a recommendation.
 
 B3 is deliberately left as a decision rather than a recommendation: it is worth
 adopting only if the privacy posture should be pinned by tests.
