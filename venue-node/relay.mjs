@@ -45,7 +45,14 @@ const FUND_AMOUNT = parseEther(process.env.FUND_AMOUNT_PAS || "5");
 const FUND_MIN = parseEther(process.env.FUND_MIN_PAS || "2");
 const ADDRESS_BOOK = process.env.ADDRESS_BOOK || "../deployed-addresses.json";
 const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || "*").split(",").map((s) => s.trim());
-const GAS_SETTLE = 500_000_000n; // Paseo weight-scale limit for a settlement call
+// Paseo prices gas on a weight scale, so a settlement call needs a limit that
+// looks absurd on a normal EVM — and Paseo reserves limit × price at
+// submission, which is why only the funded relay uses it (see
+// web/src/gasbudget.ts). It is configurable because that value is
+// chain-specific: any EVM with a standard per-transaction gas cap (hardhat's is
+// 2^24) rejects the Paseo default outright, and the relay could not settle at
+// all until this could be overridden.
+const GAS_SETTLE = BigInt(process.env.RELAY_GAS_SETTLE || 500_000_000);
 const GAS_FUND = 100_000n; // a plain transfer; keeps the fee reservation small
 const RATE_WINDOW_MS = 60_000;
 const RATE_MAX = Number(process.env.RATE_MAX || 20); // requests / IP / window

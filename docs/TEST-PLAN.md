@@ -20,11 +20,11 @@ All three tiers pass today.
 
 | Tier | Runner | Tests | Covers |
 |---|---|---|---|
-| `test/*.ts` | `npx hardhat test` | 222 | contracts, ZK verifiers, invariant fuzz, upgradability, **chain-backed relay endpoints** |
+| `test/*.ts` | `npx hardhat test` | 229 | contracts, ZK verifiers, invariant fuzz, upgradability, **chain-backed relay endpoints**, **per-payer cost ledger** |
 | `web/src/*.test.ts` | `cd web && npx vitest run` | 124 | 17 of 36 client modules, incl. **all four ops consoles' logic** |
 | `venue-node/*.test.mjs` | `cd venue-node && node --test` | 94 | economics + **break-even**, scorer, swap, treasury, agent, shieldkeeper + **decorrelation**, **relay HTTP surface + metadata** |
 
-**440 tests, all green**, and all of them now run in CI (§7 E1). The contract tier is the strong part and deserves
+**447 tests, all green**, and all of them now run in CI (§7 E1). The contract tier is the strong part and deserves
 saying so: a seeded-PRNG invariant campaign (`test/invariant.test.ts`) asserts
 escrow conservation and vault solvency after *every* operation and reproduces
 failures from a printed seed; the verifier tests pin fail-safe-before-VK and
@@ -58,15 +58,15 @@ deployed live. Full dependency injection (provider, wallet, config) is still
 settings re-imports under a fresh query string (`./relay.mjs?rate-limit`). That
 works and is used, but a proper factory would be cleaner if this file grows.
 
-**~~There is no deterministic cost measurement.~~** 🟡 Partly fixed. §3 A1 pins
-18 paths in `gas-snapshot.json` behind a ±5% CI gate, so gas regressions now
-surface in review.
+**~~There is no deterministic cost measurement.~~** ✅ Fixed, in two halves. §3 A1
+pins 18 paths in `gas-snapshot.json` behind a ±5% CI gate, so gas regressions
+surface in review; §3 A3 adds the *per-role cost ledger* that runs unattended.
 
-What is still missing is a *per-role cost ledger* that runs unattended.
-`scripts/privacy/measure-costs.mjs` is the right work — the per-payer accounting
-and the phase-3b split assertion in particular — but it needs three live relay
-processes and a funded Paseo deployer, and emits a one-shot report, so it cannot
-gate a pull request (A3). There is also still no `solidity-coverage` (E2).
+The accounting `scripts/privacy/measure-costs.mjs` did — per-payer attribution in
+particular — is now a shared module, so the half that needs three live relay
+processes and a funded Paseo deployer stays nightly while the same lifecycle,
+the same ledger and the same report shape gate every pull request against
+hardhat. There is still no `solidity-coverage` (E2).
 
 ---
 
@@ -133,9 +133,60 @@ combinations: at the returned fare the guard passes, and at one wei less it
 fails. Mutation-checked — and the first version of that property was vacuous
 (see [TEST-FINDINGS.md](TEST-FINDINGS.md) #8–11, sixth instance).
 
-☐ **A3 — Promote `measure-costs.mjs`.** Split it into a local-chain mode (CI,
-stubbed relays) and a live-Paseo mode (nightly), both emitting the same ledger
-schema. Commit it, alongside `_relaykeys.mjs`.
+✅ **A3 — Per-payer cost ledger, running unattended**
+(`scripts/privacy/ledger.mjs` + `test/cost-ledger.test.ts`, 7 tests).
+
+The accounting came out of `measure-costs.mjs` into a pure module — no chain, no
+I/O, callers hand it gas, price and revenue — and both modes now use it: the live
+Paseo run through three real relays, and a local-chain run that gates per-PR. The
+report shape is identical from either, so the two can be diffed against each
+other.
+
+**The numbers are not what this pins** — A1's snapshot owns those, and the
+hardhat figures are not comparable to Paseo's anyway. **Who pays** is the claim.
+A change that moves a cost from the relay onto the customer does not alter the
+total, and a single aggregate would hide it completely, so every step is asserted
+against the party that should have footed it:
+
+| Payer | Tx | Steps |
+|---|---|---|
+| relay | 4 | `/fund`, `/submit confirmPickup`, `/submit confirmDropoffZK`, `/withdraw` |
+| customer | 2 | `createOrder`, `acceptBid` — and *only* these |
+| driver | 1 | `placeBid` |
+| venue | 1 | `vault.withdraw`, the unsubsidised path |
+
+That table is the F8 bargain stated as a test: the relay foots every gasless
+step and **never fronts escrow**, the customer pays only for the two actions that
+move their own money, and the driver needs gas for the bid alone. The relay earns
+on exactly one endpoint (`/withdraw`, 1%) and still nets negative — the A2
+economics visible as a balance, with the test naming `breakeven.test.mjs` in its
+failure message if that ever flips.
+
+The delivery is driven end to end against the real `relay.mjs` over a JSON-RPC
+bridge to hardhat's in-process chain (the C1 arrangement), from a **genuine fresh
+burner** rather than a funded signer — `/fund` declines an address that already
+holds gas, so only a real burner exercises the sponsorship path at all.
+
+Three properties of the ledger itself are checked separately from the delivery:
+the per-payer totals reconstruct from the rows and the whole from the payers (an
+off-by-one in the grouping would survive a spot check), the report's keys are
+pinned in both shapes, and a row without a payer is **refused** — an
+unattributed cost is precisely the failure this file exists to prevent.
+
+Mutation-checked in both directions. Dropping the payer filter from `stepsFor`
+fails all three attribution tests — including by name, `the relay paid for
+createOrder — it must never front escrow`. And reverting the gas-limit fix below
+fails **every** test in the file at the fixture, which is the check that matters
+most here: it proves the delivery really is driven through the live relay's
+settlement path rather than quietly skipping it.
+
+Turned up [TEST-FINDINGS.md](TEST-FINDINGS.md) #18: the relay's 500 M settlement
+gas limit is a Paseo weight-scale number that exceeds hardhat's 2^24 per-tx cap,
+so the relay could not settle on a local chain at all. Now overridable, default
+unchanged.
+
+The live mode still needs a funded deployer and three relay processes; it stays
+nightly (§7 E3). Both it and `_relaykeys.mjs` are committed.
 
 ✅ **A4 — Proof-cost snapshot** (`test/proof-cost.test.ts` → `proof-cost.json`,
 4 tests). Regenerate with `UPDATE_PROOF_SNAPSHOT=1`.
@@ -614,8 +665,9 @@ gitignored; the job restores them from the byte-identical tracked copies under
    fee-recovery guards are not covered.
 3. ✅ **B1 / B2 — leak sweep + positive controls.** Done (8 tests). The privacy claims are the
    product; today they are asserted per-test and never negatively controlled.
-4. 🟡 **A1 / A3 — gas snapshot + committed cost ledger.** A1 done (18 paths,
-   ±5% gate); A3 (splitting `measure-costs.mjs` into local + live modes) remains.
+4. ✅ **A1 / A3 — gas snapshot + committed cost ledger.** Both done: 18 paths
+   behind a ±5% gate, and a per-payer ledger shared by the local and live modes
+   that pins who pays for each step of a delivery.
 5. ✅ **C5 / D1 — ops consoles.** Done (29 tests); found and fixed a defect
    that set governance parameters to zero.
 6. ✅ **C3 — access-control matrix.** Done (530 denial checks, self-maintaining).

@@ -21,6 +21,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import * as snarkjs from "snarkjs";
 import { poseidon1, poseidon2, poseidon3 } from "poseidon-lite";
 import { WITHDRAW_WASM, loadWithdrawZkey } from "../shield/zkey.mjs";
+import { createLedger } from "./ledger.mjs";
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 const ks = await import(pathToFileURL(path.join(ROOT, "web/src/shieldpool.ts")).href);
@@ -75,7 +76,9 @@ class NoteTree {
 }
 
 // ── the ledger ──────────────────────────────────────────────────────────────
-const ledger = [];
+// Shared with the local-chain run in test/cost-ledger.test.ts, so both modes
+// emit the same report shape and can be diffed against each other (TEST-PLAN A3).
+const ledger = createLedger();
 let prov;
 /// Poll for the receipt. The Paseo eth-rpc returns a hash well before the
 /// receipt is queryable, and `tx.wait()` is unavailable here because the relay
@@ -92,18 +95,10 @@ async function receiptOf(hash, maxWait = 240) {
 async function track(step, { payer, via = null, revenue = 0n }, hash) {
   if (!hash) { console.log(`   ${step.padEnd(34)} (no transaction — skipped)`); return null; }
   const r = await receiptOf(hash);
-  const gasUsed = r.gasUsed;
-  const price = r.gasPrice ?? 1_000_000_000_000n;
-  const cost = gasUsed * price;
-  ledger.push({
-    step, payer, via, tx: hash,
-    gasUsed: gasUsed.toString(),
-    gasPriceGwei: ethers.formatUnits(price, "gwei"),
-    costPAS: ethers.formatEther(cost),
-    revenuePAS: ethers.formatEther(revenue),
-    netPAS: ethers.formatEther(revenue - cost),
-  });
-  console.log(`   ${step.padEnd(34)} ${payer.padEnd(9)} ${ethers.formatEther(cost).padStart(10)} PAS  gas ${gasUsed}`);
+  const gasPrice = r.gasPrice ?? 1_000_000_000_000n;
+  ledger.record({ step, payer, via, gasUsed: r.gasUsed, gasPrice, revenue });
+  const cost = ethers.formatEther(r.gasUsed * gasPrice);
+  console.log(`   ${step.padEnd(34)} ${payer.padEnd(9)} ${cost.padStart(10)} PAS  gas ${r.gasUsed}`);
   return r;
 }
 
@@ -379,30 +374,12 @@ async function main() {
   console.log(`   ${limited ? "✓" : "·"} rate limit ${limited ? "enforced" : "not reached"} — keyed on a rotating hash, no address table`);
 
   // ── report ───────────────────────────────────────────────────────────────
-  const sum = (f) => ledger.reduce((a, r) => a + ethers.parseEther(r[f]), 0n);
-  const byPayer = {};
-  for (const r of ledger) {
-    byPayer[r.payer] ??= { cost: 0n, revenue: 0n, txs: 0 };
-    byPayer[r.payer].cost += ethers.parseEther(r.costPAS);
-    byPayer[r.payer].revenue += ethers.parseEther(r.revenuePAS);
-    byPayer[r.payer].txs++;
-  }
-  const report = {
+  const report = ledger.report({
     ranAt: new Date().toISOString(), chain: "paseo-assethub", gasPriceGwei: "1000",
     orders: BOOK.orders, vault: BOOK.vault, orderId: orderId.toString(),
     relays: RELAYS.map((r) => ({ id: r.id, address: r.address })),
     fees: { protocolFeeBps: 250, relayRebateBps: 0, relayServiceFeePAS: "0", withdrawFeeBps: 100 },
-    totals: {
-      costPAS: ethers.formatEther(sum("costPAS")),
-      revenuePAS: ethers.formatEther(sum("revenuePAS")),
-      netPAS: ethers.formatEther(sum("netPAS")),
-    },
-    byPayer: Object.fromEntries(Object.entries(byPayer).map(([k, v]) => [k, {
-      txs: v.txs, costPAS: ethers.formatEther(v.cost), revenuePAS: ethers.formatEther(v.revenue),
-      netPAS: ethers.formatEther(v.revenue - v.cost),
-    }])),
-    ledger,
-  };
+  });
   fs.writeFileSync(path.join(OUT, "costs.json"), JSON.stringify(report, null, 2));
 
   console.log(`\n── totals ──`);
@@ -415,6 +392,6 @@ async function main() {
 main().catch((e) => {
   console.error("\n❌", e?.shortMessage ?? e?.reason ?? e?.message ?? e);
   fs.mkdirSync(OUT, { recursive: true });
-  fs.writeFileSync(path.join(OUT, "costs-partial.json"), JSON.stringify({ error: String(e?.message ?? e), ledger }, null, 2));
+  fs.writeFileSync(path.join(OUT, "costs-partial.json"), JSON.stringify({ error: String(e?.message ?? e), ledger: ledger?.report?.() ?? null }, null, 2));
   process.exit(1);
 });

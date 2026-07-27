@@ -26,6 +26,7 @@ Ordered by what a reader should act on, not by discovery order.
 | 15 | The bps rebate cannot pay for a relay at any realistic fare | **Medium** (economics) | 📌 Quantified |
 | 16 | Docs overstated the ZK anonymity set — buckets partition it | **Medium** (privacy claim) | ✅ Fixed |
 | 17 | Client modules the hardhat tests import must have no relative imports | Low (footgun) | 📌 Documented |
+| 18 | The relay's settlement gas limit was a hardcoded Paseo constant | Low (footgun) | ✅ Fixed |
 
 ---
 
@@ -325,6 +326,30 @@ Resolved by removing the need: `depositAndSnapshot`'s gas limit became a
 **required** parameter rather than one defaulted from a constant, which suits
 A5 anyway — every caller now budgets deliberately — and leaves `shieldpool.ts`
 with no relative imports. A comment in the file says so.
+
+## 18. The relay's settlement gas limit was a hardcoded Paseo constant — **fixed**
+
+`relay.mjs` carried `const GAS_SETTLE = 500_000_000n`, which is right for Paseo —
+it prices gas on a weight scale, so a settlement call genuinely needs a limit
+that looks absurd on a normal EVM — and impossible anywhere else. Hardhat caps a
+single transaction at 2^24 gas (~16.7 M), so **every** relayed settlement
+reverted on the local chain before it reached a contract. The relay could not
+settle in a test at all.
+
+Found while building A3's local-chain half, and worth separating from the "500 M
+is a Paseo number" point A5 already makes. A5 asserts that the constant never
+leaks into `web/src`, and it still does not. This is the other half: the value is
+correct *for one chain*, and it was written as though it were a property of the
+protocol.
+
+**Fixed** by making it configurable — `BigInt(process.env.RELAY_GAS_SETTLE ||
+500_000_000)`. The default is unchanged, so nothing about the live deployment
+moves; the comment now records why the number is what it is and why it has to be
+overridable. `test/cost-ledger.test.ts` sets it to 15 M.
+
+Two smaller versions of the same shape sit next to it and are *not* changed:
+`GAS_FUND` (100 k, a plain transfer, valid on any EVM) and the `1000` gwei
+fallback price. Neither blocks a test today.
 
 ---
 

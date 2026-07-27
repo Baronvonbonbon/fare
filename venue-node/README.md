@@ -186,6 +186,12 @@ on it); never bump a burner's gas limit to the weight-scale value or its funding
 tx will be rejected for the reservation. Receipts also leave `effectiveGasPrice`
 unset — price `gasUsed` at the observed 1000 gwei for accounting.
 
+That 500 M is a property of *this chain*, not of the protocol, so it is
+overridable: `RELAY_GAS_SETTLE` (default `500000000`). Any EVM with a standard
+per-transaction gas cap rejects the Paseo value outright — hardhat's is 2^24, so
+the relay could not settle against a local node at all until this could be set
+(`test/cost-ledger.test.ts` uses 15 M). Leave it alone when pointing at Paseo.
+
 ### Profitability guard (F6/F8 economics)
 
 The relay only sponsors what pays off (`economics.mjs`, unit-tested):
