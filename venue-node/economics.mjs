@@ -47,6 +47,30 @@ export function tokenToNativeWei(tokenWei, tokenDecimals, nativeDecimals, priceN
   return d === 0n ? 0n : n / d;
 }
 
+/// The inverse of the guard: the SMALLEST fare at which settling an order pays
+/// for itself. `coversCost` answers "is this one worth relaying?"; this answers
+/// "from what fare up is relaying worth doing at all?", which is the question an
+/// operator setting `relayRebateBps` / `relayServiceFee` actually has.
+///
+/// Returns null when no fare suffices — with `relayRebateBps` or `feeBps` at
+/// zero the rebate is identically zero, so unless the flat service fee already
+/// covers the cost, settlement never pays no matter how large the order.
+///
+/// Exact, not approximate: `breakEvenFareWei` is the least fare for which
+/// `coversCost(rebateWei(fare, …) + serviceFeeWei, costWei, margin)` holds, and
+/// one wei less always fails. economics.test.mjs asserts that both ways.
+export function breakEvenFareWei({ costWei, margin, feeBps, relayRebateBps, serviceFeeWei = 0n }) {
+  const m = BigInt(Math.round(margin * 1000));
+  const need = BigInt(costWei) * m - BigInt(serviceFeeWei) * 1000n;
+  if (need <= 0n) return 0n; // the flat fee alone already covers it
+  const rebateNeeded = ceilDiv(need, 1000n);
+  const rate = BigInt(feeBps) * BigInt(relayRebateBps); // rebate = fare · rate / 1e8
+  if (rate === 0n) return null; // no rebate at any fare
+  return ceilDiv(rebateNeeded * 100_000_000n, rate);
+}
+
+const ceilDiv = (a, b) => (a + b - 1n) / b;
+
 /// Rolling-window subsidy budget: does `costWei` still fit under `budgetWei`
 /// given `spentWei` already spent this window? (A zero/negative budget blocks.)
 export function withinBudget(spentWei, costWei, budgetWei) {

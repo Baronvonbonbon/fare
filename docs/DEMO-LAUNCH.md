@@ -36,10 +36,11 @@ a local hardhat node.
 3. **QR handoff.** Copy-pasting an EIP-712 signature between two strangers'
    phones kills the demo moment; driver scans customer's screen instead.
    ~1 day: QR render lib + `BarcodeDetector`/jsQR.
-4. **In-app funding for burner wallets.** Burner-key mode already exists; add
-   a funded "drip" account that auto-tops-up new burners so a pilot user never
-   touches a faucet captcha. On testnet this substitutes for the R2 gasless
-   relay.
+4. **In-app funding for burner wallets.** ✅ Superseded, and deliberately not a
+   drip account: gas comes from the region relay's `/fund`, and escrow funding
+   comes from the shielded pool only (C4). A central faucet was tried, went
+   unused once funding became KS-only, and has been deleted — funding a burner
+   from a shared account would re-link it to whoever refilled that account.
 5. **Order contents channel** (see merchant section) — without it a real venue
    can't participate even in a pilot.
 6. **Faster/event-driven refresh** — full-scan polling is fine at pilot scale

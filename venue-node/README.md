@@ -63,7 +63,7 @@ by doing the two things that are safe to relay:
 
 | Endpoint | Does |
 |---|---|
-| `POST /fund { address }` | **Sponsor gas** — top up a burner below `FUND_MIN_PAS` up to `FUND_AMOUNT_PAS` (a region-local, decentralized `/api/drip`). |
+| `POST /fund { address }` | **Sponsor gas** — top up a burner below `FUND_MIN_PAS` up to `FUND_AMOUNT_PAS` (region-local and decentralized; this is the only gas faucet — the central one was deleted). |
 | `POST /onboard { address, role, lat?, lon? }` | **Sponsored onboarding (Route A)** — seed a fresh driver/venue wallet (ED + register gas) so it can register and immediately earn. Opt-in (`ONBOARD_ENABLED=on`), one-per-address, budget-gated, venues region-gated. See [../docs/RELAY-SPONSORSHIP.md](../docs/RELAY-SPONSORSHIP.md). |
 | `POST /submit { method, args }` | **Relay a settlement call.** Only `confirmPickup` / `confirmDropoffZK` are allowlisted — they carry their own signatures / ZK proof and don't check `msg.sender`, so the relay submits them paying gas → those steps are fully gasless. |
 | `POST /forward { request }` | **Relay a gasless user action (F8).** Submits a user-signed EIP-2771 `ForwardRequest` through `FareForwarder`. Guarded: `value` must be 0 and `to` must be `FareOrders`/`FareRatings`, so the relay pays gas but never fronts a customer's escrow. |
@@ -186,6 +186,12 @@ on it); never bump a burner's gas limit to the weight-scale value or its funding
 tx will be rejected for the reservation. Receipts also leave `effectiveGasPrice`
 unset — price `gasUsed` at the observed 1000 gwei for accounting.
 
+That 500 M is a property of *this chain*, not of the protocol, so it is
+overridable: `RELAY_GAS_SETTLE` (default `500000000`). Any EVM with a standard
+per-transaction gas cap rejects the Paseo value outright — hardhat's is 2^24, so
+the relay could not settle against a local node at all until this could be set
+(`test/cost-ledger.test.ts` uses 15 M). Leave it alone when pointing at Paseo.
+
 ### Profitability guard (F6/F8 economics)
 
 The relay only sponsors what pays off (`economics.mjs`, unit-tested):
@@ -198,8 +204,20 @@ The relay only sponsors what pays off (`economics.mjs`, unit-tested):
   pickup, and requires the rebate to cover the whole fare before it settles.
 - **No-reward actions** — `/fund`, bids, pickup, cancels, rate — are sponsored as
   loss-leaders under a rolling **`RELAY_GAS_BUDGET_PAS`** per **`RELAY_BUDGET_WINDOW_MS`**.
+  The window is **reserved before the submission, not recorded after it**, so
+  requests arriving together cannot all pass the same check; a send that never
+  lands returns its reservation.
 - On a decline the relay returns **HTTP 402**; the PWA prompts the user to submit
   the tx **paying their own gas** instead (so nothing dead-ends).
+
+> **Size the budget in sponsorships, not in gas.** The window counts **value
+> given away**, not just the gas to give it: `/fund` counts the
+> `FUND_AMOUNT_PAS` it sends and `/onboard` counts its seed. So the default
+> `250` reads as **50 burners a day** at a 5 PAS sponsorship, and changing
+> `FUND_AMOUNT_PAS` rescales that — the two are meant to be read together and a
+> test enforces it. Counting only gas, as this did before
+> [../docs/TEST-FINDINGS.md](../docs/TEST-FINDINGS.md) #19, made the number
+> meaningless: 50 PAS of gas is on the order of a million sponsorships.
 
 > **Testnet caveat:** demo fares are tiny (a 0.4 PAS fare rebates ~0.002 PAS),
 > which won't cover real gas — so the guard will usually **decline** settlements

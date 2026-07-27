@@ -11,6 +11,12 @@ This is the "what is actually protected" reference. The *designs* live in
 **Read the Open columns first.** Everything closed is closed; the value of a
 document like this is in what still leaks.
 
+Those Open rows are **executable**. `test/expected-leaks.test.ts` asserts that
+each chain-observable leak below is still present, and quotes the row it pins —
+so closing one breaks a test, and editing a row without touching the test breaks
+a different one. The tables and the suite cannot drift apart in either
+direction (TEST-PLAN B3).
+
 ---
 
 ## Customer
@@ -39,7 +45,7 @@ Drivers were the most exposed party a month ago and are now the most improved.
 
 | Closed | How |
 |---|---|
-| Revenue graph | Payouts enter the shielded pool. With the ZK path the anonymity set is every unspent note in the tree, not a batch. |
+| Revenue graph | Payouts enter the shielded pool. With the ZK path the anonymity set is every unspent note **of the same bucket**, not a batch — the bucket is a public signal of the spend, so denominations partition the crowd (measured in `test/anonymity-set.test.ts`). |
 | Name, vehicle, plate, contact | On-chain is `keccak256(profile)`; the details are revealed only to the order counterparty and refused unless they hash to that commitment |
 | Losing bids | Sealed: only a hash is committed, and a relay submits it, so the chain never sees who bid or how much |
 | Pickup coordinates | Coarsened to ~33 m and no longer emitted |

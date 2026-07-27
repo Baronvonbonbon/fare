@@ -1,11 +1,12 @@
 {
   "name": "fare-protocol",
   "version": "0.1.0",
-  "description": "FARE — P2P delivery network on Polkadot Hub. Customers, drivers, and venues coordinate deliveries through on-chain reverse auctions and dual-signed GPS attestations, with no intermediary.",
+  "description": "FARE \u2014 P2P delivery network on Polkadot Hub. Customers, drivers, and venues coordinate deliveries through on-chain reverse auctions and dual-signed GPS attestations, with no intermediary.",
   "license": "GPL-3.0-or-later",
   "scripts": {
     "build": "hardhat compile",
     "test": "hardhat test",
+    "coverage": "NODE_OPTIONS=--max-old-space-size=6144 hardhat coverage && node scripts/ci/coverage-floor.mjs coverage/coverage-summary.json coverage-floor.json",
     "node": "hardhat node",
     "deploy:local": "hardhat run scripts/deploy.ts --network localhost",
     "deploy:paseo": "hardhat run scripts/deploy.ts --network polkadotTestnet",

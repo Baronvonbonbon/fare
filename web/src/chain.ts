@@ -336,7 +336,16 @@ export function regionsCovering(center: MicroDeg, radiusKm: number): string[] {
   const r = radiusKm * 1000;
   const dLat = (r / 111_320) * 1e6;
   const cosLat = Math.max(Math.cos(((center.lat / 1e6) * Math.PI) / 180), 1e-6);
-  const dLon = (r / (111_320 * cosLat)) * 1e6;
+  // Longitude degrees narrow towards the poles, so a fixed radius spans more of
+  // them the further north you are — and at the pole itself the 1e-6 clamp above
+  // (which stops a divide by zero) yields a span of ~900,000 CELLS. That is not
+  // a wide search, it is a hung tab and a million queryFilter calls.
+  //
+  // Half a turn is the most that can ever mean anything: beyond ±180° of
+  // longitude the cover has wrapped the globe and is re-listing cells it already
+  // has. Capping there is not a tuning choice, it is the definition — and it
+  // takes the polar case from ~3.6M cells to a few hundred.
+  const dLon = Math.min((r / (111_320 * cosLat)) * 1e6, 180_000_000);
   const latMin = Math.trunc((center.lat - dLat) / REGION_CELL) - 1;
   const latMax = Math.trunc((center.lat + dLat) / REGION_CELL) + 1;
   const lonMin = Math.trunc((center.lon - dLon) / REGION_CELL) - 1;
@@ -460,21 +469,23 @@ export const parse = (v: string) => ethers.parseEther(v === "" ? "0" : v);
 
 export const short = (a: string) => (a ? `${a.slice(0, 6)}…${a.slice(-4)}` : "—");
 
-// ---- burner gas faucet (serverless drip) ----
-// The drip key lives only in the /api/drip Cloudflare Function (server-side
-// secret). The client just asks it to top up a low burner; every tx costs
-// native PAS, so a fresh burner needs gas before it can do anything.
+// ---- burner gas thresholds ----
+// Gas for a burner comes from the region relay's /fund (see relay.ts
+// `sponsorGas`); ESCROW funding comes only from the shielded pool. There is no
+// central faucet — the /api/drip Function was deleted once nothing called it,
+// because a documented secret for a dead path is worse than no path at all.
 
-/// Below this native balance a burner can't reliably cover a tx — auto-drip
-/// on connect and surface a manual top-up.
+/// Below this native balance a burner cannot reliably cover a transaction —
+/// surface the manual top-up.
 export const DRIP_MIN = ethers.parseEther("1");
 
 export async function nativeBalance(address: string): Promise<bigint> {
   return readProvider.getBalance(address);
 }
 
-/// Poll until `address` holds at least `minWei` (e.g. after a faucet drip lands),
-/// or reject on timeout. Used before a fresh per-order wallet escrows an order.
+/// Poll until `address` holds at least `minWei` (e.g. after sponsored gas or a
+/// shielded withdrawal lands), or reject on timeout. Used before a fresh
+/// per-order wallet escrows an order.
 export async function waitForFunding(
   address: string,
   minWei: bigint,
@@ -484,7 +495,7 @@ export async function waitForFunding(
   for (;;) {
     if ((await sendProvider.getBalance(address)) >= minWei) return;
     if (Date.now() - started > timeoutMs) {
-      throw new Error("Faucet funding timed out — try the manual top-up and retry");
+      throw new Error("Funding timed out — try the manual top-up and retry");
     }
     await new Promise((r) => setTimeout(r, 2000));
   }
@@ -497,6 +508,9 @@ export async function pingNode(): Promise<number> {
   return readProvider.getBlockNumber();
 }
 
+/// The shape every funding path reports back: the relay's /fund, and the
+/// shielded pool withdrawal in shield.ts. Named for the faucet that used to be
+/// the first of them.
 export interface DripResult {
   funded?: boolean;
   txHash?: string;
@@ -505,15 +519,3 @@ export interface DripResult {
   configured?: boolean;
 }
 
-/// Ask the serverless faucet to top up `address`. Resolves with the endpoint's
-/// verdict; throws only on network failure. A 503 `{ configured:false }` means
-/// the operator hasn't set DRIP_PRIVATE_KEY yet, so callers fall back to the
-/// public faucet.
-export async function requestDrip(address: string): Promise<DripResult> {
-  const res = await fetch("/api/drip", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ address }),
-  });
-  return (await res.json().catch(() => ({}))) as DripResult;
-}

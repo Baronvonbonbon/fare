@@ -32,10 +32,13 @@ The full protocol (incl. F6/F8) is deployed + seeded on Paseo. Remaining ops:
   relay will *decline* settlement (rebate ≪ gas) and the app prompts "pay your
   own gas?"; set `RELAY_PROFIT_GUARD=off` for a fully-gasless demo, or raise
   `relayRebateBps`/`feeBps`. See [venue-node/README](../venue-node/README.md).
-- ☐ **Faucet secret** — set `DRIP_PRIVATE_KEY` (funded) in Cloudflare Pages env so
-  `/api/drip` funds burners on demand (the "one manual secret step"). Without it,
-  gas top-ups fall back to the public faucet. (Auto-drip on connect was removed;
-  value actions ensure gas on demand, non-value actions go gasless via the relay.)
+- ✅ **~~Faucet secret~~ — no longer applicable.** There is no central faucet:
+  `/api/drip` and its `DRIP_PRIVATE_KEY` were **deleted** once it turned out
+  nothing had called them since funding went KS-only. Gas for a burner comes
+  from the region relay's `/fund` (so this folds into "run a venue relay",
+  above); ESCROW funding comes only from the shielded pool, and `fundBurner`
+  throws rather than falling back — a burner funded any other way would carry an
+  on-chain edge back to the customer. See [TEST-FINDINGS.md](TEST-FINDINGS.md) #14.
 - ☐ **IPFS (optional, shared menus)** — stand up the DATUM node + set
   `IPFS_ADD_URL` / `IPFS_API_KEY` / `VITE_IPFS_GATEWAY`. Without it, published
   menus are device-local (`local://`), single-device only.
@@ -134,7 +137,7 @@ infra/UI, spec'd in the linked design note.
 
 **Group E — trust & release**
 - ☐ **E1 Filmed end-to-end field test** (two phones, one real handoff) — R1's key artifact.
-- 🟡 **E2 Slither / Mythril** static-analysis pass — **Slither done + in CI** (`.github/workflows/slither.yml`, `crytic/slither-action`); full triage in [SECURITY-REVIEW.md](SECURITY-REVIEW.md) (96 results, **zero high-severity**; new F6/F8 surface clean). Mythril documented as an on-demand deep-dive for money-handling contracts (too slow to gate CI).
+- 🟡 **E2 Slither / Mythril** static-analysis pass — **Slither done + in CI** (`.github/workflows/slither.yml`, `crytic/slither-action`); full triage in [SECURITY-REVIEW.md](SECURITY-REVIEW.md) (96 results, **zero high-severity**; new F6/F8 surface clean). Mythril now runs **nightly** over the three money-handling contracts (`scripts/mythril.sh`, `.github/workflows/nightly.yml`) — too slow to gate a PR, and reporting rather than gating because its findings scale with the exploration budget.
 - ☐ **E3 External audit** before mainnet value.
 - ☐ **E4 Device-attestation tier** (Play Integrity / App Attest), L0/L1/L2 gradient.
 
@@ -177,6 +180,8 @@ Full mainnet gate + rationale: [PRIVACY.md](PRIVACY.md) · [ROADMAP.md](ROADMAP.
   sponsored `setMetadata`, onboarding-fee recoup, Sybil + ED handling.
 
 ## See also
+- [TEST-PLAN.md](TEST-PLAN.md) — test-coverage gaps (costs, privacy, security, function) + the suite that closes them
+- [TEST-FINDINGS.md](TEST-FINDINGS.md) — what that suite found: defects fixed, items still open
 - [PRODUCT-INTEGRATION-PLAN.md](PRODUCT-INTEGRATION-PLAN.md) — the tracking board (A–F) + DoorDash journeys
 - [NETWORK-ARCHITECTURE.md](NETWORK-ARCHITECTURE.md) · [MESSAGING.md](MESSAGING.md) · [PHOTOS.md](PHOTOS.md)
 - [ROADMAP.md](ROADMAP.md) · [PRIVACY.md](PRIVACY.md) · [GPS.md](GPS.md) · [ARCHITECTURE.md](ARCHITECTURE.md)

@@ -35,4 +35,41 @@ export default defineConfig({
   // of dep prebundling and let the dynamic import create its own chunk so
   // the main bundle stays light for users who never pick the embedded node.
   optimizeDeps: { exclude: ["pine-rpc", "smoldot"] },
+
+  // ── Coverage (TEST-PLAN E2) ────────────────────────────────────────────────
+  test: {
+    coverage: {
+      provider: "v8",
+      reporter: ["text", "json-summary", "lcov"],
+
+      // `include` is the load-bearing line. By default v8 reports only files a
+      // test actually imported, which would leave App.tsx — 2,689 lines with no
+      // tests — out of the denominator entirely, so the percentage would RISE
+      // when someone added untested code. Naming the sources instead makes an
+      // untested file count as the zero it is.
+      include: ["src/**/*.{ts,tsx}"],
+      exclude: [
+        "src/**/*.test.ts",
+        "src/**/main.tsx",     // mounts React; nothing to assert
+        "src/**/*.d.ts",
+      ],
+
+      // Floors are what the suite measures TODAY, rounded down — they exist to
+      // stop the number sliding, not to describe an ambition. Raise them when
+      // work lands; never lower one to make a build pass, because a ratchet
+      // that turns both ways is a comment.
+      //
+      // Raised six times: 17.40 → 20.19 → 22.25 (D2) → 30.42 (D1) → 33.19 →
+      // 34.56 (App.tsx) → 38.16 (shieldnote.ts, shield.ts). What is left below
+      // is App.tsx's remaining ~2,400 lines, which are rendering rather than
+      // decisions, and the chain-touching halves of the shield modules —
+      // proving, submitting and log-scanning, which need a node.
+      thresholds: {
+        statements: 38,
+        branches: 33,
+        functions: 35,
+        lines: 39,
+      },
+    },
+  },
 });

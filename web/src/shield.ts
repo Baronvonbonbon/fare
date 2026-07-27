@@ -13,6 +13,7 @@
 // faucet/relay funding (relay.ts `sponsorGas` / `ensureGas`).
 
 import type { DripResult } from "./chain";
+import { DEPOSIT_GAS, RETURN_GAS, RETURN_RESERVE_WEI } from "./gasbudget";
 
 /// A backend that can fund a fresh address without linking it to the funder.
 /// Implemented against a shielded pool (deposit-once, withdraw-per-order with a
@@ -105,7 +106,12 @@ export function adoptShieldedNote(rec: NoteRecord): void {
   upsertNote(rec);
 }
 
-class KusamaShieldFunder implements ShieldedFunder {
+/// Exported for tests only. `initShieldedFunder` is the production entry point,
+/// but it reads `import.meta.env`, which vitest does not populate — so a test
+/// that went through it could never reach this class at all. Constructing it
+/// directly with explicit dependencies is both testable and how the interface
+/// was always meant to be satisfied.
+export class KusamaShieldFunder implements ShieldedFunder {
   constructor(
     private poolAddr: string,
     private provider: Provider,
@@ -120,7 +126,7 @@ class KusamaShieldFunder implements ShieldedFunder {
   async deposit(amountWei: bigint): Promise<ShieldedNote> {
     const signer = this.mainSigner();
     if (!signer) throw new Error("connect the main wallet to deposit into the shielded pool");
-    const { record } = await depositAndSnapshot(this.poolAddr, signer, this.provider, amountWei);
+    const { record } = await depositAndSnapshot(this.poolAddr, signer, this.provider, amountWei, DEPOSIT_GAS);
     upsertNote(record);
     return { commitment: "0x" + commitmentOf(record).toString(16).padStart(64, "0"), denominationWei: amountWei.toString(), createdAt: Date.now() };
   }
@@ -169,12 +175,14 @@ class KusamaShieldFunder implements ShieldedFunder {
   async shieldedReturn(burnerKey: string): Promise<void> {
     const w = new Wallet(burnerKey, sendProvider as any);
     const bal = await this.provider.getBalance(w.address);
-    const reserve = parseEther("1.0"); // value + gasLimit×gasPrice must fit (see venue-node README)
-    const usable = bal - reserve;
+    // Paseo reserves value + gasLimit×gasPrice at SUBMISSION, so the hold-back
+    // has to cover this call's own limit — see gasbudget.ts, and A5 in
+    // docs/TEST-PLAN.md for the run this cost.
+    const usable = bal - RETURN_RESERVE_WEI;
     if (usable <= 0n) return;
     const dep = (usable / parseEther("0.001")) * parseEther("0.001"); // clean value (Paseo payable quirk)
     if (dep <= 0n) return;
-    const { record } = await depositAndSnapshot(this.poolAddr, w, this.provider, dep, 800_000n);
+    const { record } = await depositAndSnapshot(this.poolAddr, w, this.provider, dep, RETURN_GAS);
     upsertNote(record);
   }
 }

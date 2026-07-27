@@ -20,7 +20,7 @@ discipline.
 - [x] Fuzz + invariant tests (escrow conservation: Σcredits = Σescrow deltas)
       — `test/invariant.test.ts`: seeded randomized campaign asserting escrow
       conservation + vault solvency after every op
-- [x] Slither pass + CI gate (DATUM audit-hedge #6 equivalent) — zero high-severity; see docs/SECURITY-REVIEW.md. Mythril on-demand.
+- [x] Slither pass + CI gate (DATUM audit-hedge #6 equivalent) — zero high-severity; see docs/SECURITY-REVIEW.md. Mythril runs nightly (scripts/mythril.sh).
 
 **App**
 - [x] PWA with Customer / Driver / Venue roles, GPS-signed attestations

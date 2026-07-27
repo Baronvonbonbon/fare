@@ -18,6 +18,12 @@ web/tsconfig.tsbuildinfo
 circuits/*.ptau
 circuits/build/*.ptau
 circuits/build/*.r1cs
+# ...except the two FARE circuits' constraint systems, which ARE tracked: they
+# are the only source of the constraint counts E4 gates on, and CI cannot
+# rebuild a circuit (that needs circom + a powers-of-tau download). 1.7 MB
+# against a 32 MB zkey payload the repo already carries.
+!circuits/build/proximity.r1cs
+!circuits/build/shieldnote.r1cs
 circuits/build/*.sym
 circuits/build/*.zkey
 circuits/build/proximity_js/
@@ -43,3 +49,6 @@ venue-node/node_modules/
 scripts/shield/note.*.json
 scripts/shield/validate-noteB.json
 e2e-runs/
+
+# Mythril reports (scripts/mythril.sh) — regenerable, uploaded as CI artifacts
+mythril-out/

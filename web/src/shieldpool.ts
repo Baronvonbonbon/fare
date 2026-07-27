@@ -65,8 +65,14 @@ const bit = (n: number | bigint, lv: number): boolean => ((BigInt(n) >> BigInt(l
 // ── deposit + left-path snapshot ─────────────────────────────────────────────
 /// Deposit `valueWei` into the pool and capture the note's immutable left path.
 /// Returns a fully-spendable NoteRecord to persist. `signer` funds the deposit.
+///
+/// `gasLimit` is REQUIRED, not defaulted: Paseo reserves gasLimit × gasPrice at
+/// submission, so the right limit differs by an order of magnitude between a
+/// funded operator and a 5 PAS burner. Callers budget it — see
+/// web/src/gasbudget.ts. (This module is also imported by node in the hardhat
+/// tests, so it deliberately has no relative imports of its own.)
 export async function depositAndSnapshot(
-  poolAddr: string, signer: Signer, provider: Provider, valueWei: bigint, gasLimit = 3_000_000n
+  poolAddr: string, signer: Signer, provider: Provider, valueWei: bigint, gasLimit: bigint
 ): Promise<{ record: NoteRecord; txHash: string }> {
   const poolW = new Contract(poolAddr, KS_POOL_ABI, signer);
   const poolR = new Contract(poolAddr, KS_POOL_ABI, provider);

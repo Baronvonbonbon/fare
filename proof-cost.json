@@ -1,0 +1,42 @@
+{
+  "artifacts": {
+    "web/public/zk/proximity.wasm": 2175863,
+    "web/public/zk/proximity.zkey": 787167,
+    "web/public/shield/shieldnote.wasm": 2014921,
+    "web/public/shield/shieldnote.zkey": 4593545,
+    "web/public/shield/withdraw_v7.wasm": 2307913,
+    "web/public/shield/withdraw_v7.zkey.json": 381,
+    "web/public/shield/withdraw_v7.zkey.part0": 12582912,
+    "web/public/shield/withdraw_v7.zkey.part1": 12582912,
+    "web/public/shield/withdraw_v7.zkey.part2": 9246429
+  },
+  "circuits": {
+    "proximity": {
+      "nPublic": 5,
+      "curve": "bn128",
+      "protocol": "groth16"
+    },
+    "shieldnote": {
+      "nPublic": 4,
+      "curve": "bn128",
+      "protocol": "groth16"
+    }
+  },
+  "constraints": {
+    "proximity": {
+      "nConstraints": 1237,
+      "nVars": 1237,
+      "nPubInputs": 5,
+      "nPrvInputs": 6
+    },
+    "shieldnote": {
+      "nConstraints": 9770,
+      "nVars": 9791,
+      "nPubInputs": 4,
+      "nPrvInputs": 34
+    }
+  },
+  "withdrawKeyBytes": 34412253,
+  "withdrawParts": 3,
+  "pagesAssetLimit": 26214400
+}

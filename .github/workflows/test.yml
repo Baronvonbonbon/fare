@@ -1,0 +1,144 @@
+# Test gate (E1). Runs all three suites on every push / PR.
+#
+# Before this existed the only CI was Slither, path-filtered to contracts/**,
+# so a change to venue-node/ or web/src/ triggered nothing at all. Plan and
+# remaining coverage gaps: docs/TEST-PLAN.md.
+#
+# Deliberately NOT path-filtered per job: the tiers are coupled (the address
+# book is generated into web/src, the relay and the client share the endpoint
+# contract) and the whole thing runs in well under a minute of billable time.
+
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  contracts:
+    name: contracts (hardhat)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install deps
+        run: npm ci
+
+      # test/shieldnote-vault.test.ts proves against the REAL circuit, but
+      # circuits/build/*.zkey and circuits/build/shieldnote_js/ are gitignored
+      # as heavy regenerable intermediates. The identical artifacts DO ship
+      # tracked under web/public/shield/ (scripts/setup-shieldnote.mjs step 7
+      # copies them there for the PWA prover) — verified byte-identical by
+      # sha256. Restoring them here is far cheaper than rebuilding the circuit,
+      # which would need the circom binary and a powers-of-tau download.
+      - name: Restore ZK proving artifacts
+        run: |
+          mkdir -p circuits/build/shieldnote_js
+          cp web/public/shield/shieldnote.zkey circuits/build/shieldnote.zkey
+          cp web/public/shield/shieldnote.wasm circuits/build/shieldnote_js/shieldnote.wasm
+
+      - name: Test
+        run: npx hardhat test
+
+  # Contract coverage with a committed floor (E2). Its own job: instrumentation
+  # roughly quadruples the suite's runtime, and the contracts gate above should
+  # stay fast enough to be worth waiting for.
+  coverage:
+    name: contract coverage (floor)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - run: npm ci
+
+      - name: Restore ZK proving artifacts
+        run: |
+          mkdir -p circuits/build/shieldnote_js
+          cp web/public/shield/shieldnote.zkey circuits/build/shieldnote.zkey
+          cp web/public/shield/shieldnote.wasm circuits/build/shieldnote_js/shieldnote.wasm
+
+      # The heap flag is load-bearing: instrumentation adds a marker emit per
+      # branch, and the suite then blows through node's 2 GB default partway
+      # through and dies with "Reached heap limit".
+      - name: Coverage
+        run: NODE_OPTIONS=--max-old-space-size=6144 npx hardhat coverage
+
+      - name: Enforce floor
+        run: node scripts/ci/coverage-floor.mjs coverage/coverage-summary.json coverage-floor.json
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: contract-coverage
+          path: coverage/
+          retention-days: 14
+
+  web:
+    name: web (vitest + typecheck)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install deps
+        run: npm ci
+
+      # Floors live in web/vite.config.ts and are enforced by vitest itself
+      # (E2). They count every file under src/, not only the ones a test
+      # imported — otherwise App.tsx would be outside the denominator and the
+      # percentage would RISE when untested code was added.
+      - name: Test + coverage floor
+        run: npx vitest run --coverage
+
+      # `tsc -b && vite build`. The typecheck is the only automated check that
+      # touches App.tsx (2,689 lines) and web/src/ops/ (1,385), neither of
+      # which has tests — see docs/TEST-PLAN.md §6.
+      - name: Typecheck + build
+        run: npm run build
+
+  venue-node:
+    name: venue-node (node:test)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: venue-node
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: venue-node/package-lock.json
+
+      - name: Install deps
+        run: npm ci
+
+      # The pure modules (economics + break-even, scorer, swap, treasury, agent,
+      # shieldkeeper + decorrelation) plus relay.mjs's no-chain HTTP surface and
+      # its metadata defences. The relay's chain-backed half lives in the
+      # contracts job — docs/TEST-PLAN.md §5 C1, C2.
+      - name: Test
+        run: node --test
