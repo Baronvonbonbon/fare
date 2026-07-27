@@ -20,6 +20,7 @@ Ordered by what a reader should act on, not by discovery order.
 | 21 | The live runs write private keys where CI would have published them | **Medium** | ✅ Guarded |
 | 22 | Web coverage read 47% because untested files were not counted | Medium (metric) | ✅ Fixed |
 | 23 | Two state-matrix rows would have been refused before the guard they test | — | ✅ Fixed |
+| 24 | `regionsCovering` returned 3.6M cells near a pole, hanging the tab | **Medium** | ✅ Fixed |
 | 2 | `/fund` can double-fund inside a 250 ms window | Low | ☐ Open |
 | 3 | Oversized request body returns 500, not 413 | Cosmetic | ☐ Open |
 | 4 | CI ran nothing but Slither, path-filtered to `contracts/**` | **High** (process) | ✅ Fixed |
@@ -550,6 +551,53 @@ identity by construction. That is the honest answer to "can a driver abandon an
 unassigned order", so the cell pins that exact reason. The distinction being
 drawn throughout is between a guard that legitimately precedes and a fixture
 that accidentally hides the one under test.
+
+## 24. `regionsCovering` returned 3.6 million cells near a pole — **fixed**
+
+The driver board asks `regionsCovering(center, radiusKm)` for the grid cells to
+query, then `orderIdsInRegions` fires a `queryFilter` at **every one of them**
+inside a `Promise.all`.
+
+Longitude degrees narrow towards the poles, so a fixed kilometre radius spans
+more of them the further north you go. The code already guarded the obvious
+hazard — `Math.max(cos(lat), 1e-6)` stops a divide by zero at 90° — and that
+guard is exactly what produced the defect: instead of infinity, it yields a
+longitude span of **898,313 cells**.
+
+Measured, for a 25 km radius:
+
+| Latitude | Cells |
+|---|---|
+| 37.77°N (San Francisco) | 9 |
+| 80°N | 28 |
+| 89°N | 212 |
+| **90°N** | **3,593,252** |
+
+So the failure is not a crash. It is ~3.6 million keccak256 calls to build the
+list, and then several million concurrent RPC calls behind it — a hung tab, and
+a node the client is now hammering. It also degrades smoothly enough (212 cells
+at 89°) that nothing looks wrong until it is very wrong.
+
+**Found by writing the test, and it announced itself the hard way:** the vitest
+run stopped returning. The case was written as "survives the poles without
+dividing by zero", expecting to confirm the existing clamp; what it confirmed
+was that surviving the division is not the same as surviving the result.
+
+**Fixed** by capping the longitude half-span at 180,000,000 µdeg. That is not a
+tuning constant: beyond ±180° the cover has wrapped the globe and is re-listing
+cells it already holds, so any larger value is meaningless by definition. The
+polar case becomes **2,892** cells and San Francisco stays at 9.
+
+Reachability is low — it needs |latitude| within about a degree of a pole, which
+means a GPS glitch or an unvalidated coordinate rather than a real user. That is
+why this is Medium and not High. But the cost of the bad path was unbounded, and
+the fix costs one `Math.min`.
+
+*Pinned by* `stays bounded at the poles instead of covering the planet twice`
+(`web/src/chainglue.test.ts`), which asserts a ceiling at ±89°/±90° **and** that
+the ordinary case did not get coarser. Note the mutation evidence here is a hang
+rather than a clean red: reverting the cap makes the test time out, which is a
+failure but an ugly one.
 
 ---
 

@@ -21,10 +21,10 @@ All three tiers pass today.
 | Tier | Runner | Tests | Covers |
 |---|---|---|---|
 | `test/*.ts` | `npx hardhat test` | 255 | contracts, ZK verifiers, invariant fuzz, upgradability, **chain-backed relay endpoints**, **per-payer cost ledger**, **relay key custody**, **full-lifecycle e2e**, **order state machine** |
-| `web/src/*.test.ts` | `cd web && npx vitest run` | 124 | 17 of 36 client modules, incl. **all four ops consoles' logic** |
+| `web/src/*.test.ts` | `cd web && npx vitest run` | 170 | 21 of 36 client modules, incl. **all four ops consoles' logic**, **burner wallets**, **ZK commitments** |
 | `venue-node/*.test.mjs` | `cd venue-node && node --test` | 94 | economics + **break-even**, scorer, swap, treasury, agent, shieldkeeper + **decorrelation**, **relay HTTP surface + metadata** |
 
-**473 tests, all green**, and all of them now run in CI (§7 E1). The contract tier is the strong part and deserves
+**519 tests, all green**, and all of them now run in CI (§7 E1). The contract tier is the strong part and deserves
 saying so: a seeded-PRNG invariant campaign (`test/invariant.test.ts`) asserts
 escrow conservation and vault solvency after *every* operation and reproduces
 failures from a printed seed; the verifier tests pin fail-safe-before-VK and
@@ -39,7 +39,8 @@ Slither is in CI with zero high-severity findings ([SECURITY-REVIEW.md](SECURITY
 | ~~`venue-node/relay.mjs`~~ — 16 HTTP endpoints, holds `RELAY_PRIVATE_KEY` | 953 lines | ✅ 58 across two tiers (§5 C1, C2) |
 | ~~`web/src/ops/`~~ — four consoles + shell | 1,385 lines | ✅ 29 (all decision logic extracted — §5 C5) |
 | `web/src/App.tsx` | 2,689 lines | **0** |
-| `chain.ts`, `shieldnote.ts`, `relay.ts`, `shield.ts`, `token.ts`, `wallets.ts`, `zk.ts` | ~1,700 lines | **0** |
+| `shieldnote.ts`, `relay.ts`, `shield.ts` | ~800 lines | **0** |
+| ~~`wallets.ts`~~ · ~~`zk.ts`~~ · ~~`token.ts`~~ · `chain.ts` (pure half) | ~900 lines | ✅ 46 (§6 D2) |
 
 Three structural facts behind that table:
 
@@ -666,10 +667,52 @@ broken install rather than a config problem:
 
 ☐ **D1 — Ops console component tests.** Four consoles, zero coverage.
 
-☐ **D2 — Client core units.** `wallets.ts` burner derivation especially — a
-determinism bug there silently re-links orders, defeating the customer's primary
-protection. Then `chain.ts` (519 lines, runtime router resolution), `relay.ts`,
-`token.ts`, `zk.ts`.
+🟡 **D2 — Client core units.** Four modules covered (46 tests):
+`wallets.test.ts` (10), `zk.test.ts` (11), `token.test.ts` (10),
+`chainglue.test.ts` (15). Web coverage 17.40% → **20.19%** of statements, and
+the floors were raised to match.
+
+✅ **`wallets.ts` — 95%.** The burner registry is the customer's primary
+protection, and its failure is silent: if two orders ever came from one address
+nothing breaks, nothing errors, and the exact linkage the design exists to
+prevent is permanent and public. So the first assertion is a **number** — mint
+100, count distinct addresses and distinct keys — and the second is that every
+stored key actually derives the address filed beside it, since a record where
+those disagree is unrecoverable and only shows up later as an inexplicable
+`not-customer` revert. The sweep's Paseo micro-PAS flooring, its gas reserve,
+its refusal to sweep the main address into itself, and its per-wallet error
+isolation are all pinned.
+
+✅ **`zk.ts` — differentially, against the real circuit.** The expected values
+come from `test/fixtures/zk-proximity.json`, the same real proof the contract
+tier feeds to `FareLocationVerifier`. So the client's Poseidon and offsets are
+checked against the circuit's own output rather than against themselves: the
+drop commitment, driver commitment and nullifier are all reproduced exactly.
+Also pinned: `positionCommit` uses a **three-input** hash rather than nested
+pairs (both are plausible readings and only one matches), and the proof encoding
+**swaps the G2 halves** — with a control proving the swapped and unswapped forms
+are actually distinguishable for this proof.
+
+✅ **`token.ts` — the 6-vs-18 decimal boundary**, where being wrong renders a
+plausible number and escrows the wrong amount. Casing-insensitive stablecoin
+resolution matters more than it looks: a case-sensitive compare falls through to
+the unknown-token default of 18 decimals, i.e. a million-fold error.
+
+✅ **`chain.ts`'s pure half** — the QR hand-off codec (including the plaintext
+`pos` the ZK dropoff depends on, and its salt surviving as a *string* rather
+than a rounded JSON number), the region cover, the salt, the formatters.
+
+**This found a defect** ([TEST-FINDINGS.md](TEST-FINDINGS.md) #24):
+`regionsCovering` returned **3,593,252 cells** within a degree of a pole, where
+San Francisco gets 9 — the clamp that avoids a divide-by-zero produced an
+898,313-cell longitude span, and `orderIdsInRegions` fires a `queryFilter` at
+every one. The test announced it by hanging the suite. Capped at a half-turn of
+longitude, which is definitional rather than a tuning choice.
+
+☐ **What remains of D2:** `relay.ts` (284 lines, untouched), and `chain.ts`'s
+**runtime router resolution** — `syncAddressesFromRouter`, the provider
+fallback, `discoverOrders`/`discoverAssignments`. Those need a mocked provider
+rather than pure inputs, which is a different and larger job than this pass.
 
 ✅ **D3 — Degradation matrix** (`web/src/degradation.test.ts`, 12 tests). Each
 optional backend removed, asserting the *documented* behaviour rather than
@@ -915,15 +958,17 @@ coverage of product code rather than plumbing.
 10. ✅ **D5 — order state machine.** 104 cells, both directions, checked
     against the contract source so the table cannot fall behind it.
 
-**What is left is the client**, which is also where the 17% web coverage floor
-has by far the most room to move: **D2** (client-core units — `wallets.ts`
-first, since a burner-derivation bug silently re-links orders and defeats the
-customer's primary protection, then `chain.ts`, `relay.ts`, `token.ts`,
-`zk.ts`) and **D1** (the four console components, which need a DOM testing
-dependency — a decision, not just a gap). **E4**'s constraint snapshot is a
-small job worth doing alongside any circuit work. **C4** stays a mainnet gate
-behind the MPC ceremony, and **B3** stays a decision rather than a
-recommendation.
+11. 🟡 **D2 — client core.** Four modules done (46 tests), web coverage
+    17.40% → 20.19%; found and fixed a polar blow-up in the region cover.
+
+**What is left is still the client.** The rest of **D2** — `relay.ts` and
+`chain.ts`'s runtime router resolution — needs a mocked provider rather than
+pure inputs, which is a larger job than this pass. Then **D1** (the four console
+components, which need a DOM testing dependency — a decision, not just a gap)
+and `App.tsx`, which at 2,689 lines is what keeps the web floor where it is.
+**E4**'s constraint snapshot is a small job worth doing alongside any circuit
+work. **C4** stays a mainnet gate behind the MPC ceremony, and **B3** stays a
+decision rather than a recommendation.
 
 B3 is deliberately left as a decision rather than a recommendation: it is worth
 adopting only if the privacy posture should be pinned by tests.

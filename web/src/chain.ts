@@ -336,7 +336,16 @@ export function regionsCovering(center: MicroDeg, radiusKm: number): string[] {
   const r = radiusKm * 1000;
   const dLat = (r / 111_320) * 1e6;
   const cosLat = Math.max(Math.cos(((center.lat / 1e6) * Math.PI) / 180), 1e-6);
-  const dLon = (r / (111_320 * cosLat)) * 1e6;
+  // Longitude degrees narrow towards the poles, so a fixed radius spans more of
+  // them the further north you are — and at the pole itself the 1e-6 clamp above
+  // (which stops a divide by zero) yields a span of ~900,000 CELLS. That is not
+  // a wide search, it is a hung tab and a million queryFilter calls.
+  //
+  // Half a turn is the most that can ever mean anything: beyond ±180° of
+  // longitude the cover has wrapped the globe and is re-listing cells it already
+  // has. Capping there is not a tuning choice, it is the definition — and it
+  // takes the polar case from ~3.6M cells to a few hundred.
+  const dLon = Math.min((r / (111_320 * cosLat)) * 1e6, 180_000_000);
   const latMin = Math.trunc((center.lat - dLat) / REGION_CELL) - 1;
   const latMax = Math.trunc((center.lat + dLat) / REGION_CELL) + 1;
   const lonMin = Math.trunc((center.lon - dLon) / REGION_CELL) - 1;
