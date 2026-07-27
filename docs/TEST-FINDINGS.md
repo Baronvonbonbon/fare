@@ -559,6 +559,20 @@ Worth recording, because "we looked and it held" is a result:
   transaction**, asserted against real calldata (PRIVACY-TIERS §3), and releases
   a held commitment when the chain rejects the authorization — without which
   that commitment would 409 forever and the payout would be silently lost.
+- **A whole delivery holds together across its seams.** Driven end to end on a
+  local chain (`test/lifecycle-e2e.test.ts`), each stage consuming the previous
+  stage's real output: the Groth16 proof opens the commitment the *order* stored
+  (read back off the chain, verified by the real verifier), the driver's note is
+  funded by settlement *earnings* rather than a fixture credit, the account that
+  accepts is the account that ordered, and escrow in equals payouts out with the
+  vault's closing balance equal to what it still owes plus the shield buffer.
+- **A single delivery cannot shield itself, and the chain says so.** `shieldMinBatch`
+  is 8, so a correct delivery produces a note whose batch is *refused*
+  (`batch-too-small`) until seven other payouts join it. #16 corrected the claim
+  about how large the anonymity set is; this is the complementary fact that the
+  contract will not let it be 1 in the first place — worth knowing as an
+  operational property, since an early or quiet deployment leaves earnings
+  queued rather than shielded.
 
 ## See also
 

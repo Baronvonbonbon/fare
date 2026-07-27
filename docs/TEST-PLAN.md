@@ -20,11 +20,11 @@ All three tiers pass today.
 
 | Tier | Runner | Tests | Covers |
 |---|---|---|---|
-| `test/*.ts` | `npx hardhat test` | 238 | contracts, ZK verifiers, invariant fuzz, upgradability, **chain-backed relay endpoints**, **per-payer cost ledger**, **relay key custody** |
+| `test/*.ts` | `npx hardhat test` | 250 | contracts, ZK verifiers, invariant fuzz, upgradability, **chain-backed relay endpoints**, **per-payer cost ledger**, **relay key custody**, **full-lifecycle e2e** |
 | `web/src/*.test.ts` | `cd web && npx vitest run` | 124 | 17 of 36 client modules, incl. **all four ops consoles' logic** |
 | `venue-node/*.test.mjs` | `cd venue-node && node --test` | 94 | economics + **break-even**, scorer, swap, treasury, agent, shieldkeeper + **decorrelation**, **relay HTTP surface + metadata** |
 
-**456 tests, all green**, and all of them now run in CI (§7 E1). The contract tier is the strong part and deserves
+**468 tests, all green**, and all of them now run in CI (§7 E1). The contract tier is the strong part and deserves
 saying so: a seeded-PRNG invariant campaign (`test/invariant.test.ts`) asserts
 escrow conservation and vault solvency after *every* operation and reproduces
 failures from a printed seed; the verifier tests pin fail-safe-before-VK and
@@ -698,9 +698,51 @@ mutation showed the menu tests were covering only *one* of two failure branches:
 an unbound KV answers 503 (`res.ok`), a dead host rejects (`catch`), and
 removing the catch fallback survived the suite until a case was added for it.
 
-☐ **D4 — Local-chain full-lifecycle e2e.** A hardhat-node variant of
-`scripts/privacy/live-order-e2e.mjs`, so the same lifecycle coverage runs per-PR
-at zero cost. The live Paseo runs stay, as the nightly.
+✅ **D4 — Local-chain full-lifecycle e2e** (`test/lifecycle-e2e.test.ts`,
+12 tests). One delivery, end to end, per-PR. The live Paseo run stays as the
+nightly (§7 E3).
+
+**Not a duplicate of the phase suites, and the reason matters.** Every phase is
+already tested — `privacy-e2e` (vault → keeper → note), `shieldnote-vault`,
+`sealed-bids`, `shielded-payouts`, `leak-sweep` — and every one builds its *own*
+fixture. That is right for testing a phase, and it is exactly what leaves the
+gap: nothing asserted that one phase's real output is a valid input to the next.
+So this is one continuous run where each stage consumes what the previous stage
+actually produced, and the assertions are the **seams**:
+
+- **The proof opens the commitment the *order* stored.** The public signal is
+  read back off the chain, not from a local variable. This required generating
+  the Groth16 proof live rather than replaying `test/fixtures/zk-proximity.json`
+  — a canned proof carries a canned `dropCommit`, so the handoff would have been
+  checked against a value the order never produced. Verified by the **real**
+  `FareLocationVerifier`, not the mock.
+- **The note is funded by settlement earnings**, not a fixture `credit()`. Every
+  other suite starts the note story with a hand-placed balance, so until now
+  nothing showed that a real delivery pays enough, in the right denomination, to
+  be shielded at all.
+- **The account that accepts is the account that ordered** — a burner-derivation
+  bug would surface as a revert rather than a silent privacy loss.
+- **Escrow in equals payouts out**, and the vault's closing balance equals what
+  it still owes plus the shield buffer, summed over every holder including the
+  crowd.
+
+**The most instructive stage is the one that fails on purpose.** A complete,
+correct delivery produces a note the contract *refuses to deposit*:
+`shieldMinBatch` is 8, so sealing a batch of one reverts `batch-too-small`. B4
+established that a lone note has an anonymity set of 1; this shows the chain
+enforcing it, and that a single delivery cannot shield itself — it waits for
+seven strangers. Only then does the note reach the pool, among 8.
+
+Mutation-checked: proving against a commitment the order never stored fails five
+tests; funding the note from a `credit()` instead of earnings fails the earnings
+seam and everything downstream.
+
+**Marked where a local chain cannot go.** The live script's shielded *funding*
+(stage 1) and pool *withdrawal* (stage 9) are the Kusama Shield pool's own
+Groth16 withdraw circuit — not FARE code — and `MockShieldPool` has no
+`proxy_withdraw`. Mocking it would assert nothing about either system, so the
+burner is funded plainly and the boundary is stated in the file. Shielded
+**payout** is FARE code and is covered.
 
 ☐ **D5 — Order state machine.** Exhaustive: assert every invalid transition
 reverts. The fuzz campaign reaches some of these incidentally; an explicit
@@ -836,15 +878,18 @@ what actually predicts proving time on a user's phone.
 (gas pinned, circuit constraints not). From here every remaining item is
 coverage of product code rather than plumbing.
 
-**What is left**, in the order worth doing it: **D4** (a local-chain lifecycle
-e2e, so the per-PR tier covers what the nightly covers live), **D5** (order state
-machine), then **D2** (client-core units — `wallets.ts` first: a burner
-derivation bug silently re-links orders, defeating the customer's primary
-protection) and **D1** (console components). Those last two are where the 17%
-web floor has by far the most room to move. **E4**'s constraint snapshot is a
-small job worth doing alongside any circuit work. **C4** stays a mainnet gate
-behind the MPC ceremony, and **B3** stays a decision rather than a
-recommendation.
+9. ✅ **D4 — local-chain lifecycle e2e.** One delivery per-PR, asserting the
+   seams between phases that per-phase fixtures cannot reach.
+
+**What is left**, in the order worth doing it: **D5** (order state machine — an
+explicit invalid-transition matrix; cheap and complete, and the fuzz campaign
+only reaches these incidentally), then **D2** (client-core units — `wallets.ts`
+first: a burner derivation bug silently re-links orders, defeating the
+customer's primary protection) and **D1** (console components). Those last two
+are where the 17% web floor has by far the most room to move. **E4**'s
+constraint snapshot is a small job worth doing alongside any circuit work.
+**C4** stays a mainnet gate behind the MPC ceremony, and **B3** stays a decision
+rather than a recommendation.
 
 B3 is deliberately left as a decision rather than a recommendation: it is worth
 adopting only if the privacy posture should be pinned by tests.
