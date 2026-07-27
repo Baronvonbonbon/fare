@@ -137,7 +137,7 @@ infra/UI, spec'd in the linked design note.
 
 **Group E — trust & release**
 - ☐ **E1 Filmed end-to-end field test** (two phones, one real handoff) — R1's key artifact.
-- 🟡 **E2 Slither / Mythril** static-analysis pass — **Slither done + in CI** (`.github/workflows/slither.yml`, `crytic/slither-action`); full triage in [SECURITY-REVIEW.md](SECURITY-REVIEW.md) (96 results, **zero high-severity**; new F6/F8 surface clean). Mythril documented as an on-demand deep-dive for money-handling contracts (too slow to gate CI).
+- 🟡 **E2 Slither / Mythril** static-analysis pass — **Slither done + in CI** (`.github/workflows/slither.yml`, `crytic/slither-action`); full triage in [SECURITY-REVIEW.md](SECURITY-REVIEW.md) (96 results, **zero high-severity**; new F6/F8 surface clean). Mythril now runs **nightly** over the three money-handling contracts (`scripts/mythril.sh`, `.github/workflows/nightly.yml`) — too slow to gate a PR, and reporting rather than gating because its findings scale with the exploration budget.
 - ☐ **E3 External audit** before mainnet value.
 - ☐ **E4 Device-attestation tier** (Play Integrity / App Attest), L0/L1/L2 gradient.
 

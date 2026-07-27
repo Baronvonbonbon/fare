@@ -17,6 +17,7 @@ Ordered by what a reader should act on, not by discovery order.
 | 14 | Ops docs required a faucet secret for a code path that no longer ran | Medium (docs) | ✅ Fixed |
 | 19 | The subsidy budget did not count what `/fund` pays out | **Medium** | ✅ Fixed |
 | 20 | Concurrent requests all passed the same budget check | Low | ✅ Fixed |
+| 21 | The live runs write private keys where CI would have published them | **Medium** | ✅ Guarded |
 | 2 | `/fund` can double-fund inside a 250 ms window | Low | ☐ Open |
 | 3 | Oversized request body returns 500, not 413 | Cosmetic | ☐ Open |
 | 4 | CI ran nothing but Slither, path-filtered to `contracts/**` | **High** (process) | ✅ Fixed |
@@ -445,6 +446,48 @@ short of seed + gas) to force a rejected submission.
 reservation back when the submission never lands`. Mutation-checked: deferring
 the reservation past the send fails the first and nothing else; dropping the
 refund in `release()` fails the second and nothing else.
+
+## 21. The live runs write private keys where CI would have published them — **guarded**
+
+Caught while wiring E3's nightly, before it shipped, which is the only reason
+this is a note and not an incident.
+
+The live scripts write their working state under `e2e-runs/`, and some of it is
+key material: `live-order-e2e.mjs` writes `actors.json` containing the
+customer's and driver's **private keys**, the relay lab writes `relays.json`
+with three funded relay keys, and the note files carry nullifiers and salts —
+values whose entire purpose is that nobody else has them. The directory is
+gitignored, so nothing had ever pushed it anywhere.
+
+A nightly changes that. The obvious way to keep a failed run's evidence is
+`upload-artifact` with `path: e2e-runs/`, and **artifacts on a public repository
+are downloadable by anyone**. The gitignore that makes the directory safe in git
+does nothing in CI.
+
+**Guarded** two ways. The uploads are allowlists — `report.json` and
+`costs.json`, never a directory — and `scripts/ci/artifact-guard.mjs` checks
+those files before they go, failing the step if any carries key material.
+
+The guard keys on **field names**, not value shapes, and that is the interesting
+part: a private key and a transaction hash are both 32 bytes of hex, and these
+reports are full of legitimate hashes, roots and commitments. A value-shaped
+matcher would either cry wolf on every report or be tuned down until it saw
+nothing. What the writers actually do is *name* the field.
+
+It also runs a positive control on every invocation, B2's lesson applied to the
+thing that decides what leaves the build: zero findings is the healthy state and
+is indistinguishable from a broken walker, so before trusting a clean sweep it
+plants four secrets and requires all four caught. **That control immediately
+earned its keep** — it failed on first run and exposed two defects in the guard:
+`PRIVATE_KEY` was missed because the pattern had no separator class and only
+matched `privateKey`, and the expected-count assertion was too strict to survive
+a file tripping both matchers.
+
+One deliberate exclusion: `nullifierHash` is **not** treated as secret. The hash
+is a public signal — the vault publishes it to prevent a double-spend — while
+the bare `nullifier` is its secret preimage. Flagging the published one would
+block every legitimate ZK report, which is how a guard gets switched off. Both
+cases are in the control.
 
 ---
 

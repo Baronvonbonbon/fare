@@ -92,8 +92,9 @@ jobs:
       - name: Install deps
         run: npm ci
 
-      # Covers the pure modules (economics, scorer, swap, treasury, agent,
-      # shieldkeeper). relay.mjs itself is untested and untestable as written —
-      # docs/TEST-PLAN.md §5 C1.
+      # The pure modules (economics + break-even, scorer, swap, treasury, agent,
+      # shieldkeeper + decorrelation) plus relay.mjs's no-chain HTTP surface and
+      # its metadata defences. The relay's chain-backed half lives in the
+      # contracts job — docs/TEST-PLAN.md §5 C1, C2.
       - name: Test
         run: node --test

@@ -634,9 +634,31 @@ stayed enabled, so blanking the protocol-fee box set the fee to zero. Fixed;
 dependency, and adding one is a decision rather than a gap — the logic that
 decides what a console *does* is now all outside the components.
 
-☐ **C6 — Mythril nightly.** Currently documented as an on-demand deep-dive,
-which in practice means it never runs. Schedule it against `FareVault`,
-`FareOrders` and `FareForwarder`.
+✅ **C6 — Mythril nightly** (`scripts/mythril.sh`, run by §7 E3's nightly against
+`FareVault`, `FareOrders` and `FareForwarder`). It was documented as an
+on-demand deep-dive, which in practice meant it never ran.
+
+**It reports rather than gates, and that is deliberate.** Mythril's findings are
+a function of its exploration budget: measured while wiring this up, at
+`--execution-timeout 240` all three contracts come back clean, and at 300
+`FareVault` additionally reports SWC-116 (block.timestamp control flow) inside
+`withdrawFor` — which is the EIP-712 deadline doing exactly what a deadline
+does, and which Mythril itself flags as compiler-generated code. A strict
+pass/fail on "any finding" would therefore be red or green depending on how much
+CPU the runner happened to get, and the first few false alarms would get the job
+muted. So **high severity fails the build; everything else is reported and
+uploaded**, and a run that cannot finish is a warning rather than a failure —
+an infrastructure timeout is not a finding.
+
+Two toolchain facts worth keeping, because both fail in ways that look like a
+broken install rather than a config problem:
+
+- **`setuptools<81` is required.** Mythril 0.24.8 pulls py-evm, which still
+  imports `pkg_resources`; on setuptools 81+ every invocation dies at import
+  time, before it reads a contract.
+- **The solc settings must carry `viaIR` and `evmVersion: cancun`**, matching
+  `hardhat.config.ts`. OpenZeppelin's `Bytes.sol` uses `mcopy`, so a default
+  `evmVersion` fails to *compile* with "Function mcopy not found".
 
 ---
 
@@ -697,8 +719,40 @@ caught that `test/shieldnote-vault.test.ts` needs proving artifacts that are
 gitignored; the job restores them from the byte-identical tracked copies under
 `web/public/shield/`.
 ☐ **E2** — `solidity-coverage` + `vitest --coverage`, with a floor.
-☐ **E3** — Nightly: live Paseo e2e, cost ledger, Mythril, wide fuzz seeds
-(`for s in $(seq 1 50); do FUZZ_SEED=$s npx hardhat test test/invariant.test.ts; done`).
+
+✅ **E3 — Nightly** (`.github/workflows/nightly.yml`, four jobs). The things too
+slow, too expensive or too secret-dependent to run per-PR — and which stop being
+real if nobody ever runs them.
+
+| Job | Needs | What it does |
+|---|---|---|
+| `fuzz` | — | The invariant campaign at **50 seeds** |
+| `mythril` | — | Symbolic execution over vault, orders, forwarder (C6) |
+| `live-e2e` | `DEPLOYER_PRIVATE_KEY` | Full lifecycle against live Paseo |
+| `cost-ledger` | `DEPLOYER_PRIVATE_KEY` | A3's live half, through three real relays |
+
+**Failures here are not a merge gate** — nothing is blocked at 3am. They are a
+signal, and every job uploads its reports so a red run can be read without
+reproducing it.
+
+Four things this needed that were not obvious:
+
+- **The Paseo jobs skip rather than fail without the secret.** A workflow that is
+  permanently red on a fork teaches people to ignore it. `secrets` cannot be read
+  in a job-level `if`, so a tiny gate job lifts it into an output.
+- **Every seed runs even after one fails.** The campaign's value is breadth; a
+  loop that stops at the first failure hides how many of the 50 are broken. The
+  failing seeds are collected and reported together, with the reproduce command
+  for the first one — the invariant test reproduces from a printed seed.
+- **Three relays had to become one command.** `measure-costs.mjs` needs them
+  running, and "three terminals and a README" is precisely why the live ledger
+  never ran unattended. `scripts/privacy/relay-lab.mjs` funds them, launches
+  them, waits on `/health` (a relay that cannot reach the RPC binds its port and
+  then fails every request, so an open port is not readiness), runs the
+  measurement and tears them down.
+- **The obvious artifact upload would have published private keys** —
+  [TEST-FINDINGS.md](TEST-FINDINGS.md) #21.
+
 ☐ **E4** — Gas and constraint snapshots committed and diffed.
 
 ---
@@ -724,6 +778,15 @@ gitignored; the job restores them from the byte-identical tracked copies under
    that set governance parameters to zero.
 6. ✅ **C3 — access-control matrix.** Done (530 denial checks, self-maintaining).
    Then **D3**, then the remainder.
+7. ✅ **E3 / C6 — the nightly.** Four jobs: 50 fuzz seeds, Mythril over the
+   money-handling contracts, and the two Paseo runs (live e2e + the cost
+   ledger) that skip cleanly without a deployer secret.
+
+**What is left**, in the order worth doing it: **E2** (coverage floors — the
+last harness item), **D4** (a local-chain lifecycle e2e, so the per-PR tier
+covers what the nightly covers live), **D5** (order state machine), then the
+client-core units **D2** and the console component tests **D1**. **C4** stays a
+mainnet gate behind the MPC ceremony.
 
 B3 is deliberately left as a decision rather than a recommendation: it is worth
 adopting only if the privacy posture should be pinned by tests.

@@ -40,18 +40,33 @@ finding — the `nonReentrant` guards on `FareVault.withdrawFor` and
 (`FareForwarder`, `FareVault.withdrawFor` + `withdrawFeeBps`, `FareOrders`
 `relayRebateBps` + rebate carve) introduced **no new high/medium finding**.
 
-## Mythril (on-demand)
+## Mythril (nightly)
 
-Mythril's symbolic execution is thorough but slow, so it is **not** a CI gate.
-Run it against a specific contract when changing money-handling logic:
+Mythril's symbolic execution is thorough but slow, so it is **not** a per-PR
+gate. It now runs **nightly** over the three money-handling contracts —
+`FareVault` (custody + the `withdrawFor` signature path), `FareOrders`
+(settlement/fee arithmetic) and `FareForwarder` — via
+`.github/workflows/nightly.yml`. Reports are uploaded as artifacts.
 
 ```bash
-pip install mythril
-myth analyze contracts/FareVault.sol --solv 0.8.24 --execution-timeout 300
+./scripts/mythril.sh                    # all three, as CI runs them
+./scripts/mythril.sh FareVault          # one
+MYTH_TIMEOUT=600 ./scripts/mythril.sh   # dig harder
 ```
 
-Priority targets: `FareVault` (custody + `withdrawFor` signature path),
-`FareForwarder`, and `FareOrders` settlement/fee arithmetic.
+Use the script rather than calling `myth` directly. The bare command that used
+to be documented here does not work: it needs the OpenZeppelin remapping, and
+without `viaIR` + `evmVersion: cancun` (matching `hardhat.config.ts`) it fails
+to **compile**, because OpenZeppelin's `Bytes.sol` uses `mcopy`. The script
+writes those settings itself. Mythril 0.24.8 also requires `setuptools<81` —
+py-evm still imports `pkg_resources`, and on 81+ every invocation dies at import.
+
+**Findings scale with the exploration budget**, so treat a clean run as "nothing
+found within this budget" rather than proof. At `--execution-timeout 240` all
+three are clean; at 300, `FareVault` reports SWC-116 (block.timestamp control
+flow) in `withdrawFor` — that is the **EIP-712 deadline**, which is what a
+deadline is for, and Mythril notes it is compiler-generated code. Accepted, not
+a defect. The nightly fails only on **high** severity for exactly this reason.
 
 ## CI
 

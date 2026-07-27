@@ -14,9 +14,22 @@ else {
   });
   fs.writeFileSync(file, JSON.stringify(relays, null, 2));
 }
-const p = new ethers.JsonRpcProvider("https://eth-rpc-testnet.polkadot.io/", undefined, { staticNetwork: true });
-const key = (fs.readFileSync(path.join(ROOT, ".env"), "utf8").match(/^DEPLOYER_PRIVATE_KEY=(.+)$/m))[1].trim();
-const d = new ethers.Wallet(key, p);
+const p = new ethers.JsonRpcProvider(
+  process.env.TESTNET_RPC ?? "https://eth-rpc-testnet.polkadot.io/", undefined, { staticNetwork: true });
+
+// The env wins over .env, so this runs unattended (E3's nightly has the key as a
+// secret and no .env at all). Reading .env directly and indexing the match was
+// how this started, which threw a TypeError on a missing file — a confusing
+// failure for the one thing an operator is most likely to have got wrong.
+function deployerKey() {
+  if (process.env.DEPLOYER_PRIVATE_KEY) return process.env.DEPLOYER_PRIVATE_KEY.trim();
+  const envFile = path.join(ROOT, ".env");
+  const m = fs.existsSync(envFile)
+    && fs.readFileSync(envFile, "utf8").match(/^DEPLOYER_PRIVATE_KEY=(.+)$/m);
+  if (!m) throw new Error("DEPLOYER_PRIVATE_KEY not set (env or .env) — the relays cannot be funded");
+  return m[1].trim();
+}
+const d = new ethers.Wallet(deployerKey(), p);
 const TOP = ethers.parseEther("25");
 for (const r of relays) {
   const bal = await p.getBalance(r.address);

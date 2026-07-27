@@ -1,0 +1,252 @@
+# Nightly (TEST-PLAN E3). The things that are too slow, too expensive, or too
+# secret-dependent to run on every push — but that stop being real if nobody
+# ever runs them.
+#
+# Four jobs, in two groups:
+#
+#   No secrets, always run:   fuzz (50 invariant seeds), mythril (3 contracts)
+#   Needs a funded deployer:  live-e2e, cost-ledger — both against Paseo
+#
+# The Paseo jobs are gated on the DEPLOYER_PRIVATE_KEY secret being present and
+# SKIP cleanly when it is not, so this workflow is green and useful on a fork or
+# a fresh clone rather than red for a reason nobody can fix. They spend real
+# testnet PAS from a live account: see the `live` job's comment before enabling.
+#
+# Failures here are NOT a merge gate — nothing is blocked at 3am. They are a
+# signal, and the reports are uploaded as artifacts so a red run can be read
+# without re-running it locally.
+
+name: nightly
+
+on:
+  schedule:
+    - cron: "0 3 * * *" # 03:00 UTC daily
+  workflow_dispatch:
+    inputs:
+      run_paseo:
+        description: "Also run the Paseo jobs (spends testnet PAS)"
+        type: boolean
+        default: false
+
+concurrency:
+  group: nightly
+  cancel-in-progress: false # a nightly that cancels itself has never run
+
+jobs:
+  # ── Wide fuzz: the invariant campaign at 50 seeds ─────────────────────────
+  # test/invariant.test.ts asserts escrow conservation and vault solvency after
+  # EVERY operation, from a seeded PRNG. CI runs one seed; the campaign's value
+  # is in breadth, and a failure prints the seed that reproduces it.
+  fuzz:
+    name: invariant fuzz (50 seeds)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - run: npm ci
+
+      # Compile once so the 50 runs don't each pay for it.
+      - run: npx hardhat compile
+
+      # Every seed runs even after one fails: a nightly that stops at the first
+      # failure hides how many of the 50 are broken, and the whole point is
+      # breadth. Failing seeds are collected and reported together at the end.
+      - name: Run 50 seeds
+        run: |
+          failed=()
+          for s in $(seq 1 50); do
+            printf '── seed %s ' "$s"
+            if FUZZ_SEED=$s npx hardhat test test/invariant.test.ts > "/tmp/seed-$s.log" 2>&1; then
+              echo "ok"
+            else
+              echo "FAILED"
+              failed+=("$s")
+              tail -40 "/tmp/seed-$s.log"
+            fi
+          done
+          if [ ${#failed[@]} -ne 0 ]; then
+            echo "::error::invariant campaign failed on ${#failed[@]}/50 seeds: ${failed[*]}"
+            {
+              echo "## Invariant fuzz: ${#failed[@]}/50 seeds failed"
+              echo
+              echo "Reproduce a failure with:"
+              echo '```'
+              echo "FUZZ_SEED=${failed[0]} npx hardhat test test/invariant.test.ts"
+              echo '```'
+              echo
+              echo "Failing seeds: ${failed[*]}"
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          echo "all 50 seeds passed" >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: fuzz-logs
+          path: /tmp/seed-*.log
+          retention-days: 14
+
+  # ── Mythril: symbolic execution over the money-handling contracts ─────────
+  # TEST-PLAN C6. Slither is the per-PR gate; this is the deep pass it cannot
+  # afford. Read scripts/mythril.sh for why this is a report and not a gate.
+  mythril:
+    name: mythril (vault, orders, forwarder)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - run: npm ci # for the OpenZeppelin sources the remapping points at
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # mythril 0.24.8 pulls py-evm, which still imports pkg_resources —
+      # removed from setuptools 81+. Without the pin every invocation dies at
+      # import time with ModuleNotFoundError, before it reads a contract.
+      - name: Install mythril
+        run: |
+          pip install "setuptools<81"
+          pip install mythril==0.24.8
+          myth version
+
+      - name: Analyze
+        run: ./scripts/mythril.sh
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: mythril-reports
+          path: mythril-out/
+          retention-days: 30
+
+  # ── The Paseo jobs ────────────────────────────────────────────────────────
+  # Gated on the secret, so a fork or a fresh clone skips rather than fails.
+  # `secrets` cannot be read in a job-level `if`, so it is lifted into an output
+  # here — the standard workaround.
+  paseo-configured:
+    name: check Paseo credentials
+    runs-on: ubuntu-latest
+    outputs:
+      ready: ${{ steps.check.outputs.ready }}
+    steps:
+      - id: check
+        env:
+          KEY: ${{ secrets.DEPLOYER_PRIVATE_KEY }}
+        run: |
+          if [ -n "$KEY" ] && { [ "${{ github.event_name }}" = "schedule" ] || [ "${{ inputs.run_paseo }}" = "true" ]; }; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            echo "Paseo jobs skipped: ${KEY:+credentials present, }not requested for this event." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+  # Full lifecycle against the live chain — the run the E2E reports document by
+  # hand. Spends real testnet PAS from the deployer.
+  live-e2e:
+    name: live Paseo e2e
+    needs: paseo-configured
+    if: needs.paseo-configured.outputs.ready == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - run: npm ci
+
+      - name: Run
+        env:
+          DEPLOYER_PRIVATE_KEY: ${{ secrets.DEPLOYER_PRIVATE_KEY }}
+          TESTNET_RPC: ${{ secrets.TESTNET_RPC }}
+        run: node scripts/privacy/live-order-e2e.mjs
+
+      # NOT `path: e2e-runs/`. live-order-e2e.mjs writes actors.json with the
+      # customer's and driver's PRIVATE KEYS, plus note secrets — and artifacts
+      # on a public repository are downloadable by anyone. Upload the reports
+      # only, and have the guard prove they are clean before they go.
+      - name: Check artifacts carry no key material
+        if: always()
+        run: |
+          node scripts/ci/artifact-guard.mjs \
+            e2e-runs/privacy-order/report.json \
+            e2e-runs/privacy-order/failure.json
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: live-e2e-report
+          path: |
+            e2e-runs/privacy-order/report.json
+            e2e-runs/privacy-order/failure.json
+          retention-days: 30
+
+  # The live half of A3: the same ledger the per-PR test uses, measured through
+  # three real relays on the real chain. scripts/privacy/relay-lab.mjs brings
+  # them up, runs the measurement and tears them down.
+  cost-ledger:
+    name: live cost ledger
+    needs: paseo-configured
+    if: needs.paseo-configured.outputs.ready == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - run: npm ci
+      - name: Install relay deps
+        working-directory: venue-node
+        run: npm ci
+
+      # measure-costs.mjs builds a real withdraw proof, which needs the proving
+      # key that ships split across three parts for the Pages 25 MiB ceiling
+      # (A4). Same restore the contracts job does for the shieldnote circuit.
+      - name: Restore ZK proving artifacts
+        run: |
+          mkdir -p circuits/build/shieldnote_js
+          cp web/public/shield/shieldnote.zkey circuits/build/shieldnote.zkey
+          cp web/public/shield/shieldnote.wasm circuits/build/shieldnote_js/shieldnote.wasm
+
+      - name: Measure
+        env:
+          DEPLOYER_PRIVATE_KEY: ${{ secrets.DEPLOYER_PRIVATE_KEY }}
+          TESTNET_RPC: ${{ secrets.TESTNET_RPC }}
+        run: node scripts/privacy/relay-lab.mjs measure-costs.mjs
+
+      # relays.json sits in the same directory and holds three funded relay
+      # private keys, so the upload is an allowlist and the guard checks it.
+      - name: Check artifacts carry no key material
+        if: always()
+        run: |
+          node scripts/ci/artifact-guard.mjs \
+            e2e-runs/relay-lab/costs.json \
+            e2e-runs/relay-lab/costs-partial.json
+
+      # costs.json is the per-payer report; the local run in
+      # test/cost-ledger.test.ts emits the same shape, so the two can be diffed.
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: cost-ledger
+          path: |
+            e2e-runs/relay-lab/costs.json
+            e2e-runs/relay-lab/costs-partial.json
+          retention-days: 90
