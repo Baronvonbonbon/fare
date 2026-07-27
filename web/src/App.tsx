@@ -5,7 +5,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   type OrderRow, type VenueRow, type ReceiptData,
   STATUS, badgeClass, TERMINAL_STATUS,
-  orderExpiry, fmtLeft, driverBoard,
+  orderExpiry, fmtLeft, driverBoard, discoverRelevantOrders,
   dropStoreKey, receiptKey, loadReceipt, placeOrder,
 } from "./orderflow";
 import {
@@ -211,57 +211,17 @@ export default function App() {
       const latest = await currentBlock();
       const from = Math.max(0, latest - INITIAL_LOOKBACK);
       const me = session?.address?.toLowerCase();
-      const relevant = new Set<string>();
-      const add = (ids: bigint[]) => ids.forEach((id) => relevant.add(String(id)));
-      const myVenueIds = new Set(
-        venueRows
-          .filter((v) => me && (v.operator.toLowerCase() === me || v.signer.toLowerCase() === me))
-          .map((v) => String(v.id))
+      // Which orders this role even needs to know about — extracted to
+      // orderflow.ts, where each branch is driven without a node.
+      const relevant = await discoverRelevantOrders(
+        {
+          discoverOrders, discoverAssignments, orderIdsInRegions, regionsCovering,
+          myOrderWallets: orderWalletAddresses,
+          nextOrderId: () => c.orders.nextOrderId(),
+        },
+        { role, me: me ?? null, myLoc, radiusKm, venues: venueRows, from, to: latest }
       );
-      const venueById = new Map(venueRows.map((v) => [String(v.id), v]));
-      const inRegion = (venueId: bigint) => {
-        if (!myLoc || radiusKm === 0) return true;
-        const v = venueById.get(String(venueId));
-        return !!v && distanceMeters(myLoc, { lat: v.lat, lon: v.lon }) <= radiusKm * 1000;
-      };
 
-      // Fetch the full OrderCreated stream lazily — the driver's region path
-      // avoids it entirely (server-side region query instead).
-      let created: Awaited<ReturnType<typeof discoverOrders>> | null = null;
-      const getCreated = async () => (created ??= await discoverOrders(from, latest));
-
-      try {
-        if (role === "customer") {
-          // A customer's orders now span many per-order wallets, not one
-          // address — match against the local wallet registry.
-          const mineAddrs = orderWalletAddresses();
-          add((await getCreated()).filter((d) => mineAddrs.has(d.customer.toLowerCase())).map((d) => d.id));
-        } else if (role === "venue" && me) {
-          add((await getCreated()).filter((d) => myVenueIds.has(String(d.venueId))).map((d) => d.id));
-        } else if (role === "driver") {
-          if (myLoc && radiusKm > 0) {
-            // Phase 2: fetch only orders whose pickup region covers the radius,
-            // server-side (region is the leading indexed topic). Fall back to
-            // the full stream + client-side filter on a pre-OrderRegion node.
-            try {
-              add(await orderIdsInRegions(regionsCovering(myLoc, radiusKm), from, latest));
-            } catch {
-              add((await getCreated()).filter((d) => inRegion(d.venueId)).map((d) => d.id));
-            }
-          } else {
-            add((await getCreated()).map((d) => d.id)); // everywhere
-          }
-          if (me) {
-            const assigns = await discoverAssignments(from, latest);
-            add(assigns.filter((a) => a.driver.toLowerCase() === me).map((a) => a.id)); // my jobs, anywhere
-          }
-        }
-        // account-scoped roles with no session → nothing to show
-      } catch {
-        // node without eth_getLogs — enumerate all; views filter locally
-        const nextOrder: bigint = await c.orders.nextOrderId();
-        for (let i = 1n; i < nextOrder; i++) relevant.add(String(i));
-      }
 
       // ── 3. Read structs only for newly-seen or still-active relevant orders;
       //       terminal orders (Delivered/Cancelled/Resolved) stay cached.

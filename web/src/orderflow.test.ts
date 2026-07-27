@@ -68,7 +68,7 @@ function contractsImpl() {
 
 import {
   orderExpiry, fmtLeft, driverBoard, loadReceipt, loadDropSecret,
-  dropStoreKey, receiptKey, placeOrder, badgeClass, TERMINAL_STATUS,
+  dropStoreKey, receiptKey, placeOrder, badgeClass, TERMINAL_STATUS, discoverRelevantOrders,
   type OrderRow, type VenueRow,
 } from "./orderflow";
 
@@ -447,5 +447,160 @@ describe("status labels", () => {
     for (const live of [1, 2, 3, 6]) {
       expect(TERMINAL_STATUS.has(live), `status ${live} was treated as finished`).to.equal(false);
     }
+  });
+});
+
+// ── which orders each role fetches ──────────────────────────────────────────
+
+describe("what each role even knows about", () => {
+  const ME = "0x" + "d1".repeat(20);
+  const BURNER_A = "0x" + "0a".repeat(20);
+  const BURNER_B = "0x" + "0b".repeat(20);
+  const venues = [
+    { ...venue(1n, 37_774_900, -122_419_400), operator: ME, signer: "0xsig" },
+    { ...venue(2n, 37_874_900, -122_419_400), operator: "0xelse", signer: "0xelse2" },
+  ];
+  const HERE = { lat: 37_774_900, lon: -122_419_400 };
+
+  const CREATED = [
+    { id: 1n, venueId: 1n, customer: BURNER_A, block: 10 },
+    { id: 2n, venueId: 2n, customer: BURNER_B, block: 11 },
+    { id: 3n, venueId: 1n, customer: "0x" + "ff".repeat(20), block: 12 },
+  ];
+
+  /// Deps with counters, so "which queries ran" is assertable — the phase-2
+  /// region path exists precisely to avoid one of them.
+  function deps(over: Partial<any> = {}) {
+    const counts = { created: 0, assigns: 0, regions: 0, nextId: 0 };
+    const d = {
+      discoverOrders: async () => { counts.created++; return CREATED; },
+      discoverAssignments: async () => { counts.assigns++; return [{ id: 9n, driver: ME }]; },
+      orderIdsInRegions: async () => { counts.regions++; return [1n]; },
+      regionsCovering: () => ["0xregion"],
+      myOrderWallets: () => new Set([BURNER_A.toLowerCase()]),
+      nextOrderId: async () => { counts.nextId++; return 4n; },
+      ...over,
+    };
+    return { d, counts };
+  }
+  const base = { myLoc: null, radiusKm: 0, venues, from: 0, to: 100 };
+
+  it("scopes a customer to their LOCAL burner registry, not one address", async () => {
+    // A customer's orders span many per-order wallets by design. Matching a
+    // single session address would show them nothing they had ever ordered.
+    const { d } = deps();
+    const ids = await discoverRelevantOrders(d, { ...base, role: "customer", me: null });
+    expect([...ids]).to.deep.equal(["1"]);
+  });
+
+  it("finds a customer's orders even with no wallet connected", async () => {
+    // The burner registry is device-local; the customer view works before any
+    // session exists, and must.
+    const { d, counts } = deps();
+    const ids = await discoverRelevantOrders(d, { ...base, role: "customer", me: null });
+    expect(ids.size).to.equal(1);
+    expect(counts.assigns, "pulled driver assignments for a customer").to.equal(0);
+  });
+
+  it("scopes a venue to venues it operates OR signs for", async () => {
+    // Operator and signer are different keys on purpose — a venue can delegate
+    // attestation signing. Matching only one loses that venue's whole board.
+    const { d } = deps();
+    const asOperator = await discoverRelevantOrders(d, { ...base, role: "venue", me: ME });
+    expect([...asOperator]).to.deep.equal(["1", "3"]);
+
+    const signerVenues = [{ ...venues[0], operator: "0xelse", signer: ME }, venues[1]];
+    const asSigner = await discoverRelevantOrders(d, { ...base, role: "venue", me: ME, venues: signerVenues });
+    expect([...asSigner], "a venue's signer key saw nothing").to.deep.equal(["1", "3"]);
+  });
+
+  it("matches a venue operator whatever the address casing", async () => {
+    const { d } = deps();
+    const ids = await discoverRelevantOrders(d, {
+      ...base, role: "venue", me: ME.toUpperCase().replace("0X", "0x"),
+    });
+    expect(ids.size, "case-sensitive operator match emptied the venue board").to.equal(2);
+  });
+
+  it("shows a venue nothing when no wallet is connected", async () => {
+    const { d } = deps();
+    expect((await discoverRelevantOrders(d, { ...base, role: "venue", me: null })).size).to.equal(0);
+  });
+
+  it("uses the server-side region query for a located driver, and skips the full stream", async () => {
+    // This is the whole point of phase 2: region is the LEADING indexed topic,
+    // so it filters at the node. Pulling the full OrderCreated stream anyway
+    // would work and would silently undo the optimisation.
+    const { d, counts } = deps();
+    const ids = await discoverRelevantOrders(d, { ...base, role: "driver", me: ME, myLoc: HERE, radiusKm: 5 });
+
+    expect(counts.regions).to.equal(1);
+    expect(counts.created, "fetched the whole stream despite a region query").to.equal(0);
+    expect([...ids].sort()).to.deep.equal(["1", "9"]);
+  });
+
+  it("falls back to the full stream when the node has no OrderRegion topic", async () => {
+    // A pre-phase-2 node throws on the region filter. Falling back is what
+    // keeps the driver board working on an older RPC instead of empty.
+    const { d, counts } = deps({
+      orderIdsInRegions: async () => { throw new Error("unknown topic"); },
+    });
+    const ids = await discoverRelevantOrders(d, { ...base, role: "driver", me: ME, myLoc: HERE, radiusKm: 5 });
+
+    expect(counts.created, "did not fall back to the stream").to.equal(1);
+    // Client-side region filter: venue 1 is here, venue 2 is ~11 km away.
+    expect([...ids].sort()).to.deep.equal(["1", "3", "9"]);
+  });
+
+  it("shows a driver everything when they have no location fix", async () => {
+    const { d, counts } = deps();
+    const ids = await discoverRelevantOrders(d, { ...base, role: "driver", me: ME });
+    expect(counts.regions, "ran a region query with no location").to.equal(0);
+    expect([...ids].sort()).to.deep.equal(["1", "2", "3", "9"]);
+  });
+
+  it("keeps a driver's own jobs regardless of radius", async () => {
+    // The property this branch exists for: an active delivery must not vanish
+    // from the driver's screen the moment they walk out of the radius they set.
+    // Order 9 is assigned to them and is in NO region result.
+    const { d } = deps({ orderIdsInRegions: async () => [] });
+    const ids = await discoverRelevantOrders(d, { ...base, role: "driver", me: ME, myLoc: HERE, radiusKm: 1 });
+    expect([...ids], "the driver's own job was filtered out by their radius").to.deep.equal(["9"]);
+  });
+
+  it("does not pull assignments for a driver with no session", async () => {
+    const { d, counts } = deps();
+    await discoverRelevantOrders(d, { ...base, role: "driver", me: null });
+    expect(counts.assigns).to.equal(0);
+  });
+
+  it("enumerates every order when the node has no eth_getLogs", async () => {
+    // Slow and correct beats fast and blank: a light client without log queries
+    // must still show a working app, with the views filtering locally.
+    const { d, counts } = deps({
+      discoverOrders: async () => { throw new Error("eth_getLogs unsupported"); },
+    });
+    const ids = await discoverRelevantOrders(d, { ...base, role: "customer", me: null });
+    expect(counts.nextId).to.equal(1);
+    expect([...ids].sort()).to.deep.equal(["1", "2", "3"]); // 1 .. nextOrderId-1
+  });
+
+  it("fetches the OrderCreated stream at most once", async () => {
+    // It is the most expensive call in a refresh, and both the customer and the
+    // driver-fallback branches want it.
+    const { d, counts } = deps({
+      orderIdsInRegions: async () => { throw new Error("no topic"); },
+    });
+    await discoverRelevantOrders(d, { ...base, role: "driver", me: ME, myLoc: HERE, radiusKm: 5 });
+    expect(counts.created).to.equal(1);
+  });
+
+  it("deduplicates ids that more than one branch found", async () => {
+    // A driver's assigned job that is also in their region must appear once —
+    // the ids key a struct-read map downstream, and a duplicate is a wasted
+    // round trip per refresh.
+    const { d } = deps({ orderIdsInRegions: async () => [9n, 9n, 1n] });
+    const ids = await discoverRelevantOrders(d, { ...base, role: "driver", me: ME, myLoc: HERE, radiusKm: 5 });
+    expect([...ids].sort()).to.deep.equal(["1", "9"]);
   });
 });

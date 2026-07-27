@@ -271,3 +271,107 @@ export async function placeOrder(opts: PlaceOrderOpts) {
     return tx;
   });
 }
+
+// ── which orders each role fetches ──────────────────────────────────────────
+//
+// Extracted from App's refresh callback, where it sat inside a `useCallback`
+// closure and could not be reached. It decides what the whole app is even aware
+// of, and every branch of it fails by showing too little — an empty screen that
+// looks exactly like an empty market.
+//
+// Chain access is INJECTED rather than imported, so this can be driven without
+// a node. The lazy `discoverOrders` matters and is part of the contract: the
+// driver's region path must not pull the full `OrderCreated` stream, which is
+// the whole point of the phase-2 server-side region query.
+
+export type Role = "customer" | "driver" | "venue";
+
+export interface DiscoveredOrder { id: bigint; venueId: bigint; customer: string; block: number }
+export interface Assignment { id: bigint; driver: string }
+
+export interface DiscoveryDeps {
+  discoverOrders: (from: number, to: number) => Promise<DiscoveredOrder[]>;
+  discoverAssignments: (from: number, to: number) => Promise<Assignment[]>;
+  orderIdsInRegions: (regions: string[], from: number, to: number) => Promise<bigint[]>;
+  regionsCovering: (center: MicroDeg, radiusKm: number) => string[];
+  /// The local per-order wallet registry — a customer's orders span many
+  /// addresses, not one.
+  myOrderWallets: () => Set<string>;
+  /// Fallback for a node with no `eth_getLogs`.
+  nextOrderId: () => Promise<bigint>;
+}
+
+export interface DiscoveryOpts {
+  role: Role;
+  me: string | null;
+  myLoc: MicroDeg | null;
+  radiusKm: number;
+  venues: VenueRow[];
+  from: number;
+  to: number;
+}
+
+/// The order ids this role needs, as decimal strings.
+export async function discoverRelevantOrders(
+  deps: DiscoveryDeps,
+  opts: DiscoveryOpts
+): Promise<Set<string>> {
+  const { role, myLoc, radiusKm, venues, from, to } = opts;
+  const me = opts.me?.toLowerCase() ?? null;
+
+  const relevant = new Set<string>();
+  const add = (ids: bigint[]) => ids.forEach((id) => relevant.add(String(id)));
+
+  const myVenueIds = new Set(
+    venues
+      .filter((v) => me && (v.operator.toLowerCase() === me || v.signer.toLowerCase() === me))
+      .map((v) => String(v.id))
+  );
+  const venueById = new Map(venues.map((v) => [String(v.id), v]));
+  const inRegion = (venueId: bigint) => {
+    if (!myLoc || radiusKm === 0) return true;
+    const v = venueById.get(String(venueId));
+    return !!v && distanceMeters(myLoc, { lat: v.lat, lon: v.lon }) <= radiusKm * 1000;
+  };
+
+  // Fetched at most once, and only if a branch actually needs it.
+  let created: DiscoveredOrder[] | null = null;
+  const getCreated = async () => (created ??= await deps.discoverOrders(from, to));
+
+  try {
+    if (role === "customer") {
+      const mine = deps.myOrderWallets();
+      add((await getCreated()).filter((d) => mine.has(d.customer.toLowerCase())).map((d) => d.id));
+    } else if (role === "venue" && me) {
+      add((await getCreated()).filter((d) => myVenueIds.has(String(d.venueId))).map((d) => d.id));
+    } else if (role === "driver") {
+      if (myLoc && radiusKm > 0) {
+        // Phase 2: region is the LEADING indexed topic, so this filters
+        // server-side. A pre-OrderRegion node throws, and then the full stream
+        // plus a client-side filter is the only way to get the same answer.
+        try {
+          add(await deps.orderIdsInRegions(deps.regionsCovering(myLoc, radiusKm), from, to));
+        } catch {
+          add((await getCreated()).filter((d) => inRegion(d.venueId)).map((d) => d.id));
+        }
+      } else {
+        add((await getCreated()).map((d) => d.id)); // everywhere
+      }
+      if (me) {
+        // Own jobs, ALWAYS and regardless of radius — otherwise a driver's
+        // active delivery disappears from their screen the moment they walk
+        // out of the radius they set.
+        const assigns = await deps.discoverAssignments(from, to);
+        add(assigns.filter((a) => a.driver.toLowerCase() === me).map((a) => a.id));
+      }
+    }
+    // Account-scoped roles with no session have nothing to show.
+  } catch {
+    // A node without eth_getLogs: enumerate everything and let the views filter
+    // locally. Slow and correct beats fast and blank.
+    const next = await deps.nextOrderId();
+    for (let i = 1n; i < next; i++) relevant.add(String(i));
+  }
+
+  return relevant;
+}

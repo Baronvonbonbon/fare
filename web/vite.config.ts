@@ -55,20 +55,20 @@ export default defineConfig({
       ],
 
       // Floors are what the suite measures TODAY, rounded down — they exist to
-      // stop the number sliding, not to describe an ambition. The figures are
-      // low because they are honest: App.tsx (2,689 lines), the four console
-      // components and seven client-core modules are all counted at the zero
-      // they are (TEST-PLAN §6 D1/D2). Raise these when work lands; never lower
-      // one to make a build pass — a ratchet that turns both ways is a comment.
-      // Raised four times: 17.40 → 20.19 → 22.25 (D2) → 30.42 (D1) → 33.19
-      // (App.tsx's order-flow decisions, extracted to orderflow.ts). What is
-      // left below is `App.tsx`'s ~2,500 remaining lines, which are rendering
-      // rather than decisions, plus shieldnote.ts / shield.ts.
+      // stop the number sliding, not to describe an ambition. Raise them when
+      // work lands; never lower one to make a build pass, because a ratchet
+      // that turns both ways is a comment.
+      //
+      // Raised five times: 17.40 → 20.19 → 22.25 (D2) → 30.42 (D1) → 33.19 →
+      // 34.56 (App.tsx's order-flow decisions and its per-role discovery, both
+      // extracted to orderflow.ts). What is left below is App.tsx's remaining
+      // ~2,400 lines, which are rendering rather than decisions, plus
+      // shieldnote.ts / shield.ts.
       thresholds: {
-        statements: 33,
-        branches: 30,
-        functions: 30,
-        lines: 35,
+        statements: 34,
+        branches: 31,
+        functions: 32,
+        lines: 36,
       },
     },
   },

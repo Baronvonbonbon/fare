@@ -21,10 +21,10 @@ All three tiers pass today.
 | Tier | Runner | Tests | Covers |
 |---|---|---|---|
 | `test/*.ts` | `npx hardhat test` | 255 | contracts, ZK verifiers, invariant fuzz, upgradability, **chain-backed relay endpoints**, **per-payer cost ledger**, **relay key custody**, **full-lifecycle e2e**, **order state machine** |
-| `web/src/*.test.ts` | `cd web && npx vitest run` | 277 | 29 of 36 client modules, incl. **all four ops consoles (logic + rendered)**, **burner wallets**, **ZK commitments**, **relay client + router resolution**, **order flow** |
+| `web/src/*.test.ts` | `cd web && npx vitest run` | 290 | 29 of 36 client modules, incl. **all four ops consoles (logic + rendered)**, **burner wallets**, **ZK commitments**, **relay client + router resolution**, **order flow** |
 | `venue-node/*.test.mjs` | `cd venue-node && node --test` | 94 | economics + **break-even**, scorer, swap, treasury, agent, shieldkeeper + **decorrelation**, **relay HTTP surface + metadata** |
 
-**626 tests, all green**, and all of them now run in CI (§7 E1). The contract tier is the strong part and deserves
+**639 tests, all green**, and all of them now run in CI (§7 E1). The contract tier is the strong part and deserves
 saying so: a seeded-PRNG invariant campaign (`test/invariant.test.ts`) asserts
 escrow conservation and vault solvency after *every* operation and reproduces
 failures from a printed seed; the verifier tests pin fail-safe-before-VK and
@@ -38,7 +38,7 @@ Slither is in CI with zero high-severity findings ([SECURITY-REVIEW.md](SECURITY
 |---|---|---|
 | ~~`venue-node/relay.mjs`~~ — 16 HTTP endpoints, holds `RELAY_PRIVATE_KEY` | 953 lines | ✅ 58 across two tiers (§5 C1, C2) |
 | ~~`web/src/ops/`~~ — four consoles + shell | 1,385 lines | ✅ 82 (logic §5 C5 + rendering §6 D1) |
-| `web/src/App.tsx` — rendering only; its decisions now live in `orderflow.ts` | 2,511 lines | 🟡 29 (§6 D6) |
+| `web/src/App.tsx` — rendering only; its decisions now live in `orderflow.ts` | 2,471 lines | 🟡 42 (§6 D6) |
 | `shieldnote.ts`, `shield.ts` | ~520 lines | **0** |
 | ~~`wallets.ts`~~ · ~~`zk.ts`~~ · ~~`token.ts`~~ · ~~`chain.ts`~~ · ~~`relay.ts`~~ | ~1,180 lines | ✅ 71 (§6 D2) |
 
@@ -888,7 +888,7 @@ order is refused by a token check before the status is ever read, and `Cancelled
 reached via `cancelOpen` leaves no driver, so `abandonOrder` answers on identity
 instead. Which *path* reaches a status decides which guard replies.
 
-🟡 **D6 — `App.tsx`** (`web/src/orderflow.ts` + `orderflow.test.ts`, 29 tests).
+🟡 **D6 — `App.tsx`** (`web/src/orderflow.ts` + `orderflow.test.ts`, 42 tests).
 The largest file in the repo had no tests, and the reason is structural: every
 decision worth asserting was welded to a 2,689-line component.
 
@@ -924,12 +924,35 @@ that were buried, and covers **98.85%** of its own statements:
 Mutation-checked, one test each: reversing the sort, moving the secret write
 after the transaction, and shifting the stale boundary to `>=`.
 
-☐ **What remains of D6** is `App.tsx`'s ~2,500 remaining lines, which are
-genuinely rendering rather than decisions — plus one more extraction worth
-doing: the per-role **order discovery** in `App`'s refresh callback (a customer
-matches the local burner registry, a venue its own ids, a driver a region query
-with a full-stream fallback). It sits inside a `useCallback` closure, so it is a
-second refactor rather than a test.
+**Per-role order discovery** is extracted too — it decides what the app is even
+*aware* of, and every branch fails by showing too little, which looks exactly
+like an empty market. Chain access is injected, so each branch is driven without
+a node:
+
+- **A customer is scoped to their local burner registry**, not to one address:
+  their orders span many per-order wallets by design, and matching a session
+  address would show them nothing they had ever ordered. It works with no wallet
+  connected, because the registry is device-local.
+- **A venue matches venues it operates OR signs for.** Those are deliberately
+  different keys — a venue can delegate attestation signing — and matching only
+  one loses that venue's whole board.
+- **A located driver uses the server-side region query and does *not* pull the
+  full `OrderCreated` stream.** That is the entire point of phase 2 (region is
+  the leading indexed topic); fetching the stream anyway would work and would
+  silently undo it. A pre-phase-2 node throws, and the fallback to stream +
+  client-side filter is what keeps the board working on an older RPC.
+- **A driver's own jobs survive their radius.** Asserted with an assignment that
+  appears in *no* region result — otherwise an active delivery vanishes from the
+  screen the moment the driver walks out of the radius they set.
+- **A node with no `eth_getLogs` enumerates everything** and lets the views
+  filter locally: slow and correct beats fast and blank.
+
+Mutation-checked: dropping own-jobs-when-filtering fails three tests, replacing
+the region query with the full stream fails three, and matching only the venue
+operator fails one.
+
+☐ **What remains of D6** is `App.tsx`'s ~2,400 remaining lines, which are
+genuinely rendering rather than decisions.
 
 ---
 
@@ -1073,16 +1096,16 @@ coverage of product code rather than plumbing.
 12. ✅ **D1 — ops consoles, rendered.** All four plus the shell (53 tests); web
     coverage 22.25% → 30.42%, branches 14.35% → 28.39%.
 
-13. 🟡 **D6 — `App.tsx`.** Its four buried decisions extracted to
-    `orderflow.ts` and covered at 98.85% (29 tests); web coverage 30.42% →
-    33.19%. The remaining ~2,500 lines are rendering.
+13. 🟡 **D6 — `App.tsx`.** Its buried decisions — deadline hygiene, the driver
+    board, receipts, the money path, and per-role order discovery — extracted
+    to `orderflow.ts` and covered at 98.51% (42 tests); web coverage 30.42% →
+    34.56%. The remaining ~2,400 lines are rendering.
 
 **What is left is genuinely smaller than it looks.** `App.tsx`'s remainder is
-markup rather than decisions, with one more extraction worth doing — the
-per-role **order discovery** in its refresh callback. Then `shieldnote.ts` and
-`shield.ts` (~520 lines), **E4**'s circuit-constraint snapshot (small, worth
-doing alongside any circuit work), **C4** behind the MPC ceremony, and **B3** as
-a decision rather than a recommendation.
+markup rather than decisions. Then `shieldnote.ts` and `shield.ts` (~520 lines),
+**E4**'s circuit-constraint snapshot (small, worth doing alongside any circuit
+work), **C4** behind the MPC ceremony, and **B3** as a decision rather than a
+recommendation.
 
 B3 is deliberately left as a decision rather than a recommendation: it is worth
 adopting only if the privacy posture should be pinned by tests.
