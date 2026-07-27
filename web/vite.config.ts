@@ -60,14 +60,15 @@ export default defineConfig({
       // components and seven client-core modules are all counted at the zero
       // they are (TEST-PLAN §6 D1/D2). Raise these when work lands; never lower
       // one to make a build pass — a ratchet that turns both ways is a comment.
-      // Raised with D2 (wallets, zk, token, chain glue): 17.40 → 20.19
-      // statements. `App.tsx`, the console components and `relay.ts` are still
-      // in here at zero, which is what keeps the absolute number low.
+      // Raised twice with D2: 17.40 → 20.19 (wallets, zk, token, chain glue)
+      // → 22.25 (relay, router resolution). `App.tsx` and the four console
+      // components are still in here at zero, which is what keeps the absolute
+      // number low — see §6 D1.
       thresholds: {
-        statements: 20,
-        branches: 12,
-        functions: 17,
-        lines: 21,
+        statements: 22,
+        branches: 14,
+        functions: 19,
+        lines: 23,
       },
     },
   },

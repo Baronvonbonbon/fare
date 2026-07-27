@@ -21,10 +21,10 @@ All three tiers pass today.
 | Tier | Runner | Tests | Covers |
 |---|---|---|---|
 | `test/*.ts` | `npx hardhat test` | 255 | contracts, ZK verifiers, invariant fuzz, upgradability, **chain-backed relay endpoints**, **per-payer cost ledger**, **relay key custody**, **full-lifecycle e2e**, **order state machine** |
-| `web/src/*.test.ts` | `cd web && npx vitest run` | 170 | 21 of 36 client modules, incl. **all four ops consoles' logic**, **burner wallets**, **ZK commitments** |
+| `web/src/*.test.ts` | `cd web && npx vitest run` | 195 | 23 of 36 client modules, incl. **all four ops consoles' logic**, **burner wallets**, **ZK commitments**, **relay client + router resolution** |
 | `venue-node/*.test.mjs` | `cd venue-node && node --test` | 94 | economics + **break-even**, scorer, swap, treasury, agent, shieldkeeper + **decorrelation**, **relay HTTP surface + metadata** |
 
-**519 tests, all green**, and all of them now run in CI (§7 E1). The contract tier is the strong part and deserves
+**544 tests, all green**, and all of them now run in CI (§7 E1). The contract tier is the strong part and deserves
 saying so: a seeded-PRNG invariant campaign (`test/invariant.test.ts`) asserts
 escrow conservation and vault solvency after *every* operation and reproduces
 failures from a printed seed; the verifier tests pin fail-safe-before-VK and
@@ -39,8 +39,8 @@ Slither is in CI with zero high-severity findings ([SECURITY-REVIEW.md](SECURITY
 | ~~`venue-node/relay.mjs`~~ — 16 HTTP endpoints, holds `RELAY_PRIVATE_KEY` | 953 lines | ✅ 58 across two tiers (§5 C1, C2) |
 | ~~`web/src/ops/`~~ — four consoles + shell | 1,385 lines | ✅ 29 (all decision logic extracted — §5 C5) |
 | `web/src/App.tsx` | 2,689 lines | **0** |
-| `shieldnote.ts`, `relay.ts`, `shield.ts` | ~800 lines | **0** |
-| ~~`wallets.ts`~~ · ~~`zk.ts`~~ · ~~`token.ts`~~ · `chain.ts` (pure half) | ~900 lines | ✅ 46 (§6 D2) |
+| `shieldnote.ts`, `shield.ts` | ~520 lines | **0** |
+| ~~`wallets.ts`~~ · ~~`zk.ts`~~ · ~~`token.ts`~~ · ~~`chain.ts`~~ · ~~`relay.ts`~~ | ~1,180 lines | ✅ 71 (§6 D2) |
 
 Three structural facts behind that table:
 
@@ -667,10 +667,11 @@ broken install rather than a config problem:
 
 ☐ **D1 — Ops console component tests.** Four consoles, zero coverage.
 
-🟡 **D2 — Client core units.** Four modules covered (46 tests):
+✅ **D2 — Client core units.** Six modules covered (71 tests):
 `wallets.test.ts` (10), `zk.test.ts` (11), `token.test.ts` (10),
-`chainglue.test.ts` (15). Web coverage 17.40% → **20.19%** of statements, and
-the floors were raised to match.
+`chainglue.test.ts` (15), `relay.test.ts` (16), `router.test.ts` (9). Web
+coverage 17.40% → **22.25%** of statements, with the floors raised twice to
+match.
 
 ✅ **`wallets.ts` — 95%.** The burner registry is the customer's primary
 protection, and its failure is silent: if two orders ever came from one address
@@ -709,10 +710,34 @@ San Francisco gets 9 — the clamp that avoids a divide-by-zero produced an
 every one. The test announced it by hanging the suite. Capped at a half-turn of
 longitude, which is definitional rather than a tuning choice.
 
-☐ **What remains of D2:** `relay.ts` (284 lines, untouched), and `chain.ts`'s
-**runtime router resolution** — `syncAddressesFromRouter`, the provider
-fallback, `discoverOrders`/`discoverAssignments`. Those need a mocked provider
-rather than pure inputs, which is a different and larger job than this pass.
+✅ **`relay.ts` — the relay being *present*.** `degradation.test.ts` already
+covered its absence; what was untested was the decline protocol. Three things
+there are load-bearing and each fails quietly:
+
+- **A 402 is a decline, not an error.** The relay's profitability guard refuses
+  work it cannot afford; treating that as a failure strands the user instead of
+  offering the direct path. A genuine 500, by contrast, must *not* raise the
+  fallback prompt — training people to click through transport faults is how a
+  real error gets ignored.
+- **Refusing the prompt must submit nothing.** A fallback that fires anyway
+  spends gas the user just declined to spend.
+- **Bodies carry BigInts.** ZK public signals are bigints and `JSON.stringify`
+  throws on them, so the replacer is the only reason a dropoff proof can be
+  posted at all — pinned at 2²⁰⁰ so nothing is lost to scientific notation.
+
+✅ **`chain.ts`'s runtime router resolution.** The shipped address book is a
+*snapshot*; contracts move through the freeze-and-drain router, so a client
+trusting its build-time addresses talks to a frozen v1 — stale reads, reverting
+writes. Every failure mode of the sync is quiet, and all four are pinned: a
+zero answer must **not** blank a live address (the router returns `address(0)`
+for a name it does not know); an RPC failure at boot must fall back to the
+shipped book rather than take the app down; a *failed* sync must retry while a
+*successful* one must latch, or every render re-reads seven registry entries;
+and a pre-router deployment must touch nothing. Plus log decoding, including the
+block number the incremental scan resumes from.
+
+**D2 is complete.** Web coverage 17.40% → **22.25%** of statements across the
+two passes; `chain.ts` reached 53%, `relay.ts` 43%, `wallets.ts` 95%.
 
 ✅ **D3 — Degradation matrix** (`web/src/degradation.test.ts`, 12 tests). Each
 optional backend removed, asserting the *documented* behaviour rather than
@@ -958,17 +983,17 @@ coverage of product code rather than plumbing.
 10. ✅ **D5 — order state machine.** 104 cells, both directions, checked
     against the contract source so the table cannot fall behind it.
 
-11. 🟡 **D2 — client core.** Four modules done (46 tests), web coverage
-    17.40% → 20.19%; found and fixed a polar blow-up in the region cover.
+11. ✅ **D2 — client core.** Six modules (71 tests), web coverage 17.40% →
+    22.25%; found and fixed a polar blow-up in the region cover.
 
-**What is left is still the client.** The rest of **D2** — `relay.ts` and
-`chain.ts`'s runtime router resolution — needs a mocked provider rather than
-pure inputs, which is a larger job than this pass. Then **D1** (the four console
-components, which need a DOM testing dependency — a decision, not just a gap)
-and `App.tsx`, which at 2,689 lines is what keeps the web floor where it is.
-**E4**'s constraint snapshot is a small job worth doing alongside any circuit
-work. **C4** stays a mainnet gate behind the MPC ceremony, and **B3** stays a
-decision rather than a recommendation.
+**What is left is the UI.** **D1** — the four console components and `App.tsx` —
+needs a DOM testing dependency, which is a decision rather than just a gap: the
+logic that decides what a console *does* was already extracted and tested (C5),
+so what remains is rendering. `App.tsx` at 2,689 lines, plus those components,
+is what keeps the web floor at 22%. Also open: `shieldnote.ts` and `shield.ts`
+(~520 lines), **E4**'s circuit-constraint snapshot (small, worth doing alongside
+any circuit work), **C4** behind the MPC ceremony, and **B3** as a decision
+rather than a recommendation.
 
 B3 is deliberately left as a decision rather than a recommendation: it is worth
 adopting only if the privacy posture should be pinned by tests.
