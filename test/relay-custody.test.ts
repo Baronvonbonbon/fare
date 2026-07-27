@@ -3,7 +3,7 @@ import { ethers, network } from "hardhat";
 import { setBalance } from "@nomicfoundation/hardhat-toolbox/network-helpers";
 import type { HardhatEthersSigner } from "@nomicfoundation/hardhat-ethers/signers";
 import http from "node:http";
-import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -211,45 +211,73 @@ describe("relay key custody: what the subsidy budget actually bounds", function 
 
   // ── the budget as a defense: /fund, which does not count what it sends ────
 
-  it("does NOT bound what /fund pays out — only the gas to pay it", async () => {
-    // TEST-FINDINGS #19, and the reason C2 exists.
+  it("bounds what /fund pays out, not just the gas to pay it", async () => {
+    // TEST-FINDINGS #19, now fixed. /fund used to record only `cost` — the gas
+    // of a plain transfer — while sending FUND_AMOUNT and recording none of it,
+    // so the window bounded the postage rather than the parcel. Measured then:
+    // eight calls moved 40 PAS against a declared 1 PAS budget, which was still
+    // not exhausted.
     //
-    // /fund ends `recordBudget(cost)`, where `cost` is the gas of a plain
-    // transfer. /onboard, three handlers down, ends `recordBudget(cost +
-    // ONBOARD_SEED)` with the comment "the seed itself is the subsidy, not just
-    // gas". /fund sends FUND_AMOUNT and records none of it.
-    //
-    // So the rolling budget bounds /fund by a number ~5 orders of magnitude
-    // below what /fund actually costs the relay, and the real limit on the
-    // faucet is the relay's balance.
+    // The faucet is the endpoint that most needs a real bound: an attacker
+    // generates fresh addresses, so the per-address "already funded" check does
+    // nothing, and the relay's own balance is a floor rather than a budget.
     const FUND = 5;
-    const BUDGET = "1";
-    const { url, wallet } = await startRelay("fund-uncounted", {
-      FUND_AMOUNT_PAS: String(FUND), FUND_MIN_PAS: "2", RELAY_GAS_BUDGET_PAS: BUDGET,
+    const BUDGET = 22; // four burners' worth, plus room for their gas
+    const { url, wallet } = await startRelay("fund-bounded", {
+      FUND_AMOUNT_PAS: String(FUND), FUND_MIN_PAS: "2", RELAY_GAS_BUDGET_PAS: String(BUDGET),
     }, 1_000);
 
     const before = await ethers.provider.getBalance(wallet.address);
-    const N = 8;
-    for (let i = 0; i < N; i++) {
+    let funded = 0;
+    let declined: Response | null = null;
+    for (let i = 0; i < 8; i++) {
       const res = await post(url, "/fund", { address: freshAddr() });
-      expect(res.status, `/fund #${i + 1} was refused`).to.equal(200);
-      expect((await res.json()).funded).to.equal(true);
+      if (res.status === 200) { funded++; continue; }
+      declined = res;
+      break;
     }
     const spent = before - (await ethers.provider.getBalance(wallet.address));
 
-    // Every one of them went through, and the outflow is a large multiple of the
-    // budget that was supposed to bound the window.
-    expect(spent).to.be.greaterThan(PAS(FUND * N * 0.99));
-    expect(spent, "the budget bounded the payout — #19 is fixed, update this test")
-      .to.be.greaterThan(PAS(BUDGET) * 10n);
+    // The budget stops it, and stops it where it said it would.
+    expect(declined, "the budget never stopped /fund").to.not.equal(null);
+    expect(declined!.status).to.equal(402);
+    const body = await declined!.json();
+    expect(body.declined).to.equal(true);
+    expect(body.action).to.equal("fund");
+    expect(funded, "a 22 PAS window should buy four 5 PAS burners").to.equal(4);
 
-    // And it is still not exhausted, because only gas was ever counted.
-    const next = await post(url, "/fund", { address: freshAddr() });
-    expect(next.status, "the budget stopped /fund — #19 is fixed, update this test").to.equal(200);
+    // And the value that actually left never exceeds the window.
+    expect(spent).to.be.lessThanOrEqual(PAS(BUDGET));
+    expect(spent).to.be.greaterThan(PAS(FUND * funded * 0.99));
 
-    // What WOULD have stopped it: the balance floor. Nothing else did.
-    console.log(`\n      /fund: ${N} calls moved ${ethers.formatEther(spent)} PAS `
-      + `against a declared ${BUDGET} PAS/window subsidy budget`);
+    console.log(`\n      /fund: a ${BUDGET} PAS window bought ${funded} burners `
+      + `(${ethers.formatEther(spent)} PAS out), then declined`);
+  });
+
+  it("the default budget and the default sponsorship still agree", async () => {
+    // Now that the window counts the payout, `RELAY_GAS_BUDGET_PAS` and
+    // `FUND_AMOUNT_PAS` are two literals that have to be read together — the
+    // budget means "burners per window" only in terms of the other. Changing
+    // either alone silently rescales the relay's sponsorship capacity, which is
+    // the shape of drift A5 was written about.
+    const src = readFileSync(join(__dirname, "..", "venue-node", "relay.mjs"), "utf8");
+    const budget = src.match(/RELAY_GAS_BUDGET_PAS \|\| "(\d+)"/);
+    const fund = src.match(/FUND_AMOUNT_PAS \|\| "(\d+)"/);
+    expect(budget, "could not find the budget default — did the regex go stale?").to.not.equal(null);
+    expect(fund, "could not find the fund default — did the regex go stale?").to.not.equal(null);
+
+    const burners = Number(budget![1]) / Number(fund![1]);
+    expect(burners, "the budget is no longer a whole number of sponsorships").to.equal(Math.floor(burners));
+    expect(burners, "the default window sponsors an implausible number of burners").to.be.within(10, 500);
+
+    // The shipped .env.example is what an operator actually copies, so it must
+    // not disagree with the code's own default.
+    const env = readFileSync(join(__dirname, "..", "venue-node", ".env.example"), "utf8");
+    const envBudget = env.match(/^RELAY_GAS_BUDGET_PAS=(\d+)/m);
+    expect(envBudget, "the budget vanished from .env.example").to.not.equal(null);
+    expect(envBudget![1], ".env.example disagrees with relay.mjs").to.equal(budget![1]);
+
+    console.log(`      default subsidy window: ${budget![1]} PAS = ${burners} burners @ ${fund![1]} PAS`);
   });
 
   it("still refuses to sponsor below its own balance floor", async () => {

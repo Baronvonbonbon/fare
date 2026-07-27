@@ -210,13 +210,14 @@ The relay only sponsors what pays off (`economics.mjs`, unit-tested):
 - On a decline the relay returns **HTTP 402**; the PWA prompts the user to submit
   the tx **paying their own gas** instead (so nothing dead-ends).
 
-> **What the budget does and does not cover.** It counts *gas*, plus any value an
-> endpoint gives away that the handler explicitly adds — `/onboard` counts its
-> seed. **`/fund` does not count the `FUND_AMOUNT_PAS` it sends**, so the budget
-> bounds the gas of sponsoring burners and not the sponsorship itself; what
-> limits that today is the relay's balance and the rate limiter. See
-> [../docs/TEST-FINDINGS.md](../docs/TEST-FINDINGS.md) #19 before sizing this for
-> anything holding real value.
+> **Size the budget in sponsorships, not in gas.** The window counts **value
+> given away**, not just the gas to give it: `/fund` counts the
+> `FUND_AMOUNT_PAS` it sends and `/onboard` counts its seed. So the default
+> `250` reads as **50 burners a day** at a 5 PAS sponsorship, and changing
+> `FUND_AMOUNT_PAS` rescales that — the two are meant to be read together and a
+> test enforces it. Counting only gas, as this did before
+> [../docs/TEST-FINDINGS.md](../docs/TEST-FINDINGS.md) #19, made the number
+> meaningless: 50 PAS of gas is on the order of a million sponsorships.
 
 > **Testnet caveat:** demo fares are tiny (a 0.4 PAS fare rebates ~0.002 PAS),
 > which won't cover real gas — so the guard will usually **decline** settlements

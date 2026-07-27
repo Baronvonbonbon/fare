@@ -15,7 +15,7 @@ Ordered by what a reader should act on, not by discovery order.
 | 1 | Relay reused transaction nonces under concurrency | **High** | ✅ Fixed |
 | 13 | A cleared governance field silently wrote `0` on Save | **Medium** | ✅ Fixed |
 | 14 | Ops docs required a faucet secret for a code path that no longer ran | Medium (docs) | ✅ Fixed |
-| 19 | The subsidy budget does not count what `/fund` pays out | **Medium** | ☐ Open |
+| 19 | The subsidy budget did not count what `/fund` pays out | **Medium** | ✅ Fixed |
 | 20 | Concurrent requests all passed the same budget check | Low | ✅ Fixed |
 | 2 | `/fund` can double-fund inside a 250 ms window | Low | ☐ Open |
 | 3 | Oversized request body returns 500, not 413 | Cosmetic | ☐ Open |
@@ -353,7 +353,7 @@ Two smaller versions of the same shape sit next to it and are *not* changed:
 `GAS_FUND` (100 k, a plain transfer, valid on any EVM) and the `1000` gwei
 fallback price. Neither blocks a test today.
 
-## 19. The subsidy budget does not count what `/fund` pays out — **open**
+## 19. The subsidy budget did not count what `/fund` pays out — **fixed**
 
 The relay's defense against its own hot key being drained is a rolling window:
 `RELAY_GAS_BUDGET_PAS` of no-reward spend per `RELAY_BUDGET_WINDOW_MS`, checked
@@ -380,19 +380,35 @@ addresses. That leaves the rate limiter, which is keyed per caller
 address inside ethers' 250 ms read cache both observe a zero balance and both
 pay out.
 
-**The fix is one line** — `reserveBudget(cost + FUND_AMOUNT)` — and it is
-deliberately *not* applied, because it is an operator policy change rather than a
-correctness fix: counting the payout makes the deployed 50 PAS budget mean **10
-sponsored burners per window** instead of effectively unlimited, which would
-quietly throttle the running demo. Applying it should come with resizing
-`RELAY_GAS_BUDGET_PAS`, and the right size is a decision about how many burners a
-day the operator wants to fund. Note that resizing is the *point*: with the
-payout counted, the knob finally means "burners per window", which is the number
-an operator can actually reason about.
+**Fixed** in one line — `reserveBudget(cost + FUND_AMOUNT)` — plus the resizing
+that has to come with it. Counting the payout would have made the old 50 PAS
+budget mean **10 sponsored burners per window** instead of effectively unlimited,
+quietly throttling the running demo, so the default moved to **250 PAS = 50
+burners/day** at `FUND_AMOUNT_PAS=5`. `.env.example` moved with it.
 
-*Pinned by* `does NOT bound what /fund pays out — only the gas to pay it`
-(`test/relay-custody.test.ts`), written to the behaviour that exists and failing
-with "#19 is fixed, update this test" if it changes.
+The resizing is the point, not a workaround. A budget that counted only gas could
+not be reasoned about at all — 50 PAS of *gas* is on the order of a million
+sponsorships. Now the knob means "burners per window", which is a quantity an
+operator can actually choose, and the number in the file finally says what the
+relay will do.
+
+That makes the two defaults a pair, so they are pinned as one: the budget must be
+a whole multiple of `FUND_AMOUNT_PAS`, that multiple must be plausible, and
+`.env.example` must not disagree with the code. Changing either literal alone now
+fails rather than silently rescaling sponsorship capacity — the same drift A5 was
+written about.
+
+*Pinned by* `bounds what /fund pays out, not just the gas to pay it` and `the
+default budget and the default sponsorship still agree`
+(`test/relay-custody.test.ts`). The first spends a 22 PAS window on exactly four
+5 PAS burners and requires the fifth to be declined 402. Mutation-checked:
+restoring `reserveBudget(cost)` fails it and nothing else; a default that is not
+a whole number of sponsorships fails the second and nothing else.
+
+**What this does not fix** is #2 — two `/fund` calls for the same address inside
+ethers' 250 ms read cache still both observe a zero balance. Each now consumes
+its own reservation, so the window bounds the total damage, but the
+"already funded" check remains non-authoritative under bursts.
 
 ## 20. Concurrent requests all passed the same budget check — **fixed**
 

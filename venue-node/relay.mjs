@@ -103,7 +103,12 @@ function distMeters(latA, lonA, latB, lonB) {
 // gas budget. Set RELAY_PROFIT_GUARD=off to sponsor everything (old behavior).
 const PROFIT_GUARD = (process.env.RELAY_PROFIT_GUARD || "on").toLowerCase() !== "off";
 const MIN_MARGIN = Number(process.env.RELAY_MIN_MARGIN || 1.25); // reward ≥ cost × this
-const GAS_BUDGET = parseEther(process.env.RELAY_GAS_BUDGET_PAS || "50"); // no-reward spend / window
+// No-reward spend per window. This counts VALUE GIVEN AWAY, not just gas — a
+// sponsored burner is 5 PAS of it — so the useful way to read the number is
+// "how many burners a window", 50 at the defaults. It was 50 PAS when it
+// counted only gas, which bounded nothing (TEST-FINDINGS #19); raising it keeps
+// roughly the sponsorship capacity the demo had, now honestly accounted.
+const GAS_BUDGET = parseEther(process.env.RELAY_GAS_BUDGET_PAS || "250");
 const BUDGET_WINDOW_MS = Number(process.env.RELAY_BUDGET_WINDOW_MS || 86_400_000); // 1 day
 
 // ── Fee-recovery (F6-swap): the relay earns USDC but burns PAS, so when its gas
@@ -563,7 +568,10 @@ async function handler(req, res) {
       if (relayBal < FUND_AMOUNT) return send(res, 503, { error: "relay out of gas budget — operator refill" }, origin);
       // No-reward action → gate on the rolling subsidy budget.
       const cost = await estCostWei(() => provider.estimateGas({ from: relay.address, to: address, value: FUND_AMOUNT }), GAS_FUND);
-      const hold = reserveBudget(cost);
+      // The 5 PAS being sent is the subsidy; the gas to send it is rounding.
+      // Counting only the gas made the window bound the postage and not the
+      // parcel — see TEST-FINDINGS #19.
+      const hold = reserveBudget(cost + FUND_AMOUNT);
       if (PROFIT_GUARD && !hold.ok) { hold.release(); return decline(res, "subsidy budget exhausted", { action: "fund" }, origin); }
       let tx;
       try {
