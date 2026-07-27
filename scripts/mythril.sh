@@ -140,6 +140,14 @@ if [ "$high_total" -gt 0 ]; then
   echo "::error::mythril reported $high_total high-severity issue(s)"
   exit 1
 fi
+# A run that could not finish is normally infrastructure, not a finding, so it
+# warns. But if NOTHING completed, the job analysed nothing at all — and a green
+# check that analysed nothing is worse than a red one. The first nightly did
+# exactly that: solc was unreachable, all three died in seconds, and it passed.
+if [ ${#failed_runs[@]} -eq ${#TARGETS[@]} ]; then
+  echo "::error::mythril analysed NOTHING — every target failed to complete (${failed_runs[*]})"
+  exit 1
+fi
 if [ ${#failed_runs[@]} -ne 0 ]; then
   echo "::warning::mythril could not complete: ${failed_runs[*]}"
 fi

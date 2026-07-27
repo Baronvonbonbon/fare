@@ -121,6 +121,24 @@ jobs:
           pip install mythril==0.24.8
           myth version
 
+      # Mythril resolves solc by DOWNLOADING it from solc-bin.ethereum.org,
+      # which is not reachable from the runner — the first nightly failed all
+      # three analyses in five seconds each because of it, and reported a
+      # warning rather than an error.
+      #
+      # Hardhat already downloads the exact compiler the contracts are built
+      # with, so compile once and hand solcx that binary. No external host, and
+      # the version cannot drift from hardhat.config.ts.
+      - name: Provide solc from hardhat's cache
+        run: |
+          npx hardhat compile
+          mkdir -p ~/.solcx
+          SOLC=$(find ~/.cache/hardhat-nodejs -name 'solc-linux-amd64-v0.8.24*' -type f | head -1)
+          test -n "$SOLC" || { echo "::error::no cached solc 0.8.24 — did hardhat compile?"; exit 1; }
+          cp "$SOLC" ~/.solcx/solc-v0.8.24
+          chmod +x ~/.solcx/solc-v0.8.24
+          ~/.solcx/solc-v0.8.24 --version
+
       - name: Analyze
         run: ./scripts/mythril.sh
 
