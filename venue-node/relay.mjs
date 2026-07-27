@@ -317,8 +317,36 @@ const recordOrderGas = (orderId, wei) => {
   const k = String(orderId);
   gasSpent.set(k, (gasSpent.get(k) ?? 0n) + wei);
 };
-const recordBudget = (wei) => { windowSpent(budget, Date.now(), BUDGET_WINDOW_MS); budget.spent += wei; };
-const budgetRoom = (wei) => withinBudget(windowSpent(budget, Date.now(), BUDGET_WINDOW_MS), wei, GAS_BUDGET);
+/// Check the rolling window and take the reservation in ONE synchronous step.
+///
+/// The submission sits between the check and the accounting and is awaited, so
+/// checking first and recording afterwards lets every request already in flight
+/// pass the same test — the window then overshoots by however many arrived
+/// together (TEST-FINDINGS #20). Nothing here needs a lock: the check and the
+/// `+=` are adjacent with no await between them, which on one thread is atomic.
+///
+/// `ok` reports whether there was room; the reservation is taken either way, so
+/// the bookkeeping stays complete when the guard is off — PROFIT_GUARD has
+/// always gated the refusal, not the accounting.
+///
+/// `release()` gives the reservation back when the send never landed, so a
+/// failed submission cannot permanently consume a window. It is idempotent, and
+/// a no-op once the window has rolled (that spend was already reset to zero).
+function reserveBudget(wei) {
+  const ok = withinBudget(windowSpent(budget, Date.now(), BUDGET_WINDOW_MS), wei, GAS_BUDGET);
+  const takenIn = budget.start;
+  budget.spent += wei;
+  let settled = false;
+  return {
+    ok,
+    release() {
+      if (settled) return;
+      settled = true;
+      if (budget.start !== takenIn) return;
+      budget.spent -= budget.spent < wei ? budget.spent : wei;
+    },
+  };
+}
 
 async function feePerGasWei() {
   try { const fd = await provider.getFeeData(); return fd.maxFeePerGas ?? fd.gasPrice ?? 0n; }
@@ -535,12 +563,15 @@ async function handler(req, res) {
       if (relayBal < FUND_AMOUNT) return send(res, 503, { error: "relay out of gas budget — operator refill" }, origin);
       // No-reward action → gate on the rolling subsidy budget.
       const cost = await estCostWei(() => provider.estimateGas({ from: relay.address, to: address, value: FUND_AMOUNT }), GAS_FUND);
-      if (PROFIT_GUARD && !budgetRoom(cost)) return decline(res, "subsidy budget exhausted", { action: "fund" }, origin);
-      const tx = await serialize(async () => {
-        const nonce = await allocNonce();
-        return relay.sendTransaction({ to: address, value: FUND_AMOUNT, nonce, gasLimit: GAS_FUND });
-      });
-      recordBudget(cost);
+      const hold = reserveBudget(cost);
+      if (PROFIT_GUARD && !hold.ok) { hold.release(); return decline(res, "subsidy budget exhausted", { action: "fund" }, origin); }
+      let tx;
+      try {
+        tx = await serialize(async () => {
+          const nonce = await allocNonce();
+          return relay.sendTransaction({ to: address, value: FUND_AMOUNT, nonce, gasLimit: GAS_FUND });
+        });
+      } catch (e) { hold.release(); throw e; }
       return send(res, 200, { funded: true, txHash: tx.hash, amount: formatEther(FUND_AMOUNT) }, origin);
     }
 
@@ -569,13 +600,16 @@ async function handler(req, res) {
       const relayBal = await provider.getBalance(relay.address);
       if (relayBal < ONBOARD_SEED) return send(res, 503, { error: "relay out of onboarding budget — operator refill" }, origin);
       const cost = await estCostWei(() => provider.estimateGas({ from: relay.address, to: address, value: ONBOARD_SEED }), GAS_ONBOARD);
-      if (PROFIT_GUARD && !budgetRoom(cost + ONBOARD_SEED)) return decline(res, "onboarding budget exhausted", { action: "onboard" }, origin);
-      const tx = await serialize(async () => {
-        const nonce = await allocNonce();
-        return relay.sendTransaction({ to: address, value: ONBOARD_SEED, nonce, gasLimit: GAS_ONBOARD });
-      });
+      const hold = reserveBudget(cost + ONBOARD_SEED); // the seed itself is the subsidy, not just gas
+      if (PROFIT_GUARD && !hold.ok) { hold.release(); return decline(res, "onboarding budget exhausted", { action: "onboard" }, origin); }
+      let tx;
+      try {
+        tx = await serialize(async () => {
+          const nonce = await allocNonce();
+          return relay.sendTransaction({ to: address, value: ONBOARD_SEED, nonce, gasLimit: GAS_ONBOARD });
+        });
+      } catch (e) { hold.release(); throw e; }
       onboarded.add(address.toLowerCase());
-      recordBudget(cost + ONBOARD_SEED); // the seed itself is the subsidy, not just gas
       return send(res, 200, { seeded: true, txHash: tx.hash, amount: formatEther(ONBOARD_SEED), role }, origin);
     }
 
@@ -587,6 +621,7 @@ async function handler(req, res) {
       const orderId = (() => { try { return BigInt(args[0]?.orderId ?? args[0]?.[0]); } catch { return null; } })();
       const cost = await estCostWei(() => settlement[method].estimateGas(...args), GAS_SETTLE);
 
+      let hold = null; // only the unrewarded half (pickup) draws on the subsidy
       if (method === "confirmDropoffZK") {
         // Reward-bearing: the relay's comp (flat service fee + any rebate) must
         // cover the order's CUMULATIVE relayed gas (pickup + bids/forwards already
@@ -603,17 +638,21 @@ async function handler(req, res) {
             action: "settle", comp: formatEther(comp), cost: formatEther(cumulative), margin: MIN_MARGIN,
           }, origin);
         }
-      } else if (PROFIT_GUARD && !budgetRoom(cost)) {
+      } else {
         // confirmPickup: no reward yet → subsidy-budget gated.
-        return decline(res, "subsidy budget exhausted", { action: "pickup" }, origin);
+        hold = reserveBudget(cost);
+        if (PROFIT_GUARD && !hold.ok) { hold.release(); return decline(res, "subsidy budget exhausted", { action: "pickup" }, origin); }
       }
 
-      const tx = await serialize(async () => {
-        const nonce = await allocNonce();
-        return settlement[method](...args, { gasLimit: GAS_SETTLE, nonce });
-      });
+      let tx;
+      try {
+        tx = await serialize(async () => {
+          const nonce = await allocNonce();
+          return settlement[method](...args, { gasLimit: GAS_SETTLE, nonce });
+        });
+      } catch (e) { hold?.release(); throw e; }
       if (method === "confirmDropoffZK") gasSpent.delete(String(orderId)); // settled → clear ledger
-      else { recordBudget(cost); recordOrderGas(orderId, cost); } // pickup: subsidy + track for dropoff P&L
+      else recordOrderGas(orderId, cost); // pickup: track for the dropoff P&L (the subsidy is already held)
       return send(res, 200, { submitted: true, txHash: tx.hash, method }, origin);
     }
 
@@ -631,12 +670,15 @@ async function handler(req, res) {
       const fnName = forwardFnName(request);
       const orderId = forwardOrderId(request);
       const cost = await estCostWei(() => forwarder.execute.estimateGas(request), GAS_FORWARD);
-      if (PROFIT_GUARD && !budgetRoom(cost)) return decline(res, "subsidy budget exhausted", { action: "forward" }, origin);
-      const tx = await serialize(async () => {
-        const nonce = await allocNonce();
-        return forwarder.execute(request, { gasLimit: GAS_FORWARD, nonce });
-      });
-      recordBudget(cost);
+      const hold = reserveBudget(cost);
+      if (PROFIT_GUARD && !hold.ok) { hold.release(); return decline(res, "subsidy budget exhausted", { action: "forward" }, origin); }
+      let tx;
+      try {
+        tx = await serialize(async () => {
+          const nonce = await allocNonce();
+          return forwarder.execute(request, { gasLimit: GAS_FORWARD, nonce });
+        });
+      } catch (e) { hold.release(); throw e; }
       if (orderId != null) recordOrderGas(orderId, cost);
       else if (CREATE_ACTIONS.has(fnName)) {
         // attribute the creation gas once the order id is known (non-blocking)
@@ -693,7 +735,9 @@ async function handler(req, res) {
       const cost = await estCostWei(
         () => vault.queueShieldCreditFor.estimateGas(account, bucketWei, deadline, signature), GAS_WITHDRAW
       );
-      if (PROFIT_GUARD && !budgetRoom(cost)) {
+      const hold = reserveBudget(cost);
+      if (PROFIT_GUARD && !hold.ok) {
+        hold.release();
         keeperStore.dropPending(commitment);
         return decline(res, "subsidy budget exhausted", { action: "shield-queue" }, origin);
       }
@@ -705,11 +749,11 @@ async function handler(req, res) {
           return vault.queueShieldCreditFor(account, bucketWei, deadline, signature, { gasLimit: GAS_WITHDRAW, nonce });
         });
       } catch (e) {
+        hold.release();
         keeperStore.dropPending(commitment); // the ticket was never taken
         const msg = e?.shortMessage ?? e?.reason ?? e?.message ?? String(e);
         return send(res, 502, { error: msg }, origin);
       }
-      recordBudget(cost);
       return send(res, 200, { queued: true, txHash: tx.hash, bucket: String(bucketWei) }, origin);
     }
 
@@ -730,7 +774,9 @@ async function handler(req, res) {
       const cost = await estCostWei(
         () => ordersW.commitBid.estimateGas(id, bidHash, revokeHash), GAS_BID
       );
-      if (PROFIT_GUARD && !budgetRoom(cost)) {
+      const hold = reserveBudget(cost);
+      if (PROFIT_GUARD && !hold.ok) {
+        hold.release();
         return decline(res, "subsidy budget exhausted", { action: "commit-bid" }, origin);
       }
       let tx;
@@ -740,9 +786,9 @@ async function handler(req, res) {
           return ordersW.commitBid(id, bidHash, revokeHash, { gasLimit: GAS_BID, nonce });
         });
       } catch (e) {
+        hold.release();
         return send(res, 502, { error: e?.shortMessage ?? e?.reason ?? e?.message ?? String(e) }, origin);
       }
-      recordBudget(cost);
 
       const key = String(id);
       const box = bidBox.get(key) ?? { bids: [], exp: Date.now() + BID_TTL_MS };
@@ -794,7 +840,9 @@ async function handler(req, res) {
       const cost = await estCostWei(
         () => vault.insertShieldNoteFor.estimateGas(account, bucketWei, commit, deadline, signature), GAS_NOTE
       );
-      if (PROFIT_GUARD && !budgetRoom(cost)) {
+      const hold = reserveBudget(cost);
+      if (PROFIT_GUARD && !hold.ok) {
+        hold.release();
         return decline(res, "subsidy budget exhausted", { action: "shield-note" }, origin);
       }
       let tx;
@@ -804,9 +852,9 @@ async function handler(req, res) {
           return vault.insertShieldNoteFor(account, bucketWei, commit, deadline, signature, { gasLimit: GAS_NOTE, nonce });
         });
       } catch (e) {
+        hold.release();
         return send(res, 502, { error: e?.shortMessage ?? e?.reason ?? e?.message ?? String(e) }, origin);
       }
-      recordBudget(cost);
       return send(res, 200, { inserted: true, txHash: tx.hash }, origin);
     }
 
@@ -834,7 +882,9 @@ async function handler(req, res) {
       const cost = await estCostWei(
         () => vault.depositShieldNoteZK.estimateGas(proof, rootN, nh, bucketWei, ksCommitment), GAS_NOTE_SPEND
       );
-      if (PROFIT_GUARD && !budgetRoom(cost)) {
+      const hold = reserveBudget(cost);
+      if (PROFIT_GUARD && !hold.ok) {
+        hold.release();
         return decline(res, "subsidy budget exhausted", { action: "shield-note-spend" }, origin);
       }
       let tx;
@@ -844,9 +894,9 @@ async function handler(req, res) {
           return vault.depositShieldNoteZK(proof, rootN, nh, bucketWei, ksCommitment, { gasLimit: GAS_NOTE_SPEND, nonce });
         });
       } catch (e) {
+        hold.release();
         return send(res, 502, { error: e?.shortMessage ?? e?.reason ?? e?.message ?? String(e) }, origin);
       }
-      recordBudget(cost);
       return send(res, 200, { spent: true, txHash: tx.hash }, origin);
     }
 
@@ -892,12 +942,14 @@ async function handler(req, res) {
       // Economics: fee mode must clear (submit+forward gas) × margin from the fee;
       // sponsor mode is a loss-leader gated on the subsidy budget.
       const submitCost = await estCostWei(() => shieldPool.proxy_withdraw.estimateGas(pA, pB, pC, pubSignals, recipient), GAS_SHIELD);
+      let hold = null; // sponsor mode draws on the subsidy; fee mode pays its own way
       if (feeMode) {
         const forwardCost = await estCostWei(async () => GAS_FORWARD_PAS, GAS_FORWARD_PAS);
         if (PROFIT_GUARD && !coversCost(SHIELD_FEE, submitCost + forwardCost, MIN_MARGIN))
           return decline(res, "shield fee below relayed cost", { action: "shield-withdraw", fee: formatEther(SHIELD_FEE), cost: formatEther(submitCost + forwardCost), margin: MIN_MARGIN }, origin);
-      } else if (PROFIT_GUARD && !budgetRoom(submitCost)) {
-        return decline(res, "subsidy budget exhausted", { action: "shield-withdraw" }, origin);
+      } else {
+        hold = reserveBudget(submitCost);
+        if (PROFIT_GUARD && !hold.ok) { hold.release(); return decline(res, "subsidy budget exhausted", { action: "shield-withdraw" }, origin); }
       }
 
       // Submit. On "Unknown root" (KS Issue 4: the proof's root fell out of the
@@ -910,12 +962,13 @@ async function handler(req, res) {
           return shieldPool.proxy_withdraw(pA, pB, pC, pubSignals, recipient, { gasLimit: GAS_SHIELD, nonce });
         });
       } catch (e) {
+        hold?.release();
         const msg = e?.shortMessage ?? e?.reason ?? e?.message ?? String(e);
         if (/unknown root/i.test(msg)) return send(res, 409, { error: "unknown root", retry: true, detail: "root evicted (KS Issue 4) — rebuild proof against a fresh root" }, origin);
         return send(res, 502, { error: msg }, origin);
       }
       await tx.wait?.().catch(() => {});
-      if (!feeMode) { recordBudget(submitCost); return send(res, 200, { submitted: true, txHash: tx.hash, mode: "sponsor", recipient }, origin); }
+      if (!feeMode) return send(res, 200, { submitted: true, txHash: tx.hash, mode: "sponsor", recipient }, origin);
 
       // Fee mode: forward (withdrawnValue − fee) to the burner; keep the fee.
       const net = withdrawnValue - SHIELD_FEE;

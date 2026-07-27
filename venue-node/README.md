@@ -204,8 +204,19 @@ The relay only sponsors what pays off (`economics.mjs`, unit-tested):
   pickup, and requires the rebate to cover the whole fare before it settles.
 - **No-reward actions** — `/fund`, bids, pickup, cancels, rate — are sponsored as
   loss-leaders under a rolling **`RELAY_GAS_BUDGET_PAS`** per **`RELAY_BUDGET_WINDOW_MS`**.
+  The window is **reserved before the submission, not recorded after it**, so
+  requests arriving together cannot all pass the same check; a send that never
+  lands returns its reservation.
 - On a decline the relay returns **HTTP 402**; the PWA prompts the user to submit
   the tx **paying their own gas** instead (so nothing dead-ends).
+
+> **What the budget does and does not cover.** It counts *gas*, plus any value an
+> endpoint gives away that the handler explicitly adds — `/onboard` counts its
+> seed. **`/fund` does not count the `FUND_AMOUNT_PAS` it sends**, so the budget
+> bounds the gas of sponsoring burners and not the sponsorship itself; what
+> limits that today is the relay's balance and the rate limiter. See
+> [../docs/TEST-FINDINGS.md](../docs/TEST-FINDINGS.md) #19 before sizing this for
+> anything holding real value.
 
 > **Testnet caveat:** demo fares are tiny (a 0.4 PAS fare rebates ~0.002 PAS),
 > which won't cover real gas — so the guard will usually **decline** settlements

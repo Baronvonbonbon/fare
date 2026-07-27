@@ -20,11 +20,11 @@ All three tiers pass today.
 
 | Tier | Runner | Tests | Covers |
 |---|---|---|---|
-| `test/*.ts` | `npx hardhat test` | 229 | contracts, ZK verifiers, invariant fuzz, upgradability, **chain-backed relay endpoints**, **per-payer cost ledger** |
+| `test/*.ts` | `npx hardhat test` | 237 | contracts, ZK verifiers, invariant fuzz, upgradability, **chain-backed relay endpoints**, **per-payer cost ledger**, **relay key custody** |
 | `web/src/*.test.ts` | `cd web && npx vitest run` | 124 | 17 of 36 client modules, incl. **all four ops consoles' logic** |
 | `venue-node/*.test.mjs` | `cd venue-node && node --test` | 94 | economics + **break-even**, scorer, swap, treasury, agent, shieldkeeper + **decorrelation**, **relay HTTP surface + metadata** |
 
-**447 tests, all green**, and all of them now run in CI (§7 E1). The contract tier is the strong part and deserves
+**455 tests, all green**, and all of them now run in CI (§7 E1). The contract tier is the strong part and deserves
 saying so: a seeded-PRNG invariant campaign (`test/invariant.test.ts`) asserts
 escrow conservation and vault solvency after *every* operation and reproduces
 failures from a printed seed; the verifier tests pin fail-safe-before-VK and
@@ -36,7 +36,7 @@ Slither is in CI with zero high-severity findings ([SECURITY-REVIEW.md](SECURITY
 
 | Surface | Size | Tests |
 |---|---|---|
-| ~~`venue-node/relay.mjs`~~ — 16 HTTP endpoints, holds `RELAY_PRIVATE_KEY` | 953 lines | ✅ 49 across two tiers (§5 C1) |
+| ~~`venue-node/relay.mjs`~~ — 16 HTTP endpoints, holds `RELAY_PRIVATE_KEY` | 953 lines | ✅ 57 across two tiers (§5 C1, C2) |
 | ~~`web/src/ops/`~~ — four consoles + shell | 1,385 lines | ✅ 29 (all decision logic extracted — §5 C5) |
 | `web/src/App.tsx` | 2,689 lines | **0** |
 | `chain.ts`, `shieldnote.ts`, `relay.ts`, `shield.ts`, `token.ts`, `wallets.ts`, `zk.ts` | ~1,700 lines | **0** |
@@ -507,9 +507,46 @@ them.
 `/submit` is left at the method-allowlist level: the attestation signatures it
 forwards are already covered by `fare.test.ts`.
 
-☐ **C2 — Relay key custody.** `/fund` cannot be drained as an unbounded faucet
-(the budget window holds under concurrency), and the profitability guard
-declines with 402 rather than burning the key.
+🟡 **C2 — Relay key custody** (`test/relay-custody.test.ts`, 8 tests). C1 asked
+whether the relay can move value nobody authorized — the contracts answer that.
+C2 asks the question no contract can: **can the hot key be drained through
+endpoints working exactly as designed?**
+
+Everything here runs with `RELAY_PROFIT_GUARD=on`, the deployed default and the
+opposite of the C1 files, because the guard is the subject and cannot be the
+thing that is switched off.
+
+What holds: the rolling window stops sponsoring once spent; a 402 decline spends
+**nothing** (no transaction, not a failed one — otherwise the budget would
+throttle a leak rather than stop it); the window rolls forward and not early; the
+balance floor still reports 503 for an operator refill rather than submitting a
+transaction it cannot pay for; and the profitability guard declines an
+unprofitable withdrawal with the balance left where it was.
+
+**Two defects, both measured rather than argued.**
+
+☐ **The budget does not bound `/fund`** ([TEST-FINDINGS.md](TEST-FINDINGS.md)
+#19). `/fund` records the *gas of a transfer* and never the `FUND_AMOUNT` it
+sends, while `/onboard` records `cost + ONBOARD_SEED` and comments that the seed
+*is* the subsidy. Eight `/fund` calls moved **40 PAS against a declared 1 PAS
+window**, which was still not exhausted. The one-line fix is deliberately not
+applied: counting the payout turns the deployed 50 PAS budget into 10 sponsored
+burners per window, which is an operator policy change and wants
+`RELAY_GAS_BUDGET_PAS` resized alongside it. **This is the open half of C2** —
+until it is decided, the faucet is bounded by the relay's balance and the rate
+limiter, not by the budget.
+
+✅ **The budget overshot under concurrency** ([TEST-FINDINGS.md](TEST-FINDINGS.md)
+#20) — *fixed*. Check, `await` the send, record afterwards: every request in
+flight tested the same pre-spend total and all passed. Three concurrent
+`/onboard` calls seeded against a budget that fits one, spending 6 PAS of a 3 PAS
+window. Now `reserveBudget()` checks and takes in one synchronous step across all
+nine guarded handlers, with a `release()` for sends that never land — tested by
+forcing a rejected submission, since a reservation that is never returned would
+deny service without spending anything.
+
+Mutation-checked: deferring the reservation past the send fails the concurrency
+test alone; dropping the refund fails the release test alone.
 
 ✅ **C3 — Access-control matrix** (`test/access-control.test.ts`). All 60 gated
 state-changing functions × 10 roles — **530 denial checks** plus 60 permission
@@ -661,8 +698,11 @@ gitignored; the job restores them from the byte-identical tracked copies under
    extraction, the no-chain surface, the authorization/replay matrix, and the
    shielded endpoints. Turned up a nonce-collision defect in the live relay,
    now fixed and regression-tested.
-   🟡 **C2** has its first case (the withdraw decline); the remaining budget and
-   fee-recovery guards are not covered.
+   🟡 **C2 — key custody** now has the budget covered too (8 tests), which
+   turned up two defects: the concurrency overshoot (fixed) and `/fund` not
+   counting what it pays out (open, and an operator policy call —
+   [TEST-FINDINGS.md](TEST-FINDINGS.md) #19). That decision is what C2 is
+   waiting on.
 3. ✅ **B1 / B2 — leak sweep + positive controls.** Done (8 tests). The privacy claims are the
    product; today they are asserted per-test and never negatively controlled.
 4. ✅ **A1 / A3 — gas snapshot + committed cost ledger.** Both done: 18 paths

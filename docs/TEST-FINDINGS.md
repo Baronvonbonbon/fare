@@ -15,6 +15,8 @@ Ordered by what a reader should act on, not by discovery order.
 | 1 | Relay reused transaction nonces under concurrency | **High** | ✅ Fixed |
 | 13 | A cleared governance field silently wrote `0` on Save | **Medium** | ✅ Fixed |
 | 14 | Ops docs required a faucet secret for a code path that no longer ran | Medium (docs) | ✅ Fixed |
+| 19 | The subsidy budget does not count what `/fund` pays out | **Medium** | ☐ Open |
+| 20 | Concurrent requests all passed the same budget check | Low | ✅ Fixed |
 | 2 | `/fund` can double-fund inside a 250 ms window | Low | ☐ Open |
 | 3 | Oversized request body returns 500, not 413 | Cosmetic | ☐ Open |
 | 4 | CI ran nothing but Slither, path-filtered to `contracts/**` | **High** (process) | ✅ Fixed |
@@ -350,6 +352,83 @@ overridable. `test/cost-ledger.test.ts` sets it to 15 M.
 Two smaller versions of the same shape sit next to it and are *not* changed:
 `GAS_FUND` (100 k, a plain transfer, valid on any EVM) and the `1000` gwei
 fallback price. Neither blocks a test today.
+
+## 19. The subsidy budget does not count what `/fund` pays out — **open**
+
+The relay's defense against its own hot key being drained is a rolling window:
+`RELAY_GAS_BUDGET_PAS` of no-reward spend per `RELAY_BUDGET_WINDOW_MS`, checked
+before every unpaid action. `/fund` ends by recording `cost` — the *gas of a
+plain transfer*. It never records `FUND_AMOUNT`, the 5 PAS it just sent.
+
+`/onboard`, three handlers below it, gets this right, and says so in a comment:
+`reserveBudget(cost + ONBOARD_SEED)` — "the seed itself is the subsidy, not just
+gas". `/fund` is the same shape of action and counts only the postage.
+
+Measured, at a deliberately tiny budget: **eight `/fund` calls moved 40.00018 PAS
+against a declared 1 PAS/window budget**, and the window was still not
+exhausted — because what it had counted was the 0.00018 PAS of gas. At the
+deployed defaults (50 PAS budget, 5 PAS per burner) the budget permits on the
+order of a *million* sponsorships per day, so it does not bound the faucet in any
+practical sense.
+
+What actually limits `/fund` today is the relay's own balance (503 → "operator
+refill"), the per-address check that an address already holding gas is not
+topped up, and the rate limiter. The first is a floor, not a budget: it stops
+when the key is empty. The second is per-address and an attacker generates fresh
+addresses. That leaves the rate limiter, which is keyed per caller
+(20/window by default) and compounds with #2 — two `/fund` calls for the same
+address inside ethers' 250 ms read cache both observe a zero balance and both
+pay out.
+
+**The fix is one line** — `reserveBudget(cost + FUND_AMOUNT)` — and it is
+deliberately *not* applied, because it is an operator policy change rather than a
+correctness fix: counting the payout makes the deployed 50 PAS budget mean **10
+sponsored burners per window** instead of effectively unlimited, which would
+quietly throttle the running demo. Applying it should come with resizing
+`RELAY_GAS_BUDGET_PAS`, and the right size is a decision about how many burners a
+day the operator wants to fund. Note that resizing is the *point*: with the
+payout counted, the knob finally means "burners per window", which is the number
+an operator can actually reason about.
+
+*Pinned by* `does NOT bound what /fund pays out — only the gas to pay it`
+(`test/relay-custody.test.ts`), written to the behaviour that exists and failing
+with "#19 is fixed, update this test" if it changes.
+
+## 20. Concurrent requests all passed the same budget check — **fixed**
+
+Every guarded handler checked the window, awaited its submission, and recorded
+the spend afterwards. Between the check and the record sits an `await`, so every
+request already in flight tested against the same pre-spend total and every one
+of them passed.
+
+Measured: **three concurrent `/onboard` calls all seeded against a 3 PAS budget
+that fits one**, spending 6 PAS — a 2× overshoot of a window that had been
+verified to hold perfectly when the same three requests arrived one at a time.
+
+Not a drain: the overshoot is bounded by how many requests are in flight
+together, and everything arriving after the first record sees the real total. A
+leak rather than a hole. But it is the kind that widens exactly when the relay is
+busiest, and the budget is the only thing standing between a hot key and an
+unrewarded endpoint.
+
+**Fixed** by reserving instead of recording. `reserveBudget(wei)` checks the
+window and takes the reservation in one synchronous step — no lock needed, since
+the check and the `+=` are adjacent with no await between them — and returns a
+`release()` for the caller to invoke if the send never lands, so a failed
+submission cannot permanently consume a window. All nine guarded handlers
+(`/fund`, `/onboard`, `/submit`, `/forward`, `/shield-queue`, `/commit-bid`,
+`/shield-note`, `/shield-note-spend`, `/shield-withdraw`) now hold rather than
+record; `budgetRoom`/`recordBudget` are gone.
+
+The release path is the risk the fix introduces — a reservation that is never
+returned would deny service without spending anything — so it is tested
+directly, by leaving the relay exactly `ONBOARD_SEED` (past the balance floor,
+short of seed + gas) to force a rejected submission.
+
+*Pinned by* `holds the budget when requests arrive together` and `gives the
+reservation back when the submission never lands`. Mutation-checked: deferring
+the reservation past the send fails the first and nothing else; dropping the
+refund in `release()` fails the second and nothing else.
 
 ---
 
