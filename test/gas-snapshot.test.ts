@@ -1,5 +1,5 @@
 import { expect } from "chai";
-import { ethers } from "hardhat";
+import hre, { ethers } from "hardhat";
 import { loadFixture, time } from "@nomicfoundation/hardhat-toolbox/network-helpers";
 import type { HardhatEthersSigner } from "@nomicfoundation/hardhat-ethers/signers";
 // @ts-ignore — circomlib's generated Poseidon has no types
@@ -27,6 +27,18 @@ import { join } from "node:path";
 const SNAPSHOT = join(__dirname, "..", "gas-snapshot.json");
 const UPDATE = process.env.UPDATE_GAS_SNAPSHOT === "1";
 const TOLERANCE = 0.05;
+
+// Under `hardhat coverage` these measurements are meaningless: solidity-coverage
+// rewrites every contract to emit a marker per branch, so gas is inflated by
+// far more than the ±5% gate allows and every measured path fails at once (E2).
+// Nothing would be learned by running them instrumented — coverage measures
+// which lines ran, and this file measures what they cost.
+//
+// The signal is a flag the plugin sets on the hardhat runtime environment.
+// There is no `SOLIDITY_COVERAGE` env var to read: the plugin *reads* one of
+// that name, it does not set it, so guarding on it silently does nothing —
+// which is how this was first written, and the 11 failures said so.
+const UNDER_COVERAGE = Boolean((hre as any).__SOLIDITY_COVERAGE_RUNNING);
 
 const baseline: Record<string, number> =
   existsSync(SNAPSHOT) ? JSON.parse(readFileSync(SNAPSHOT, "utf8")) : {};
@@ -101,7 +113,11 @@ async function measureCall(name: string, estimate: Promise<bigint>) {
   ).to.be.at.most(TOLERANCE);
 }
 
-describe("gas snapshot", () => {
+describe("gas snapshot", function () {
+  // Skipped, not deleted: the coverage run still compiles and deploys every
+  // contract here, and a silent pass would be worse than a visible skip.
+  if (UNDER_COVERAGE) this.pending = true;
+
   async function deployAll() {
     const [deployer, treasury, customer, driver, driver2, venueOp, venueSigner, relay] =
       await ethers.getSigners();

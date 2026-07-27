@@ -66,7 +66,7 @@ The accounting `scripts/privacy/measure-costs.mjs` did — per-payer attribution
 particular — is now a shared module, so the half that needs three live relay
 processes and a funded Paseo deployer stays nightly while the same lifecycle,
 the same ledger and the same report shape gate every pull request against
-hardhat. There is still no `solidity-coverage` (E2).
+hardhat. Coverage now has committed floors on both tiers (E2).
 
 ---
 
@@ -718,7 +718,47 @@ load-bearing.
 caught that `test/shieldnote-vault.test.ts` needs proving artifacts that are
 gitignored; the job restores them from the byte-identical tracked copies under
 `web/public/shield/`.
-☐ **E2** — `solidity-coverage` + `vitest --coverage`, with a floor.
+✅ **E2 — Coverage, with committed floors on both tiers.** `npm run coverage`
+(contracts) and `cd web && npm run coverage`. Both run per-PR.
+
+| Tier | Statements | Branches | Functions | Lines |
+|---|---|---|---|---|
+| contracts | **95.26%** | 75.19% | 92.63% | **97.39%** |
+| web (`src/**`) | **17.40%** | 10.69% | 13.84% | 18.72% |
+
+Those two numbers describe the same repo, and the gap is the honest version of
+§2's table: the contracts are thoroughly tested and the client is not.
+
+**The web figure is the one that took work to make true.** v8 reports only the
+files a test imported, which gave a comfortable-looking **47%** — with `App.tsx`,
+the four console components and seven client-core modules simply absent from the
+denominator. A floor on that number would have *risen* when someone added
+untested code ([TEST-FINDINGS.md](TEST-FINDINGS.md) #22). Naming the sources
+instead (`include: ["src/**/*.{ts,tsx}"]`) counts an untested file as the zero it
+is, and 47% became 17%.
+
+Floors are set one point under what was measured, to absorb run-to-run drift
+without leaving slack — they exist to stop the number sliding, not to describe an
+ambition. Vitest enforces its own (`web/vite.config.ts`); solidity-coverage has
+no threshold option at all, so `scripts/ci/coverage-floor.mjs` reads the Istanbul
+summary against the committed `coverage-floor.json`. Both were controlled: an
+unreachable floor fails, and a missing summary reports why rather than passing
+vacuously.
+
+Two things the contract run needed:
+
+- **`--max-old-space-size=6144`.** Instrumentation emits a marker per branch and
+  the suite then exceeds node's 2 GB default, dying with "Reached heap limit"
+  *partway through the report* — which looks like a hung run rather than an OOM.
+- **The gas snapshot skips under coverage.** Instrumentation inflates gas far
+  past A1's ±5% gate, so all 18 paths failed at once. The guard has to read
+  `hre.__SOLIDITY_COVERAGE_RUNNING`: there is no `SOLIDITY_COVERAGE` env var to
+  test, because the plugin *reads* one of that name rather than setting it, so
+  the obvious guard is silently inert.
+
+Mocks are excluded from the contract denominator — they exist to make the real
+contracts testable, so counting them measures the scaffolding, and an unused mock
+branch would read as a regression.
 
 ✅ **E3 — Nightly** (`.github/workflows/nightly.yml`, four jobs). The things too
 slow, too expensive or too secret-dependent to run per-PR — and which stop being
@@ -753,7 +793,13 @@ Four things this needed that were not obvious:
 - **The obvious artifact upload would have published private keys** —
   [TEST-FINDINGS.md](TEST-FINDINGS.md) #21.
 
-☐ **E4** — Gas and constraint snapshots committed and diffed.
+🟡 **E4** — Gas and constraint snapshots committed and diffed. **The gas half is
+done** (§3 A1: 18 paths in `gas-snapshot.json` behind a ±5% gate). The
+**constraint** half is not: `proof-cost.json` (§3 A4) pins each circuit's served
+artifact sizes and its `nPublic`, which is its ABI — but not its R1CS constraint
+count, so a circuit change that leaves the interface alone and doubles the
+proving work would pass. Cheap to add next to A4 (`snarkjs r1cs info`), and it is
+what actually predicts proving time on a user's phone.
 
 ---
 
@@ -782,11 +828,23 @@ Four things this needed that were not obvious:
    money-handling contracts, and the two Paseo runs (live e2e + the cost
    ledger) that skip cleanly without a deployer secret.
 
-**What is left**, in the order worth doing it: **E2** (coverage floors — the
-last harness item), **D4** (a local-chain lifecycle e2e, so the per-PR tier
-covers what the nightly covers live), **D5** (order state machine), then the
-client-core units **D2** and the console component tests **D1**. **C4** stays a
-mainnet gate behind the MPC ceremony.
+8. ✅ **E2 — coverage floors.** Both tiers, committed and enforced per-PR.
+   The web number had to be corrected from 47% to 17% first
+   ([TEST-FINDINGS.md](TEST-FINDINGS.md) #22).
+
+**The harness is effectively done** — E1, E2 and E3 complete, E4 half complete
+(gas pinned, circuit constraints not). From here every remaining item is
+coverage of product code rather than plumbing.
+
+**What is left**, in the order worth doing it: **D4** (a local-chain lifecycle
+e2e, so the per-PR tier covers what the nightly covers live), **D5** (order state
+machine), then **D2** (client-core units — `wallets.ts` first: a burner
+derivation bug silently re-links orders, defeating the customer's primary
+protection) and **D1** (console components). Those last two are where the 17%
+web floor has by far the most room to move. **E4**'s constraint snapshot is a
+small job worth doing alongside any circuit work. **C4** stays a mainnet gate
+behind the MPC ceremony, and **B3** stays a decision rather than a
+recommendation.
 
 B3 is deliberately left as a decision rather than a recommendation: it is worth
 adopting only if the privacy posture should be pinned by tests.

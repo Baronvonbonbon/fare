@@ -1,0 +1,8 @@
+{
+  "_comment": "Contract-tier coverage floors (TEST-PLAN E2). Checked by scripts/ci/coverage-floor.mjs against coverage/coverage-summary.json, which `npx hardhat coverage` writes. Set one point under what the suite measured when they were introduced, to absorb run-to-run drift without leaving slack. Raise these when work lands; lowering one is a diff that needs a reason in review.",
+  "_measured_2026_07_27": { "statements": 95.26, "branches": 75.19, "functions": 92.63, "lines": 97.39 },
+  "statements": 94,
+  "branches": 74,
+  "functions": 91,
+  "lines": 96
+}

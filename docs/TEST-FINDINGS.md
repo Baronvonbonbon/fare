@@ -18,6 +18,7 @@ Ordered by what a reader should act on, not by discovery order.
 | 19 | The subsidy budget did not count what `/fund` pays out | **Medium** | ✅ Fixed |
 | 20 | Concurrent requests all passed the same budget check | Low | ✅ Fixed |
 | 21 | The live runs write private keys where CI would have published them | **Medium** | ✅ Guarded |
+| 22 | Web coverage read 47% because untested files were not counted | Medium (metric) | ✅ Fixed |
 | 2 | `/fund` can double-fund inside a 250 ms window | Low | ☐ Open |
 | 3 | Oversized request body returns 500, not 413 | Cosmetic | ☐ Open |
 | 4 | CI ran nothing but Slither, path-filtered to `contracts/**` | **High** (process) | ✅ Fixed |
@@ -488,6 +489,38 @@ is a public signal — the vault publishes it to prevent a double-spend — whil
 the bare `nullifier` is its secret preimage. Flagging the published one would
 block every legitimate ZK report, which is how a guard gets switched off. Both
 cases are in the control.
+
+## 22. Web coverage read 47% because untested files were not counted — **fixed**
+
+The first `vitest run --coverage` reported **47.45% of statements** for
+`web/src`, which would have been a reasonable-sounding floor to commit.
+
+It was measuring the wrong set. v8 instruments what the test run *loads*, so the
+denominator held only files some test had imported. `App.tsx` — 2,689 lines, no
+tests, the largest file in the repo — was not in it. Neither were the four
+console components, nor `wallets.ts`, `token.ts`, `shieldnote.ts`, `pricing.ts`,
+`qr.tsx`, `map.tsx`, `tilemap.tsx`, `notify.ts` or `photoflow.ts`.
+
+**The failure mode is the interesting part: the metric moves the wrong way.**
+Adding a new module with no tests does not lower that percentage — it leaves it
+untouched, because an unimported file is not counted at all. Deleting a
+well-tested module *lowers* it. A floor set on that number would have ratcheted
+in a direction unrelated to whether the code was tested, and it would have
+looked healthy the whole time.
+
+**Fixed** by naming the sources instead of letting the run discover them —
+`include: ["src/**/*.{ts,tsx}"]` in `web/vite.config.ts` — so a file with no
+tests counts as the zero it is. The honest figure is **17.40%**, and that is what
+the floor is set against.
+
+The contract tier never had this problem: solidity-coverage instruments every
+contract it compiles, whether or not a test touches it.
+
+No equivalent bug, but worth recording next to it: `hardhat coverage` needs
+`--max-old-space-size=6144`, because instrumentation emits a marker per branch
+and the suite then exceeds node's 2 GB default and dies with "Reached heap
+limit" *partway through printing the report* — which reads as a hang rather
+than an OOM.
 
 ---
 
