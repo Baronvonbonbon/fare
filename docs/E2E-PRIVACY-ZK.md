@@ -34,7 +34,7 @@ Tree agreement was checked after *every* insert, not just at the end: on-chain
 
 | | |
 |---|---|
-| Notes inserted | 4 (anonymity set = 4 here; in production it is every unspent note) |
+| Notes inserted | 4 (anonymity set = 4 here; in production, every unspent note **of the same bucket** — the spend reveals the denomination) |
 | Spent | leaf **1** — deliberately not the first, to exercise a real path |
 | Spend | `0xe1a721b7…` — proof + pool deposit, one transaction |
 | Pool tree | 271 → **272** |
@@ -73,7 +73,7 @@ by a batch.
   `bad-proof`.
 - **The seal-size anonymity bound.** A seal named its accounts. A spend names
   only a nullifier — not the leaf, not the index, not the account — so the set is
-  every unspent note.
+  every unspent note of the same bucket (the denomination is public in a spend).
 
 ## 5. Not covered
 

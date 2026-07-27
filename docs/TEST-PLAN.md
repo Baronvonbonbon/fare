@@ -20,11 +20,11 @@ All three tiers pass today.
 
 | Tier | Runner | Tests | Covers |
 |---|---|---|---|
-| `test/*.ts` | `npx hardhat test` | 211 | contracts, ZK verifiers, invariant fuzz, upgradability, **chain-backed relay endpoints** |
+| `test/*.ts` | `npx hardhat test` | 218 | contracts, ZK verifiers, invariant fuzz, upgradability, **chain-backed relay endpoints** |
 | `web/src/*.test.ts` | `cd web && npx vitest run` | 117 | 15 of 34 client modules, incl. **all four ops consoles' logic** |
 | `venue-node/*.test.mjs` | `cd venue-node && node --test` | 94 | economics + **break-even**, scorer, swap, treasury, agent, shieldkeeper + **decorrelation**, **relay HTTP surface + metadata** |
 
-**422 tests, all green**, and all of them now run in CI (§7 E1). The contract tier is the strong part and deserves
+**429 tests, all green**, and all of them now run in CI (§7 E1). The contract tier is the strong part and deserves
 saying so: a seeded-PRNG invariant campaign (`test/invariant.test.ts`) asserts
 escrow conservation and vault solvency after *every* operation and reproduces
 failures from a printed seed; the verifier tests pin fail-safe-before-VK and
@@ -208,10 +208,27 @@ breaks a test and forces the doc to be updated in the same commit. Adopt only if
 you want the privacy posture pinned by tests — it is a real maintenance
 commitment, not a free win.
 
-☐ **B4 — Anonymity-set assertions.** The ZK path's set is every unspent note in
-the tree; the batch path refuses to seal below `minBatch` (partly covered
-today). Assert the *measured* set size, not merely that the mechanism is
-present — "anonymity is only as large as usage" is currently a prose claim.
+✅ **B4 — Anonymity-set assertions** (`test/anonymity-set.test.ts`, 7 tests).
+Every test produces a **number** and asserts it, including the uncomfortably
+small ones. The existing suites prove the batching and note mechanisms work,
+which is a different claim: a mechanism can run perfectly and deliver a set of
+one.
+
+Pinned: a lone note has a set of **1**; the batch set is the seal size with
+`minBatch` as its floor; sealing 8 gives 8 even though deposits go out two at a
+time (the per-transaction ceiling is not the set); and a quiet bucket cannot
+borrow a busy one's crowd — 8 pending in one denomination does nothing for the 2
+in another, so the batch never forms.
+
+**This corrected a privacy claim.** `bucket` is a public signal of a ZK spend
+(`FareVault.depositShieldNoteZK` passes it to the verifier), so a 25 PAS spend
+is publicly a 25 PAS spend and hides only among other 25 PAS notes.
+[PRIVACY-STATUS.md](PRIVACY-STATUS.md) said the set was "every unspent note in
+the tree", which overstates it whenever more than one of the three deployed
+buckets is in use — in the test fixture, a lone 25 PAS note sits in a tree of
+nine with a set of one. Both that doc and
+[E2E-PRIVACY-ZK.md](E2E-PRIVACY-ZK.md) now say "of the same bucket"
+([TEST-FINDINGS.md](TEST-FINDINGS.md) #16).
 
 ✅ **B5 — Relay metadata.** Split across the tier that can actually test each
 half.

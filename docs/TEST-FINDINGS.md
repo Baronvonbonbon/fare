@@ -24,6 +24,7 @@ Ordered by what a reader should act on, not by discovery order.
 | 8–11 | Four assertions that passed for the wrong reason | — | ✅ All fixed |
 | 12 | `insertShieldNote` costs 730,615 gas | Informational | 📌 Pinned |
 | 15 | The bps rebate cannot pay for a relay at any realistic fare | **Medium** (economics) | 📌 Quantified |
+| 16 | Docs overstated the ZK anonymity set — buckets partition it | **Medium** (privacy claim) | ✅ Fixed |
 
 ---
 
@@ -280,6 +281,30 @@ snapshot, so re-running the suite after a gas change re-derives it.
 *Pinned by* `venue-node/breakeven.test.mjs`, including an assertion that a
 2 PAS fare does **not** cover — so a parameter change that alters this
 conclusion fails the suite rather than passing quietly.
+
+## 16. The ZK anonymity set was overstated — **fixed**
+
+[PRIVACY-STATUS.md](PRIVACY-STATUS.md) claimed that with the ZK path "the
+anonymity set is every unspent note in the tree, not a batch".
+
+`bucket` is a **public signal** of a spend — `FareVault.depositShieldNoteZK`
+passes it straight to `verifyShieldNote(proof, [root, nullifierHash, bucket,
+ksCommitment])`, and the circuit takes it as a public input. So a 25 PAS spend
+is publicly a 25 PAS spend, and hides only among the other unspent 25 PAS notes.
+With three buckets deployed (1 / 5 / 25 PAS), the real set is a fraction of the
+tree whenever more than one denomination is in use.
+
+Measured in the test fixture: nine notes in the tree, and the lone 25 PAS note
+has a set of **one**. Filling the 1 PAS bucket tenfold leaves it at one.
+
+Not a code defect — the design is sound and the partitioning is inherent to
+fixed denominations, which are themselves a privacy feature. The defect was in
+the description, and a reader sizing their exposure off that sentence would have
+over-estimated it by however much of the tree sits in other buckets.
+`PRIVACY-STATUS.md` and `E2E-PRIVACY-ZK.md` now say "of the same bucket".
+
+*Pinned by* `test/anonymity-set.test.ts`, which asserts the per-bucket counts
+against the tree total, so the two cannot drift apart again.
 
 ---
 
