@@ -20,11 +20,11 @@ All three tiers pass today.
 
 | Tier | Runner | Tests | Covers |
 |---|---|---|---|
-| `test/*.ts` | `npx hardhat test` | 218 | contracts, ZK verifiers, invariant fuzz, upgradability, **chain-backed relay endpoints** |
+| `test/*.ts` | `npx hardhat test` | 222 | contracts, ZK verifiers, invariant fuzz, upgradability, **chain-backed relay endpoints** |
 | `web/src/*.test.ts` | `cd web && npx vitest run` | 117 | 15 of 34 client modules, incl. **all four ops consoles' logic** |
 | `venue-node/*.test.mjs` | `cd venue-node && node --test` | 94 | economics + **break-even**, scorer, swap, treasury, agent, shieldkeeper + **decorrelation**, **relay HTTP surface + metadata** |
 
-**429 tests, all green**, and all of them now run in CI (§7 E1). The contract tier is the strong part and deserves
+**433 tests, all green**, and all of them now run in CI (§7 E1). The contract tier is the strong part and deserves
 saying so: a seeded-PRNG invariant campaign (`test/invariant.test.ts`) asserts
 escrow conservation and vault solvency after *every* operation and reproduces
 failures from a printed seed; the verifier tests pin fail-safe-before-VK and
@@ -137,10 +137,39 @@ fails. Mutation-checked — and the first version of that property was vacuous
 stubbed relays) and a live-Paseo mode (nightly), both emitting the same ledger
 schema. Commit it, alongside `_relaykeys.mjs`.
 
-☐ **A4 — Proof-cost snapshot.** Circuit constraint counts, proving time, and
-zkey/wasm byte sizes. This is a real cost with real consequences — the 32.8 MiB
-withdraw zkey already forced a split so Pages could serve it (PR #6). Snapshot
-it so a circuit edit that blows the budget fails in review rather than at deploy.
+✅ **A4 — Proof-cost snapshot** (`test/proof-cost.test.ts` → `proof-cost.json`,
+4 tests). Regenerate with `UPDATE_PROOF_SNAPSHOT=1`.
+
+The cost gas measurement never sees: bytes a user downloads, and Cloudflare
+Pages' hard **25 MiB per-asset ceiling**. That ceiling already bit once — the
+32.8 MiB withdraw proving key could not be published and had to be split across
+three parts (PR #6), discovered at deploy time.
+
+| Served artifact | Size |
+|---|---|
+| `withdraw_v7.zkey` (3 parts + manifest) | **32.8 MiB** total, 12 / 12 / 8.82 |
+| `withdraw_v7.wasm` | 2.20 MiB |
+| `shieldnote.zkey` | 4.38 MiB |
+| `shieldnote.wasm` | 1.92 MiB |
+| `proximity.wasm` / `.zkey` | 2.08 / 0.75 MiB |
+
+Four guards: the Pages ceiling asserted **absolutely** (a limit imposed from
+outside, not a snapshot); the split manifest checked in both directions — parts
+match their declared sizes and sum, the sha256 of the concatenation matches, the
+shipped loader agrees, *and* the whole still exceeds the ceiling, so if a circuit
+change ever brings it under, the now-pointless split gets removed deliberately;
+exact byte sizes against the snapshot; and each circuit's `nPublic` — its ABI,
+which a lock-once VK makes expensive to change unnoticed — cross-checked between
+`vk.json` and the deployed `setVK-calldata.json`.
+
+Mutation-checked: a 25.75 MiB file dropped into `web/public/zk/` fails the
+ceiling and the snapshot; a 4 KB size drift and an `nPublic` change each fail
+their own test.
+
+**Proving time is deliberately not gated.** It varies several-fold across
+machines, so a CI threshold loose enough not to flake would catch nothing. The
+live e2e runs measure it on real hardware instead
+([E2E-PRIVACY-ZK.md](E2E-PRIVACY-ZK.md)).
 
 ☐ **A5 — Paseo gas-reservation regression.** Paseo reserves
 `gasLimit × gasPrice` at submission, so the 500 M weight limit reserves ~500
