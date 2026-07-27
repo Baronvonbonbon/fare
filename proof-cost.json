@@ -22,6 +22,20 @@
       "protocol": "groth16"
     }
   },
+  "constraints": {
+    "proximity": {
+      "nConstraints": 1237,
+      "nVars": 1237,
+      "nPubInputs": 5,
+      "nPrvInputs": 6
+    },
+    "shieldnote": {
+      "nConstraints": 9770,
+      "nVars": 9791,
+      "nPubInputs": 4,
+      "nPrvInputs": 34
+    }
+  },
   "withdrawKeyBytes": 34412253,
   "withdrawParts": 3,
   "pagesAssetLimit": 26214400

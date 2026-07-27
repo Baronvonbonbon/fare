@@ -4,7 +4,7 @@ import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
-// Proof-cost snapshot (TEST-PLAN A4).
+// Proof-cost and circuit-size snapshot (TEST-PLAN A4 + E4).
 //
 // ZK artifacts have a cost that gas measurement never sees: bytes a user has to
 // download, and a hard 25 MiB per-asset ceiling on Cloudflare Pages. That
@@ -19,6 +19,10 @@ import { pathToFileURL } from "node:url";
 // and commit the diff. Sizes are exact, not toleranced: these are committed
 // binaries, so a byte change means someone regenerated a key and the review
 // should say so.
+//
+// E4 adds the constraint counts: nPublic is a circuit's ABI, its constraint
+// count is its COST, and a change that leaves the interface alone while
+// doubling the proving work would otherwise pass everything here.
 //
 // Proving TIME is deliberately not gated here. It varies several-fold across
 // machines, so a threshold loose enough for CI would catch nothing and one
@@ -153,11 +157,75 @@ describe("proof cost", () => {
     expect(circuits).to.deep.equal(baseline.circuits);
   });
 
+  // ── the circuits' SIZE (TEST-PLAN E4) ────────────────────────────────────
+
+  it("each circuit's constraint count is unchanged", async () => {
+    // nPublic (above) is the circuit's ABI; this is its COST. A change that
+    // leaves the interface alone and doubles the proving work would pass every
+    // other check here — the zkey byte sizes would move, but nothing would say
+    // by how much or why, and proving time is what a user on a phone actually
+    // feels.
+    //
+    // Read from the .r1cs, which is tracked for exactly this reason: CI cannot
+    // rebuild a circuit, so an untracked constraint system would make this a
+    // snapshot nobody verifies.
+    const snarkjs = await esmImport("snarkjs");
+    const circuits: Record<string, any> = {};
+
+    for (const [name, r1csFile, vkFile] of [
+      ["proximity", "proximity.r1cs", "vk.json"],
+      ["shieldnote", "shieldnote.r1cs", "shieldnote-vk.json"],
+    ] as const) {
+      const path = join(ROOT, "circuits", "build", r1csFile);
+      expect(existsSync(path), `${r1csFile} is missing — it is tracked, so this is a real loss`).to.equal(true);
+
+      const info = await snarkjs.r1cs.info(path, { info: () => {}, debug: () => {} });
+      const vk = JSON.parse(readFileSync(join(ROOT, "circuits", "build", vkFile), "utf8"));
+
+      // ANCHOR: the constraint system and the verifying key must describe the
+      // same circuit. Without this the counts could drift to a stale .r1cs and
+      // keep passing — a snapshot of something nobody deployed.
+      expect(info.nPubInputs + info.nOutputs, `${name}: r1cs has ${info.nPubInputs} public inputs `
+        + `but the deployed VK expects ${vk.nPublic}`).to.equal(vk.nPublic);
+
+      circuits[name] = {
+        nConstraints: info.nConstraints,
+        nVars: info.nVars,
+        nPubInputs: info.nPubInputs,
+        nPrvInputs: info.nPrvInputs,
+      };
+    }
+
+    measured.constraints = circuits;
+    if (UPDATE) return;
+
+    expect(baseline.constraints, "no constraint baseline — run UPDATE_PROOF_SNAPSHOT=1").to.be.an("object");
+    // Exact, not toleranced. A circuit is deterministic: the same source
+    // compiles to the same count, so any movement is someone changing the
+    // circuit and should read as a reviewed diff.
+    const drift: string[] = [];
+    for (const [name, got] of Object.entries(circuits)) {
+      const was = (baseline.constraints as any)[name];
+      if (!was) { drift.push(`${name} is new (${got.nConstraints} constraints)`); continue; }
+      for (const k of ["nConstraints", "nVars", "nPubInputs", "nPrvInputs"] as const) {
+        if (was[k] !== got[k]) {
+          const d = got[k] - was[k];
+          drift.push(`${name}.${k}: ${was[k]} → ${got[k]} (${d > 0 ? "+" : ""}${d})`);
+        }
+      }
+    }
+    for (const name of Object.keys(baseline.constraints)) {
+      if (!(name in circuits)) drift.push(`${name} was removed`);
+    }
+    expect(drift, `circuit constraints changed:\n  ${drift.join("\n  ")}`).to.deep.equal([]);
+  });
+
   after(() => {
     if (!UPDATE) return;
     const out = {
       artifacts: measured.artifacts,
       circuits: measured.circuits,
+      constraints: measured.constraints,
       withdrawKeyBytes: measured.withdrawKeyBytes,
       withdrawParts: measured.withdrawParts,
       pagesAssetLimit: PAGES_ASSET_LIMIT,
@@ -168,7 +236,9 @@ describe("proof cost", () => {
       console.log(`    ${f.padEnd(38)} ${MiB(size).padStart(10)}`);
     }
     for (const [n, c] of Object.entries(out.circuits as Record<string, any>)) {
-      console.log(`    circuit ${n.padEnd(30)} nPublic=${c.nPublic}`);
+      const k = (out.constraints as any)?.[n];
+      console.log(`    circuit ${n.padEnd(30)} nPublic=${c.nPublic}`
+        + (k ? `  constraints=${k.nConstraints}  vars=${k.nVars}` : ""));
     }
   });
 });

@@ -20,11 +20,11 @@ All three tiers pass today.
 
 | Tier | Runner | Tests | Covers |
 |---|---|---|---|
-| `test/*.ts` | `npx hardhat test` | 255 | contracts, ZK verifiers, invariant fuzz, upgradability, **chain-backed relay endpoints**, **per-payer cost ledger**, **relay key custody**, **full-lifecycle e2e**, **order state machine** |
+| `test/*.ts` | `npx hardhat test` | 256 | contracts, ZK verifiers, invariant fuzz, upgradability, **chain-backed relay endpoints**, **per-payer cost ledger**, **relay key custody**, **full-lifecycle e2e**, **order state machine** |
 | `web/src/*.test.ts` | `cd web && npx vitest run` | 290 | 29 of 36 client modules, incl. **all four ops consoles (logic + rendered)**, **burner wallets**, **ZK commitments**, **relay client + router resolution**, **order flow** |
 | `venue-node/*.test.mjs` | `cd venue-node && node --test` | 94 | economics + **break-even**, scorer, swap, treasury, agent, shieldkeeper + **decorrelation**, **relay HTTP surface + metadata** |
 
-**639 tests, all green**, and all of them now run in CI (§7 E1). The contract tier is the strong part and deserves
+**640 tests, all green**, and all of them now run in CI (§7 E1). The contract tier is the strong part and deserves
 saying so: a seeded-PRNG invariant campaign (`test/invariant.test.ts`) asserts
 escrow conservation and vault solvency after *every* operation and reproduces
 failures from a printed seed; the verifier tests pin fail-safe-before-VK and
@@ -190,7 +190,9 @@ The live mode still needs a funded deployer and three relay processes; it stays
 nightly (§7 E3). Both it and `_relaykeys.mjs` are committed.
 
 ✅ **A4 — Proof-cost snapshot** (`test/proof-cost.test.ts` → `proof-cost.json`,
-4 tests). Regenerate with `UPDATE_PROOF_SNAPSHOT=1`.
+5 tests). Regenerate with `UPDATE_PROOF_SNAPSHOT=1`. The same file now also
+carries §7 E4's circuit **constraint** counts — A4 measures what a user
+downloads, E4 what their phone then has to compute.
 
 The cost gas measurement never sees: bytes a user downloads, and Cloudflare
 Pages' hard **25 MiB per-asset ceiling**. That ceiling already bit once — the
@@ -1041,13 +1043,43 @@ Four things this needed that were not obvious:
 - **The obvious artifact upload would have published private keys** —
   [TEST-FINDINGS.md](TEST-FINDINGS.md) #21.
 
-🟡 **E4** — Gas and constraint snapshots committed and diffed. **The gas half is
-done** (§3 A1: 18 paths in `gas-snapshot.json` behind a ±5% gate). The
-**constraint** half is not: `proof-cost.json` (§3 A4) pins each circuit's served
-artifact sizes and its `nPublic`, which is its ABI — but not its R1CS constraint
-count, so a circuit change that leaves the interface alone and doubles the
-proving work would pass. Cheap to add next to A4 (`snarkjs r1cs info`), and it is
-what actually predicts proving time on a user's phone.
+✅ **E4 — Gas and constraint snapshots, committed and diffed.** The gas half is
+§3 A1 (18 paths, ±5% gate). The constraint half now lives beside A4 in
+`proof-cost.json`, exact rather than toleranced:
+
+| Circuit | Constraints | Vars | Public | Private |
+|---|---|---|---|---|
+| `proximity` | **1,237** | 1,237 | 5 | 6 |
+| `shieldnote` | **9,770** | 9,791 | 4 | 34 |
+
+`nPublic` is a circuit's **ABI** and A4 already pinned it; the constraint count
+is its **cost**, and a change that leaves the interface alone while doubling the
+proving work would have passed everything else here. The zkey byte sizes would
+have moved, but nothing would have said by how much or why — and proving time is
+what a user on a phone actually feels.
+
+Two decisions worth stating:
+
+- **The `.r1cs` files are now tracked** (1.7 MB, against the 32 MB of zkeys the
+  repo already carries). They are the only source of these numbers, and CI
+  cannot rebuild a circuit — that needs `circom` and a powers-of-tau download.
+  An untracked constraint system would have made this a snapshot nobody
+  verifies, which is the failure mode this plan keeps complaining about.
+- **The counts are anchored to the deployed verifying keys.** Each circuit's
+  `nPubInputs + nOutputs` is checked against its VK's `nPublic`, so the
+  constraint system and the key must describe the *same* circuit. Without that,
+  the numbers could drift to a stale `.r1cs` and keep passing — a snapshot of
+  something nobody deployed.
+
+Scope: `proximity` and `shieldnote` are the circuits FARE authors. `withdraw_v7`
+is Kusama Shield's own withdraw circuit — its artifacts are served and
+size-checked by A4, but there is no `.r1cs` for it here and no claim is made
+about its constraints.
+
+Regenerate with A4's flag: `UPDATE_PROOF_SNAPSHOT=1 npx hardhat test
+test/proof-cost.test.ts`. Mutation-checked: a drifted count fails with the
+circuit, field and delta named; an `.r1cs` that disagrees with its VK fails the
+anchor.
 
 ---
 
@@ -1101,11 +1133,13 @@ coverage of product code rather than plumbing.
     to `orderflow.ts` and covered at 98.51% (42 tests); web coverage 30.42% →
     34.56%. The remaining ~2,400 lines are rendering.
 
-**What is left is genuinely smaller than it looks.** `App.tsx`'s remainder is
-markup rather than decisions. Then `shieldnote.ts` and `shield.ts` (~520 lines),
-**E4**'s circuit-constraint snapshot (small, worth doing alongside any circuit
-work), **C4** behind the MPC ceremony, and **B3** as a decision rather than a
-recommendation.
+14. ✅ **E4 — constraint snapshot.** Both circuits pinned exactly and anchored
+    to their deployed VKs; the `.r1cs` files are tracked so CI can verify them.
+
+**The harness is complete** — E1 through E4 all done. `App.tsx`'s remainder is
+markup rather than decisions. What is left: `shieldnote.ts` and `shield.ts`
+(~520 lines), **C4** behind the MPC ceremony, and **B3** as a decision rather
+than a recommendation.
 
 B3 is deliberately left as a decision rather than a recommendation: it is worth
 adopting only if the privacy posture should be pinned by tests.
