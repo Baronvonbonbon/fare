@@ -22,9 +22,9 @@ All three tiers pass today.
 |---|---|---|---|
 | `test/*.ts` | `npx hardhat test` | 211 | contracts, ZK verifiers, invariant fuzz, upgradability, **chain-backed relay endpoints** |
 | `web/src/*.test.ts` | `cd web && npx vitest run` | 117 | 15 of 34 client modules, incl. **all four ops consoles' logic** |
-| `venue-node/*.test.mjs` | `cd venue-node && node --test` | 79 | economics + **break-even**, scorer, swap, treasury, agent, shieldkeeper, **relay HTTP surface** |
+| `venue-node/*.test.mjs` | `cd venue-node && node --test` | 86 | economics + **break-even**, scorer, swap, treasury, agent, shieldkeeper, **relay HTTP surface + metadata** |
 
-**407 tests, all green**, and all of them now run in CI (§7 E1). The contract tier is the strong part and deserves
+**414 tests, all green**, and all of them now run in CI (§7 E1). The contract tier is the strong part and deserves
 saying so: a seeded-PRNG invariant campaign (`test/invariant.test.ts`) asserts
 escrow conservation and vault solvency after *every* operation and reproduces
 failures from a printed seed; the verifier tests pin fail-safe-before-VK and
@@ -213,10 +213,39 @@ the tree; the batch path refuses to seal below `minBatch` (partly covered
 today). Assert the *measured* set size, not merely that the mechanism is
 present — "anonymity is only as large as usage" is currently a prose claim.
 
-☐ **B5 — Relay metadata.** Request padding is block-aligned (asserted inline in
-`measure-costs.mjs` — promote to a unit test); the rotating-salt client key
-retains no raw IP or address; a note's insert and spend route to *different*
-relays (phase 3b). Testable in-process against fake relays.
+✅ **B5 — Relay metadata.** Split across the tier that can actually test each
+half.
+
+*Client side* was already covered by `web/src/relaypick.test.ts`: deterministic
+relay selection (a retry does not widen who saw the request), spread across the
+pool, `pickRelayAvoiding` keeping a note's insert and spend on **different**
+relays, honest degradation to one relay, and `padBody` making a note insert and
+a proof submission the same size to the byte.
+
+*Relay side* is new (`venue-node/relaymeta.test.mjs`, 7 tests), and targets the
+claim in [PRIVACY-STATUS.md](PRIVACY-STATUS.md) that "client addresses are
+hashed under a rotating salt so no table of callers is kept". That is a
+statement about what is **in memory**, so the test looks: it drives real
+requests through the real handler and then inspects the limiter's keys. To make
+that possible `relay.mjs` exports `clientKey` and a read-only `rateLimitKeys()`.
+
+Pinned: the key is a fixed-width digest that neither equals, contains, nor
+partially embeds the address (so an IPv6 caller is not even distinguishable from
+an IPv4 one by key length); callers are still told apart; a salt rotation
+changes the digest and drops the old table; and throttling one caller leaves
+another unaffected.
+
+Mutation-checked: returning the raw address instead of a digest fails three
+tests; disabling salt rotation fails one. That second mutation also exposed a
+test of mine that passed for the wrong reason — it advanced the clock 11 minutes
+and so tripped the per-caller counter reset as well as the rotation, proving
+neither in particular. Now split: rotation is asserted directly, and the counter
+reset is asserted at 61 s, one window on and nine short of a rotation.
+
+Not attempted: the client's real `padBody` posted through the real relay. `node`
+cannot import `relaypick.ts` (its `./pool` import has no extension), and the
+only cross-tier contract is the `_pad` field **name** — which is pinned on both
+sides independently.
 
 ☐ **B6 — Timing decorrelation.** Given N deposits, assert the seal ordering does
 not preserve insertion order. The dwell/batch mechanism is tested for

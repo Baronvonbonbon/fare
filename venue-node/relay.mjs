@@ -413,6 +413,12 @@ function clientKey(ip) {
   }
   return createHash("sha256").update(rateSalt).update(ip).digest("base64").slice(0, 16);
 }
+/// Read-only view of the limiter's keys, for the privacy test that asserts this
+/// node holds no table of client addresses (docs/PRIVACY-STATUS.md "Relay
+/// metadata"). Exposed rather than inferred: the claim is about what is IN
+/// memory, so the test has to look.
+const rateLimitKeys = () => [...hits.keys()];
+
 function rateLimited(ip) {
   if (!ip) return false;
   const key = clientKey(ip);
@@ -974,7 +980,7 @@ if (SHIELD_KEEPER) setInterval(shieldKeeperTick, SHIELD_KEEPER_POLL_MS).unref?.(
 
 // Exported for tests: they listen on an ephemeral port themselves. Importing
 // this module must never bind PORT or the suite collides with a running relay.
-export { server, handler, relay, provider };
+export { server, handler, relay, provider, clientKey, rateLimitKeys };
 
 if (IS_MAIN) server.listen(PORT, () => {
   console.log(`[relay] FARE venue relay on :${PORT}`);
