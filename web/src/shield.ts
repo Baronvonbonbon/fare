@@ -106,7 +106,12 @@ export function adoptShieldedNote(rec: NoteRecord): void {
   upsertNote(rec);
 }
 
-class KusamaShieldFunder implements ShieldedFunder {
+/// Exported for tests only. `initShieldedFunder` is the production entry point,
+/// but it reads `import.meta.env`, which vitest does not populate — so a test
+/// that went through it could never reach this class at all. Constructing it
+/// directly with explicit dependencies is both testable and how the interface
+/// was always meant to be satisfied.
+export class KusamaShieldFunder implements ShieldedFunder {
   constructor(
     private poolAddr: string,
     private provider: Provider,

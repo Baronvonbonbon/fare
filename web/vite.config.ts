@@ -59,16 +59,16 @@ export default defineConfig({
       // work lands; never lower one to make a build pass, because a ratchet
       // that turns both ways is a comment.
       //
-      // Raised five times: 17.40 → 20.19 → 22.25 (D2) → 30.42 (D1) → 33.19 →
-      // 34.56 (App.tsx's order-flow decisions and its per-role discovery, both
-      // extracted to orderflow.ts). What is left below is App.tsx's remaining
-      // ~2,400 lines, which are rendering rather than decisions, plus
-      // shieldnote.ts / shield.ts.
+      // Raised six times: 17.40 → 20.19 → 22.25 (D2) → 30.42 (D1) → 33.19 →
+      // 34.56 (App.tsx) → 38.16 (shieldnote.ts, shield.ts). What is left below
+      // is App.tsx's remaining ~2,400 lines, which are rendering rather than
+      // decisions, and the chain-touching halves of the shield modules —
+      // proving, submitting and log-scanning, which need a node.
       thresholds: {
-        statements: 34,
-        branches: 31,
-        functions: 32,
-        lines: 36,
+        statements: 38,
+        branches: 33,
+        functions: 35,
+        lines: 39,
       },
     },
   },

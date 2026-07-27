@@ -21,10 +21,10 @@ All three tiers pass today.
 | Tier | Runner | Tests | Covers |
 |---|---|---|---|
 | `test/*.ts` | `npx hardhat test` | 256 | contracts, ZK verifiers, invariant fuzz, upgradability, **chain-backed relay endpoints**, **per-payer cost ledger**, **relay key custody**, **full-lifecycle e2e**, **order state machine** |
-| `web/src/*.test.ts` | `cd web && npx vitest run` | 290 | 29 of 36 client modules, incl. **all four ops consoles (logic + rendered)**, **burner wallets**, **ZK commitments**, **relay client + router resolution**, **order flow** |
+| `web/src/*.test.ts` | `cd web && npx vitest run` | 326 | 31 of 36 client modules, incl. **all four ops consoles (logic + rendered)**, **burner wallets**, **ZK commitments**, **relay client + router resolution**, **order flow**, **shield notes + funding** |
 | `venue-node/*.test.mjs` | `cd venue-node && node --test` | 94 | economics + **break-even**, scorer, swap, treasury, agent, shieldkeeper + **decorrelation**, **relay HTTP surface + metadata** |
 
-**640 tests, all green**, and all of them now run in CI (§7 E1). The contract tier is the strong part and deserves
+**676 tests, all green**, and all of them now run in CI (§7 E1). The contract tier is the strong part and deserves
 saying so: a seeded-PRNG invariant campaign (`test/invariant.test.ts`) asserts
 escrow conservation and vault solvency after *every* operation and reproduces
 failures from a printed seed; the verifier tests pin fail-safe-before-VK and
@@ -39,7 +39,7 @@ Slither is in CI with zero high-severity findings ([SECURITY-REVIEW.md](SECURITY
 | ~~`venue-node/relay.mjs`~~ — 16 HTTP endpoints, holds `RELAY_PRIVATE_KEY` | 953 lines | ✅ 58 across two tiers (§5 C1, C2) |
 | ~~`web/src/ops/`~~ — four consoles + shell | 1,385 lines | ✅ 82 (logic §5 C5 + rendering §6 D1) |
 | `web/src/App.tsx` — rendering only; its decisions now live in `orderflow.ts` | 2,471 lines | 🟡 42 (§6 D6) |
-| `shieldnote.ts`, `shield.ts` | ~520 lines | **0** |
+| ~~`shieldnote.ts`~~ · ~~`shield.ts`~~ | ~490 lines | ✅ 36 (§6 D7) |
 | ~~`wallets.ts`~~ · ~~`zk.ts`~~ · ~~`token.ts`~~ · ~~`chain.ts`~~ · ~~`relay.ts`~~ | ~1,180 lines | ✅ 71 (§6 D2) |
 
 Three structural facts behind that table:
@@ -956,6 +956,56 @@ operator fails one.
 ☐ **What remains of D6** is `App.tsx`'s ~2,400 remaining lines, which are
 genuinely rendering rather than decisions.
 
+✅ **D7 — the shield modules** (`shieldnote.test.ts` 18, `shield.test.ts` 18).
+The last two untested client modules, and the ones where a quiet failure costs
+the most.
+
+**`shieldnote.ts` is checked against the real circuit, not against itself.** The
+hardhat tier *cannot* import it — its relative imports have no extensions
+([TEST-FINDINGS.md](TEST-FINDINGS.md) #17) — so a cross-tier differential is off
+the table. What is available is better: `test/fixtures/zk-shieldnote.json`
+carries a leaf and a root that a real Groth16 proof already verified, so the
+commitment, the nullifier hash and the **tree root** are all checked against
+values the circuit itself accepted.
+
+That matters because of how a wrong tree fails: it produces a perfectly
+well-formed proof against a root the vault has never held. Nothing errors
+client-side — the spend just reverts, with the note's secrets already committed
+to a leaf nobody can open. Also pinned: the denomination is bound into the leaf
+(so a 1 PAS note cannot be spent as 25), the hash is order-sensitive, and
+**every leaf's authentication path folds back to the root** — the same relation
+the circuit checks, asserted directly for every position rather than snapshotted.
+
+**`shield.ts` is the funding seam, and its job is to refuse.** A burner funded
+any way other than through the pool carries an on-chain edge straight back to
+the customer, so `fundViaShield` **throws** rather than returning an unfunded
+result a caller could shrug off and route around — and it checks availability
+*before* spending anything. The note store is idempotent on claim, because a
+retried claim that duplicated a note would make the second spend look like a
+double-spend rather than a bookkeeping slip.
+
+The Kusama Shield backend is covered too, including **KS Issue 4**: the pool
+keeps a 16-entry root window, so a proof whose root falls out of it before
+mining is rejected — a race, not a failure. The funder rebuilds and retries
+three times, and the test asserts each attempt builds a *new* withdrawal, since
+resubmitting the same proof would hit the same evicted root forever. Fee mode
+sizes the withdrawal at amount **plus** fee, or the burner lands short by
+exactly the fee.
+
+Mutation-checked, two tests each: swapping the nullifier/secret hash order,
+inverting the path bits, shortening the tree to depth 15, and softening the
+funding refusal into an unfunded result.
+
+`KusamaShieldFunder` is now exported. `initShieldedFunder` reads
+`import.meta.env`, which vitest does not populate, so a test going through it
+could never reach the class at all — the export is for tests, says so, and
+changes no behaviour.
+
+**Not covered, and needing a node rather than a decision:** `fetchNoteLeaves`,
+`proveSpend`, `insertShieldNote` and `spendShieldNote` (log scanning, snarkjs
+proving, relay submission). The real-proof paths are exercised in
+`test/shieldnote-vault.test.ts` and the live e2e runs.
+
 ---
 
 ## 7. Harness
@@ -1136,10 +1186,15 @@ coverage of product code rather than plumbing.
 14. ✅ **E4 — constraint snapshot.** Both circuits pinned exactly and anchored
     to their deployed VKs; the `.r1cs` files are tracked so CI can verify them.
 
-**The harness is complete** — E1 through E4 all done. `App.tsx`'s remainder is
-markup rather than decisions. What is left: `shieldnote.ts` and `shield.ts`
-(~520 lines), **C4** behind the MPC ceremony, and **B3** as a decision rather
-than a recommendation.
+15. ✅ **D7 — the shield modules.** Both covered (36 tests); the note tree is
+    checked against a root the real circuit verified.
+
+**The harness is complete and every client module now has tests.** What is left
+is not coverage work: **C4** is a mainnet gate behind the MPC ceremony, **B3** is
+a standing decision, and `App.tsx`'s remaining ~2,400 lines are markup rather
+than decisions. The chain-touching halves of `relay.ts`, `shieldnote.ts` and
+`shield.ts` need a node, and are exercised by the hardhat tier and the live e2e
+runs instead.
 
 B3 is deliberately left as a decision rather than a recommendation: it is worth
 adopting only if the privacy posture should be pinned by tests.
