@@ -20,11 +20,11 @@ All three tiers pass today.
 
 | Tier | Runner | Tests | Covers |
 |---|---|---|---|
-| `test/*.ts` | `npx hardhat test` | 269 | contracts, ZK verifiers, invariant fuzz, upgradability, **chain-backed relay endpoints**, **per-payer cost ledger**, **relay key custody**, **full-lifecycle e2e**, **order state machine** |
+| `test/*.ts` | `npx hardhat test` | 279 | contracts, ZK verifiers, invariant fuzz, upgradability, **chain-backed relay endpoints**, **per-payer cost ledger**, **relay key custody**, **full-lifecycle e2e**, **order state machine** |
 | `web/src/*.test.ts` | `cd web && npx vitest run` | 326 | 31 of 36 client modules, incl. **all four ops consoles (logic + rendered)**, **burner wallets**, **ZK commitments**, **relay client + router resolution**, **order flow**, **shield notes + funding** |
 | `venue-node/*.test.mjs` | `cd venue-node && node --test` | 94 | economics + **break-even**, scorer, swap, treasury, agent, shieldkeeper + **decorrelation**, **relay HTTP surface + metadata** |
 
-**689 tests, all green**, and all of them now run in CI (§7 E1). The contract tier is the strong part and deserves
+**699 tests, all green**, and all of them now run in CI (§7 E1). The contract tier is the strong part and deserves
 saying so: a seeded-PRNG invariant campaign (`test/invariant.test.ts`) asserts
 escrow conservation and vault solvency after *every* operation and reproduces
 failures from a printed seed; the verifier tests pin fail-safe-before-VK and
@@ -627,11 +627,52 @@ Mutation-checked in both directions: removing `onlyOwner` from
 `setShieldKeeper` fails 9 of the 530 checks by name; deleting a row from the
 table fails the completeness check.
 
-☐ 🔒 **C4 — Deployed-VK ↔ committed-zkey hash check.** `setVerifyingKey` is
-lock-once and both setups are still single-party, which makes a swapped zkey
-both undetectable and unrecoverable. Assert the deployed VK hashes to the
-committed artifact. Extend to transcript verification when the real MPC ceremony
-runs — that ceremony remains the top mainnet gate.
+🟡 🔒 **C4 — Verifying-key provenance** (`test/vk-provenance.test.ts`, 10 tests).
+The detectable half is done; the ceremony remains the mainnet gate.
+
+`setVerifyingKey` is **lock-once**, so a wrong key is not merely wrong — it is
+permanent, and the fix is a redeploy with every client re-pointed. This walks
+the entire chain of custody, from the artifact a browser downloads to the key
+the chain will actually check against:
+
+```
+web/public/**/*.zkey          the file users fetch and prove against
+     ↓ exportVerificationKey
+circuits/build/*vk.json       the committed verification key
+     ↓ point for point
+circuits/build/set*VK-calldata.json   what setVerifyingKey is called with
+     ↓ deploy + configure
+FareLocationVerifier.getVK()  what the chain enforces
+```
+
+**The calldata hop is the one an attacker would target.** Swapping *it* rather
+than the key deploys a verifier that accepts proofs from a zkey no user has,
+while every committed artifact still looks correct on inspection.
+
+Both circuits are covered, and the last test closes the loop by exercise rather
+than comparison: build a real Groth16 proof with the shipped wasm and zkey,
+deploy a verifier from the committed calldata, and let the pairing check decide.
+A break anywhere in the chain is what a user would otherwise hit in production,
+on a lock-once contract.
+
+Reconciling three encodings of the same points was most of the work: `vk.json`
+nests G2 as `[[x0,x1],[y0,y1]]` while the calldata and the contract store it
+flat in **EIP-197 order** (`[x1,x0,y1,y0]`) — the halves are swapped. A
+comparison written to make that mismatch "go away" would pass on genuinely
+mismatched artifacts.
+
+Mutation-checked: tampering a single IC point in the calldata fails three tests
+including the end-to-end one; a committed VK that no longer matches the shipped
+zkey fails three more.
+
+☐ **What remains is the ceremony, not a test.** Both setups are single-party, so
+whoever ran them may hold toxic waste and can forge proofs against this exact
+key. Nothing above addresses that — it establishes only that *the key you review
+is the key that gets deployed*. A real MPC with a published transcript is the
+top mainnet gate; the final assertion here is a marker that fails if
+PRIVACY-STATUS.md ever stops recording the single-party setups, so this file
+gets revisited when the ceremony runs and the marker becomes transcript
+verification.
 
 🟡 **C5 — Ops-console tests.** The riskiest logic — the escrow-split preview an
 arbiter reads before signing an irreversible `resolve()` — was inline in
@@ -1228,9 +1269,14 @@ coverage of product code rather than plumbing.
 16. ✅ **B3 — the Open list, executable.** Adopted: 10 leaks pinned, 5
     delegated, coupled to PRIVACY-STATUS.md in both directions.
 
-**The plan is complete except for one mainnet gate.** **C4** — the deployed-VK ↔
-committed-zkey hash check — stays open behind the MPC ceremony, which is the top
-mainnet blocker and a ceremony rather than a testing task.
+17. 🟡 **C4 — VK provenance.** The chain of custody from shipped zkey to
+    enforced key is pinned end to end; the trusted setup itself remains the
+    mainnet gate.
+
+**Every testable item in this plan is now done.** What is left is not a test:
+a multi-party trusted-setup ceremony with a published transcript, which
+PRIVACY-STATUS.md lists as the top mainnet blocker. When it runs, C4's marker
+assertion becomes transcript verification.
 
 `App.tsx`'s remaining ~2,400 lines are markup rather than decisions, and the
 chain-touching halves of `relay.ts`, `shieldnote.ts` and `shield.ts` need a

@@ -68,6 +68,19 @@ flow) in `withdrawFor` — that is the **EIP-712 deadline**, which is what a
 deadline is for, and Mythril notes it is compiler-generated code. Accepted, not
 a defect. The nightly fails only on **high** severity for exactly this reason.
 
+## Verifying-key provenance
+
+`setVerifyingKey` is lock-once, so a wrong key is permanent.
+`test/vk-provenance.test.ts` pins the chain of custody for both circuits —
+shipped zkey → committed `vk.json` → deploy calldata → the key a deployed
+verifier reports via `getVK()` — and closes it by building a real proof with the
+shipped artifacts and verifying it against a verifier configured from the
+committed calldata.
+
+It does **not** establish that the key came from an honest ceremony. Both setups
+are single-party; a real MPC with a published transcript is the top mainnet gate
+(see [PRIVACY-STATUS.md](PRIVACY-STATUS.md), cross-cutting).
+
 ## CI
 
 `.github/workflows/slither.yml` runs Slither on every push / PR
