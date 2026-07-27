@@ -19,6 +19,7 @@ Ordered by what a reader should act on, not by discovery order.
 | 20 | Concurrent requests all passed the same budget check | Low | ✅ Fixed |
 | 21 | The live runs write private keys where CI would have published them | **Medium** | ✅ Guarded |
 | 22 | Web coverage read 47% because untested files were not counted | Medium (metric) | ✅ Fixed |
+| 23 | Two state-matrix rows would have been refused before the guard they test | — | ✅ Fixed |
 | 2 | `/fund` can double-fund inside a 250 ms window | Low | ☐ Open |
 | 3 | Oversized request body returns 500, not 413 | Cosmetic | ☐ Open |
 | 4 | CI ran nothing but Slither, path-filtered to `contracts/**` | **High** (process) | ✅ Fixed |
@@ -521,6 +522,34 @@ No equivalent bug, but worth recording next to it: `hardhat coverage` needs
 and the suite then exceeds node's 2 GB default and dies with "Reached heap
 limit" *partway through printing the report* — which reads as a hang rather
 than an OOM.
+
+## 23. Two state-matrix rows would have been refused before the guard they test — **fixed**
+
+The seventh and eighth instances of the #8–11 pattern, from D5. Both were caught
+by the matrix reporting the *reason* each cell was refused rather than only that
+it was — which is the whole trick, and the reason it is worth the extra code.
+
+**A row refused by an earlier check tests nothing.** `increaseTipERC20` checks
+`o.token != address(0)` **before** the status. Driven against a native order —
+the obvious fixture, and what every other row uses — all eight of its cells come
+back `use-native-tip`. Every one "passes", and the row asserts nothing whatever
+about the state machine. Fixed by driving that row against a stablecoin order,
+so the token check passes and the status guard is actually reached.
+
+**Which path reaches a status decides which guard answers.** `Cancelled` is
+reachable two ways: `cancelOpen` from Open, or `cancelAssigned` from Assigned.
+They produce the same status and a very different order — cancelling an *open*
+order leaves `o.driver` as the zero address, so `abandonOrder` is then refused on
+`not-driver` rather than on status, and that cell quietly stops testing the
+transition. Fixed by reaching `Cancelled` through `cancelAssigned`, so the order
+retains a driver and the status guard is what replies.
+
+One genuine earlier-guard case survives and is asserted as itself rather than
+excused: in `Open` there is no driver *at all*, so `abandonOrder` is refused on
+identity by construction. That is the honest answer to "can a driver abandon an
+unassigned order", so the cell pins that exact reason. The distinction being
+drawn throughout is between a guard that legitimately precedes and a fixture
+that accidentally hides the one under test.
 
 ---
 

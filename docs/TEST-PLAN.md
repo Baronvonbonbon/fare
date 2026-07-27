@@ -20,11 +20,11 @@ All three tiers pass today.
 
 | Tier | Runner | Tests | Covers |
 |---|---|---|---|
-| `test/*.ts` | `npx hardhat test` | 250 | contracts, ZK verifiers, invariant fuzz, upgradability, **chain-backed relay endpoints**, **per-payer cost ledger**, **relay key custody**, **full-lifecycle e2e** |
+| `test/*.ts` | `npx hardhat test` | 255 | contracts, ZK verifiers, invariant fuzz, upgradability, **chain-backed relay endpoints**, **per-payer cost ledger**, **relay key custody**, **full-lifecycle e2e**, **order state machine** |
 | `web/src/*.test.ts` | `cd web && npx vitest run` | 124 | 17 of 36 client modules, incl. **all four ops consoles' logic** |
 | `venue-node/*.test.mjs` | `cd venue-node && node --test` | 94 | economics + **break-even**, scorer, swap, treasury, agent, shieldkeeper + **decorrelation**, **relay HTTP surface + metadata** |
 
-**468 tests, all green**, and all of them now run in CI (§7 E1). The contract tier is the strong part and deserves
+**473 tests, all green**, and all of them now run in CI (§7 E1). The contract tier is the strong part and deserves
 saying so: a seeded-PRNG invariant campaign (`test/invariant.test.ts`) asserts
 escrow conservation and vault solvency after *every* operation and reproduces
 failures from a printed seed; the verifier tests pin fail-safe-before-VK and
@@ -744,9 +744,40 @@ Groth16 withdraw circuit — not FARE code — and `MockShieldPool` has no
 burner is funded plainly and the boundary is stated in the file. Shielded
 **payout** is FARE code and is covered.
 
-☐ **D5 — Order state machine.** Exhaustive: assert every invalid transition
-reverts. The fuzz campaign reaches some of these incidentally; an explicit
-matrix is cheap and complete.
+✅ **D5 — Order state machine** (`test/order-state-machine.test.ts`, 5 tests over
+**104 cells** — 13 status-gated actions × 8 statuses). The invariant campaign
+reaches some of these incidentally, but "eventually, on some seeds" is a
+different claim from "never, on any path".
+
+Both directions are asserted: no action succeeds from a status that does not
+permit it (86 cells), and every action *is* permitted from each status it
+declares legal (18) — the second half being what stops a contract that simply
+reverted everything from satisfying the first.
+
+What makes it more than a table:
+
+- **Every call is valid apart from its status**, so a cell proves the *status*
+  rejected it. Calling `cancelAssigned` as a stranger would pass on
+  `not-customer` and prove nothing — the failure that makes most such matrices
+  decorative, and the same problem C3 had to solve for authorization.
+- **Statuses are reached through real transitions**, never by writing storage,
+  so the rows test the machine rather than a fixture.
+- **The table is checked against the contract source, twice**: every
+  `bad-status` guard must appear in the table, *and* each action's declared
+  legal set must equal the statuses its guard actually names. Widening a
+  `require` to admit one more status is a one-word diff that no cell would
+  otherwise notice — the new cell would simply stop being tested as illegal.
+
+Mutation-checked, two ways against the contract: widening `cancelOpen` to accept
+`Assigned` fails the matrix *and* the source comparison; deleting
+`cancelAssigned`'s guard fails two tests. Branch coverage rose 75.45% → **77.53%**,
+which is this suite reaching revert paths nothing else did.
+
+**Two rows would have been vacuous, and only building them carefully showed it**
+([TEST-FINDINGS.md](TEST-FINDINGS.md) #23) — `increaseTipERC20` on a native
+order is refused by a token check before the status is ever read, and `Cancelled`
+reached via `cancelOpen` leaves no driver, so `abandonOrder` answers on identity
+instead. Which *path* reaches a status decides which guard replies.
 
 ---
 
@@ -881,15 +912,18 @@ coverage of product code rather than plumbing.
 9. ✅ **D4 — local-chain lifecycle e2e.** One delivery per-PR, asserting the
    seams between phases that per-phase fixtures cannot reach.
 
-**What is left**, in the order worth doing it: **D5** (order state machine — an
-explicit invalid-transition matrix; cheap and complete, and the fuzz campaign
-only reaches these incidentally), then **D2** (client-core units — `wallets.ts`
-first: a burner derivation bug silently re-links orders, defeating the
-customer's primary protection) and **D1** (console components). Those last two
-are where the 17% web floor has by far the most room to move. **E4**'s
-constraint snapshot is a small job worth doing alongside any circuit work.
-**C4** stays a mainnet gate behind the MPC ceremony, and **B3** stays a decision
-rather than a recommendation.
+10. ✅ **D5 — order state machine.** 104 cells, both directions, checked
+    against the contract source so the table cannot fall behind it.
+
+**What is left is the client**, which is also where the 17% web coverage floor
+has by far the most room to move: **D2** (client-core units — `wallets.ts`
+first, since a burner-derivation bug silently re-links orders and defeats the
+customer's primary protection, then `chain.ts`, `relay.ts`, `token.ts`,
+`zk.ts`) and **D1** (the four console components, which need a DOM testing
+dependency — a decision, not just a gap). **E4**'s constraint snapshot is a
+small job worth doing alongside any circuit work. **C4** stays a mainnet gate
+behind the MPC ceremony, and **B3** stays a decision rather than a
+recommendation.
 
 B3 is deliberately left as a decision rather than a recommendation: it is worth
 adopting only if the privacy posture should be pinned by tests.
