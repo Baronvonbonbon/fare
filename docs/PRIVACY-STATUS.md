@@ -11,6 +11,12 @@ This is the "what is actually protected" reference. The *designs* live in
 **Read the Open columns first.** Everything closed is closed; the value of a
 document like this is in what still leaks.
 
+Those Open rows are **executable**. `test/expected-leaks.test.ts` asserts that
+each chain-observable leak below is still present, and quotes the row it pins —
+so closing one breaks a test, and editing a row without touching the test breaks
+a different one. The tables and the suite cannot drift apart in either
+direction (TEST-PLAN B3).
+
 ---
 
 ## Customer

@@ -20,11 +20,11 @@ All three tiers pass today.
 
 | Tier | Runner | Tests | Covers |
 |---|---|---|---|
-| `test/*.ts` | `npx hardhat test` | 256 | contracts, ZK verifiers, invariant fuzz, upgradability, **chain-backed relay endpoints**, **per-payer cost ledger**, **relay key custody**, **full-lifecycle e2e**, **order state machine** |
+| `test/*.ts` | `npx hardhat test` | 269 | contracts, ZK verifiers, invariant fuzz, upgradability, **chain-backed relay endpoints**, **per-payer cost ledger**, **relay key custody**, **full-lifecycle e2e**, **order state machine** |
 | `web/src/*.test.ts` | `cd web && npx vitest run` | 326 | 31 of 36 client modules, incl. **all four ops consoles (logic + rendered)**, **burner wallets**, **ZK commitments**, **relay client + router resolution**, **order flow**, **shield notes + funding** |
 | `venue-node/*.test.mjs` | `cd venue-node && node --test` | 94 | economics + **break-even**, scorer, swap, treasury, agent, shieldkeeper + **decorrelation**, **relay HTTP surface + metadata** |
 
-**676 tests, all green**, and all of them now run in CI (§7 E1). The contract tier is the strong part and deserves
+**689 tests, all green**, and all of them now run in CI (§7 E1). The contract tier is the strong part and deserves
 saying so: a seeded-PRNG invariant campaign (`test/invariant.test.ts`) asserts
 escrow conservation and vault solvency after *every* operation and reproduces
 failures from a printed seed; the verifier tests pin fail-safe-before-VK and
@@ -308,13 +308,49 @@ Fixture note: the drop must share no coordinate with the venue. The first run
 reported a longitude "leak" that was the venue's own published longitude,
 because the fixture reused the value.
 
-☐ **B3 — Codify the Open list as expected-leak tests.** Assert that order value,
-tip, delivery timing, and `orders(orderId).venueId` *are* currently public.
-Deliberately backwards, and the point is the coupling: it makes
-[PRIVACY-STATUS.md](PRIVACY-STATUS.md)'s Open columns executable, so closing one
-breaks a test and forces the doc to be updated in the same commit. Adopt only if
-you want the privacy posture pinned by tests — it is a real maintenance
-commitment, not a free win.
+✅ **B3 — The Open list, executable** (`test/expected-leaks.test.ts`, 13 tests).
+Adopted. Every other privacy test here asserts something is *hidden*; this one
+asserts the opposite, deliberately, for each row of
+[PRIVACY-STATUS.md](PRIVACY-STATUS.md)'s Open tables that is a claim about chain
+data.
+
+**The coupling runs both ways**, which is the whole point:
+
+- Close a leak and the test fails — with a message saying so is good news, and
+  to move the row out of the Open table and delete the assertion *in the same
+  commit*.
+- Edit or delete an Open row without touching the tests and the doc-text
+  assertions fail, because each test **quotes the exact row it pins**. Without
+  that direction this would be a list of assertions whose connection to the
+  document was a comment somebody wrote once.
+
+Ten rows are pinned across all four roles: order value and tip (in the event
+*and* in storage — a storage leak cannot be pruned), delivery timing, the venue
+edge, the driver's persistent identity, per-order earnings, the winning bid, the
+surviving open-bid path, settlement naming the venue, and amounts being public
+everywhere.
+
+**Five rows are delegated rather than pinned**, each with the item that owns it:
+the single-party trusted setups (C4 — a process fact, not chain data), relay
+metadata (B5), "anonymity is only as large as usage" (B4's measured numbers),
+the dormant shield keeper (C3 — unreachable until `setShieldKeeper`), and a
+venue's order volume (derived from the venue edge, no separate on-chain fact).
+Listing them is what lets the completeness check account for **every** row
+rather than quietly covering the convenient ones.
+
+**A venue's public location and menu is separated as deliberate, not debt**
+(PRIVACY-TIERS §2). It is pinned anyway, from the other direction: if someone
+later hides a venue's coordinates, that tradeoff — discovery and navigation
+break for no adversary-visible gain — should be argued in review rather than
+shipped as an improvement.
+
+Mutation-checked in all three directions: adding an Open row with no test fails
+the completeness check by name; deleting a pinned row fails two tests; and
+closing a real leak (dropping `tip` from `OrderCreated`) fails with the
+"good news, update the doc" message.
+
+**This is a standing maintenance commitment** — the plan said so when it was
+still a decision, and adopting it does not make that less true.
 
 ✅ **B4 — Anonymity-set assertions** (`test/anonymity-set.test.ts`, 7 tests).
 Every test produces a **number** and asserts it, including the uncomfortably
@@ -1189,15 +1225,16 @@ coverage of product code rather than plumbing.
 15. ✅ **D7 — the shield modules.** Both covered (36 tests); the note tree is
     checked against a root the real circuit verified.
 
-**The harness is complete and every client module now has tests.** What is left
-is not coverage work: **C4** is a mainnet gate behind the MPC ceremony, **B3** is
-a standing decision, and `App.tsx`'s remaining ~2,400 lines are markup rather
-than decisions. The chain-touching halves of `relay.ts`, `shieldnote.ts` and
-`shield.ts` need a node, and are exercised by the hardhat tier and the live e2e
-runs instead.
+16. ✅ **B3 — the Open list, executable.** Adopted: 10 leaks pinned, 5
+    delegated, coupled to PRIVACY-STATUS.md in both directions.
 
-B3 is deliberately left as a decision rather than a recommendation: it is worth
-adopting only if the privacy posture should be pinned by tests.
+**The plan is complete except for one mainnet gate.** **C4** — the deployed-VK ↔
+committed-zkey hash check — stays open behind the MPC ceremony, which is the top
+mainnet blocker and a ceremony rather than a testing task.
+
+`App.tsx`'s remaining ~2,400 lines are markup rather than decisions, and the
+chain-touching halves of `relay.ts`, `shieldnote.ts` and `shield.ts` need a
+node — they are exercised by the hardhat tier and the live e2e runs instead.
 
 ## See also
 
