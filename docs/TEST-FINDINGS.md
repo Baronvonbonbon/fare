@@ -25,6 +25,7 @@ Ordered by what a reader should act on, not by discovery order.
 | 12 | `insertShieldNote` costs 730,615 gas | Informational | 📌 Pinned |
 | 15 | The bps rebate cannot pay for a relay at any realistic fare | **Medium** (economics) | 📌 Quantified |
 | 16 | Docs overstated the ZK anonymity set — buckets partition it | **Medium** (privacy claim) | ✅ Fixed |
+| 17 | Client modules the hardhat tests import must have no relative imports | Low (footgun) | 📌 Documented |
 
 ---
 
@@ -305,6 +306,25 @@ over-estimated it by however much of the tree sits in other buckets.
 
 *Pinned by* `test/anonymity-set.test.ts`, which asserts the per-bucket counts
 against the tree total, so the two cannot drift apart again.
+
+## 17. A client module node imports cannot grow a relative import — **documented**
+
+`test/privacy-e2e.test.ts` pulls the real `web/src/shieldpool.ts` through a
+dynamic import so it tests the shipped path-derivation rather than a copy. Node
+strips TypeScript types but does **not** resolve extensionless specifiers, so
+the moment that module gained an `import … from "./gasbudget"` the whole hardhat
+suite failed with `Cannot find module …/web/src/gasbudget`.
+
+Hit while doing A5, and worth knowing because the failure is opaque: the error
+names the imported file, not the importer, and it breaks tests that have nothing
+to do with the change. The same constraint already blocked importing
+`relaypick.ts` from the venue-node tier (its `./pool` import), which is why B5's
+padding seam is pinned by field name on both sides instead.
+
+Resolved by removing the need: `depositAndSnapshot`'s gas limit became a
+**required** parameter rather than one defaulted from a constant, which suits
+A5 anyway — every caller now budgets deliberately — and leaves `shieldpool.ts`
+with no relative imports. A comment in the file says so.
 
 ---
 

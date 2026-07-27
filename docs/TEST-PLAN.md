@@ -21,10 +21,10 @@ All three tiers pass today.
 | Tier | Runner | Tests | Covers |
 |---|---|---|---|
 | `test/*.ts` | `npx hardhat test` | 222 | contracts, ZK verifiers, invariant fuzz, upgradability, **chain-backed relay endpoints** |
-| `web/src/*.test.ts` | `cd web && npx vitest run` | 117 | 15 of 34 client modules, incl. **all four ops consoles' logic** |
+| `web/src/*.test.ts` | `cd web && npx vitest run` | 124 | 17 of 36 client modules, incl. **all four ops consoles' logic** |
 | `venue-node/*.test.mjs` | `cd venue-node && node --test` | 94 | economics + **break-even**, scorer, swap, treasury, agent, shieldkeeper + **decorrelation**, **relay HTTP surface + metadata** |
 
-**433 tests, all green**, and all of them now run in CI (§7 E1). The contract tier is the strong part and deserves
+**440 tests, all green**, and all of them now run in CI (§7 E1). The contract tier is the strong part and deserves
 saying so: a seeded-PRNG invariant campaign (`test/invariant.test.ts`) asserts
 escrow conservation and vault solvency after *every* operation and reproduces
 failures from a printed seed; the verifier tests pin fail-safe-before-VK and
@@ -171,11 +171,36 @@ machines, so a CI threshold loose enough not to flake would catch nothing. The
 live e2e runs measure it on real hardware instead
 ([E2E-PRIVACY-ZK.md](E2E-PRIVACY-ZK.md)).
 
-☐ **A5 — Paseo gas-reservation regression.** Paseo reserves
-`gasLimit × gasPrice` at submission, so the 500 M weight limit reserves ~500
-PAS — fine for a funded relay, impossible for a fresh driver. This already bit a
-real run ([PRIVACY-STATUS.md](PRIVACY-STATUS.md) §"What is actually live").
-Assert every client-side call sizes its own gas.
+✅ **A5 — Paseo gas-reservation regression** (`web/src/gasbudget.ts` +
+`gasbudget.test.ts`, 7 tests).
+
+Paseo reserves `gasLimit × gasPrice` at **submission**, not execution, so a
+generous limit demands the sender already hold that much whatever the call
+burns. The operator scripts and the relay use 500 M — ~500 PAS reserved at 1000
+gwei, fine from a funded deployer and impossible for a 5 PAS burner. This
+already cost a live run.
+
+The good news from auditing it: **500 M appears only in `scripts/` and
+`venue-node/`**, never in `web/src`. That separation is the design, and it now
+has a test.
+
+Client limits moved into one budgeted module and are asserted against what a
+burner actually holds. Two things are pinned that were previously implicit:
+
+- **`shieldedReturn`'s hold-back must cover its own gas limit.** The reserve and
+  the limit are two numbers that have to agree; raising the limit without the
+  reserve makes every shielded return fail at submission, on a path that only
+  runs when a user cashes out. Now `RETURN_RESERVE_WEI = reservationFor(RETURN_GAS) + margin`,
+  so the relationship is structural rather than a coincidence of two literals.
+- **No gas-limit literal in `web/src` may reserve more than a burner holds.** A
+  source scan with a control that plants a 500 M literal and requires it to be
+  caught — necessary because zero matches is the healthy state, and an empty
+  result would look identical to a broken regex.
+
+`depositAndSnapshot`'s gas limit became a **required** parameter in the process:
+every caller now budgets deliberately, and it keeps `shieldpool.ts` free of
+relative imports, which the hardhat tier needs
+([TEST-FINDINGS.md](TEST-FINDINGS.md) #17).
 
 ---
 
