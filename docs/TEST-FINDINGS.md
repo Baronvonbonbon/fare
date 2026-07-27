@@ -220,6 +220,15 @@ amount, divisible by 10,000 many times over, so the split never truncated.
 Fixed by giving each escrow odd wei. The unit tests caught the mutation; the
 differential one did not, until the fixture was sharpened.
 
+**A sharper version of the same lesson, from B6.** The batch-decorrelation
+tests measured positional uniformity, mean correlation and fixed-point rate —
+and a mutation replacing the shuffle with a random *rotation* passed all of
+them, as did the pre-existing test. A rotation has identical **marginals** to a
+fair shuffle. What it preserves is the **joint** distribution: one recovered
+pairing unravels the whole batch. Measuring each item's behaviour on average
+said nothing about the property that actually matters. Fixed by asserting
+pairwise relative order and adjacency.
+
 The habit worth keeping: after writing an assertion, break the thing it
 describes and confirm it fails. Findings 1, 11, and the `/shield-withdraw`
 context check were all confirmed this way.

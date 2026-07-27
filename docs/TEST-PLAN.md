@@ -22,9 +22,9 @@ All three tiers pass today.
 |---|---|---|---|
 | `test/*.ts` | `npx hardhat test` | 211 | contracts, ZK verifiers, invariant fuzz, upgradability, **chain-backed relay endpoints** |
 | `web/src/*.test.ts` | `cd web && npx vitest run` | 117 | 15 of 34 client modules, incl. **all four ops consoles' logic** |
-| `venue-node/*.test.mjs` | `cd venue-node && node --test` | 86 | economics + **break-even**, scorer, swap, treasury, agent, shieldkeeper, **relay HTTP surface + metadata** |
+| `venue-node/*.test.mjs` | `cd venue-node && node --test` | 94 | economics + **break-even**, scorer, swap, treasury, agent, shieldkeeper + **decorrelation**, **relay HTTP surface + metadata** |
 
-**414 tests, all green**, and all of them now run in CI (§7 E1). The contract tier is the strong part and deserves
+**422 tests, all green**, and all of them now run in CI (§7 E1). The contract tier is the strong part and deserves
 saying so: a seeded-PRNG invariant campaign (`test/invariant.test.ts`) asserts
 escrow conservation and vault solvency after *every* operation and reproduces
 failures from a printed seed; the verifier tests pin fail-safe-before-VK and
@@ -247,9 +247,34 @@ cannot import `relaypick.ts` (its `./pool` import has no extension), and the
 only cross-tier contract is the `_pad` field **name** — which is pinned on both
 sides independently.
 
-☐ **B6 — Timing decorrelation.** Given N deposits, assert the seal ordering does
-not preserve insertion order. The dwell/batch mechanism is tested for
-correctness but never as a *decorrelator*, which is its actual purpose.
+✅ **B6 — Batch decorrelation** (`venue-node/decorrelation.test.mjs`, 8 tests).
+
+The stakes: an observer sees `ShieldQueued` in queue order and pool deposits in
+deposit order. If those two orders agree, the pairing falls out **by position**
+and the two-transaction split has bought nothing. The contract consumes tickets
+FIFO, so the keeper's shuffle is the only thing between the two lists.
+
+`shieldkeeper.test.mjs` already asserted that batches differ across runs. That
+shows randomness exists; it does not show the ordering is *decorrelated*.
+
+Measured instead: positional uniformity at 5σ over 20k trials, mean Pearson r
+between queue index and batch position, the fixed-point rate (~1 per batch, as
+for any random permutation), the same through `planBatch` rather than `shuffle`
+in isolation, and that chunking for the chain ceiling does not re-sort.
+
+**The instructive part.** A first draft passed a mutation that replaced the
+Fisher-Yates with a *random rotation* — and so did the pre-existing test. A
+rotation has identical **marginals** to a fair shuffle: uniform positions, ~1
+fixed point, mean correlation ≈ 0. What it preserves is the **joint**
+structure, which is exactly the property that matters here — an attacker who
+de-anonymises one pairing gets every other pairing for free. Two tests were
+added for that: pairwise relative order (`i` precedes `j` half the time, for
+every pair) and adjacency (a commitment's queue-neighbour must not follow it).
+Under the rotation those report 0.882 and 87.5%.
+
+Mutation-checked both ways: the rotation fails the two joint tests, and the
+classic off-by-one Fisher-Yates (`randomInt(a.length)`) fails five of the
+eight. Stable across repeated runs — the thresholds are ≥5σ.
 
 ---
 
