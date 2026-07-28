@@ -6,16 +6,22 @@ docs and the [integration-plan board](PRODUCT-INTEGRATION-PLAN.md). Grouped by
 
 Legend: ☐ not started · 🟡 partial (verifiable core built, rest deferred) · 🔒 mainnet gate.
 
-> **Live status (Paseo, 2026-07-22).** Full protocol deployed + seeded, now
-> including **F6 (relay gas-rebate)** and **F8 (EIP-2771 forwarder + gasless
-> withdraw)**. Migrated via `scripts/upgrade-f6-f8.ts` (freeze-and-drain).
-> Current addresses: forwarder `0x57C7…97FCe`, vault `0x9f03…C0Ea` (old vault
-> kept live for drain), orders `0x7e73…B32e`, settlement `0xC560…25a8E`, ratings
-> `0xa854…73D6` — see `deployed-addresses.json`. Fees on-chain:
-> `relayRebateBps=2000`, `withdrawFeeBps=100`. **Gasless UX is deployed but
-> dormant** — it activates only once a relay is actually running + reachable
-> (see §1). Everything else falls back to direct, gas-paying calls, so nothing
-> is broken in the meantime.
+> **Live status (Paseo, redeployed 2026-07-26; verified on-chain 2026-07-28).**
+> Full protocol deployed + seeded. Read addresses from `deployed-addresses.json`
+> rather than from here — the 2026-07-26 privacy migration replaced most of
+> them, and a hardcoded list in a doc goes stale silently.
+>
+> **Gasless UX is LIVE, not dormant.** A venue relay runs as a systemd user unit
+> and is reachable at `https://fare-relay.javcon.io` (see §1), so the forwarder
+> and gasless-withdraw paths are active.
+>
+> **The relay fee model is now F6-flat, not the bps rebate.** On-chain:
+> `relayServiceFee = 1.25 PAS` flat, `relayRebateBps = 0`, `feeBps = 250`. The
+> bps rebate needed a ~183 PAS fare to clear the relay's cost, so the profit
+> guard declined every realistic order; a flat fee for a fixed cost replaced it.
+> **Verified end-to-end 2026-07-28** by `scripts/privacy/relay-settle-check.mjs`
+> — one real delivery, `confirmDropoffZK` relayed (200, not 402), relay paid
+> 0.0201 PAS of gas and earned the 1.25 PAS fee.
 
 ---
 
@@ -23,15 +29,18 @@ Legend: ☐ not started · 🟡 partial (verifiable core built, rest deferred) �
 
 The full protocol (incl. F6/F8) is deployed + seeded on Paseo. Remaining ops:
 
-- ☐ **Run a venue relay (this is what turns gasless ON)** — run `venue-node/`
-  with a funded `RELAY_PRIVATE_KEY`, then either build the app with
-  `VITE_RELAY_URL=…` or advertise `PUBLIC_RELAY` from the agent's manifest (the
-  client discovers it). The forwarder + gasless-withdraw vault are already live,
-  so a running relay immediately makes placeBid / cancels / rate / withdraw
-  gasless. **Note the profitability guard:** with real (tiny) testnet fares the
-  relay will *decline* settlement (rebate ≪ gas) and the app prompts "pay your
-  own gas?"; set `RELAY_PROFIT_GUARD=off` for a fully-gasless demo, or raise
-  `relayRebateBps`/`feeBps`. See [venue-node/README](../venue-node/README.md).
+- ✅ **~~Run a venue relay~~ — running.** `fare-relay.service` (systemd user unit,
+  `Restart=always`, starts at boot) runs `venue-node/relay.mjs`, exposed as
+  `https://fare-relay.javcon.io` through a Cloudflare tunnel
+  (`cloudflare-tunnel.service`). The app is built with that as `VITE_RELAY_URL`,
+  so placeBid / cancels / rate / withdraw are gasless now. The relay binds
+  `127.0.0.1` (`RELAY_BIND`) so the tunnel is the only way in, and
+  `ALLOWED_ORIGINS` is pinned to the PWA origin. See
+  [venue-node/README](../venue-node/README.md) → "Run it for real".
+  **The profitability guard is ON and no longer declines** — that was the bps
+  rebate's problem; with the flat `relayServiceFee` a real dropoff settles
+  (verified, see the status note above). `RELAY_PROFIT_GUARD=off` remains the
+  escape hatch if the fee is ever set below cost.
 - ✅ **~~Faucet secret~~ — no longer applicable.** There is no central faucet:
   `/api/drip` and its `DRIP_PRIVATE_KEY` were **deleted** once it turned out
   nothing had called them since funding went KS-only. Gas for a burner comes
@@ -39,9 +48,13 @@ The full protocol (incl. F6/F8) is deployed + seeded on Paseo. Remaining ops:
   above); ESCROW funding comes only from the shielded pool, and `fundBurner`
   throws rather than falling back — a burner funded any other way would carry an
   on-chain edge back to the customer. See [TEST-FINDINGS.md](TEST-FINDINGS.md) #14.
-- ☐ **IPFS (optional, shared menus)** — stand up the DATUM node + set
-  `IPFS_ADD_URL` / `IPFS_API_KEY` / `VITE_IPFS_GATEWAY`. Without it, published
-  menus are device-local (`local://`), single-device only.
+- ☐ **IPFS (optional, shared menus)** — set `IPFS_ADD_URL` / `IPFS_API_KEY` /
+  `VITE_IPFS_GATEWAY`. Without it, published menus are device-local (`local://`),
+  single-device only. **Needs a new host:** this used to point at the DATUM node
+  on `ipfs-datum.javcon.io`, which was decommissioned 2026-07-28 along with the
+  rest of DATUM — that hostname now 404s. The options are the Kubo service in
+  `venue-node/docker-compose.yml` (written, never run) or a hosted pinning
+  service.
 - ☐ **Channel KV (optional; chat / tracking / photo)** — bind `MSG_KV` and
   `PHOTO_KV` namespaces in Cloudflare Pages (Settings → Functions → KV) so
   `/api/msg` and `/api/photo` back the order channel + delivery-photo store.
