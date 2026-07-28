@@ -35,6 +35,11 @@ import { executeRecoverySwap } from "./swap.mjs";
 import { createStore, runOnce as keeperTick } from "./shieldkeeper.mjs";
 
 const PORT = Number(process.env.RELAY_PORT || 8788);
+// Bind address. Defaults to every interface because under docker-compose the
+// relay must be reachable from Caddy over the compose network. When the relay
+// runs bare on a host behind a Cloudflare tunnel, set RELAY_BIND=127.0.0.1 so
+// the only way in is the tunnel — not the LAN.
+const BIND = process.env.RELAY_BIND || "0.0.0.0";
 // A single-signer relay keeps ONE provider (nonce safety — no fallback quorum on
 // getTransactionCount), but prefers a local pine light client when present for
 // trust-minimized reads, else the first of a comma-separated RELAY_RPC_URL list.
@@ -409,6 +414,13 @@ function forwardOrderId(request) {
 const decline = (res, reason, detail, origin) =>
   send(res, 402, { declined: true, error: reason, ...detail }, origin);
 
+// Coalesces concurrent /fund calls for one address. Both callers read the same
+// pre-send balance, so both would see `bal < FUND_MIN` and each send FUND_AMOUNT
+// — the burner gets funded twice out of the subsidy budget (TEST-FINDINGS #2).
+// Keyed by address: a second caller awaits the first's result and reports it,
+// which keeps the client's `{funded, reason}` contract identical to a lone call.
+const fundInFlight = new Map(); // address (lowercased) → Promise<{status, body}>
+
 // ── order-scoped message relay (B3/B2/B6 channel, P2) ────────────────────────
 // In-memory store-and-forward for E2E-sealed, order-scoped envelopes — the
 // decentralized alternative to the shared /api/msg (docs/MESSAGING.md). Content
@@ -487,7 +499,7 @@ async function readJson(req) {
   let size = 0;
   for await (const c of req) {
     size += c.length;
-    if (size > 256 * 1024) throw new Error("body too large");
+    if (size > 256 * 1024) throw Object.assign(new Error("body too large"), { httpStatus: 413 });
     chunks.push(c);
   }
   const body = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
@@ -562,25 +574,36 @@ async function handler(req, res) {
     if (req.method === "POST" && url.pathname === "/fund") {
       const { address } = await readJson(req);
       if (!isAddress(address)) return send(res, 400, { error: "invalid address" }, origin);
-      const bal = await provider.getBalance(address);
-      if (bal >= FUND_MIN) return send(res, 200, { funded: false, reason: "sufficient", balance: formatEther(bal) }, origin);
-      const relayBal = await provider.getBalance(relay.address);
-      if (relayBal < FUND_AMOUNT) return send(res, 503, { error: "relay out of gas budget — operator refill" }, origin);
-      // No-reward action → gate on the rolling subsidy budget.
-      const cost = await estCostWei(() => provider.estimateGas({ from: relay.address, to: address, value: FUND_AMOUNT }), GAS_FUND);
-      // The 5 PAS being sent is the subsidy; the gas to send it is rounding.
-      // Counting only the gas made the window bound the postage and not the
-      // parcel — see TEST-FINDINGS #19.
-      const hold = reserveBudget(cost + FUND_AMOUNT);
-      if (PROFIT_GUARD && !hold.ok) { hold.release(); return decline(res, "subsidy budget exhausted", { action: "fund" }, origin); }
-      let tx;
-      try {
-        tx = await serialize(async () => {
-          const nonce = await allocNonce();
-          return relay.sendTransaction({ to: address, value: FUND_AMOUNT, nonce, gasLimit: GAS_FUND });
-        });
-      } catch (e) { hold.release(); throw e; }
-      return send(res, 200, { funded: true, txHash: tx.hash, amount: formatEther(FUND_AMOUNT) }, origin);
+
+      const key = address.toLowerCase();
+      const pending = fundInFlight.get(key);
+      if (pending) { const r = await pending; return send(res, r.status, r.body, origin); }
+
+      const work = (async () => {
+        const bal = await provider.getBalance(address);
+        if (bal >= FUND_MIN) return { status: 200, body: { funded: false, reason: "sufficient", balance: formatEther(bal) } };
+        const relayBal = await provider.getBalance(relay.address);
+        if (relayBal < FUND_AMOUNT) return { status: 503, body: { error: "relay out of gas budget — operator refill" } };
+        // No-reward action → gate on the rolling subsidy budget.
+        const cost = await estCostWei(() => provider.estimateGas({ from: relay.address, to: address, value: FUND_AMOUNT }), GAS_FUND);
+        // The 5 PAS being sent is the subsidy; the gas to send it is rounding.
+        // Counting only the gas made the window bound the postage and not the
+        // parcel — see TEST-FINDINGS #19.
+        const hold = reserveBudget(cost + FUND_AMOUNT);
+        if (PROFIT_GUARD && !hold.ok) { hold.release(); return { status: 402, body: { declined: true, error: "subsidy budget exhausted", action: "fund" } }; }
+        let tx;
+        try {
+          tx = await serialize(async () => {
+            const nonce = await allocNonce();
+            return relay.sendTransaction({ to: address, value: FUND_AMOUNT, nonce, gasLimit: GAS_FUND });
+          });
+        } catch (e) { hold.release(); throw e; }
+        return { status: 200, body: { funded: true, txHash: tx.hash, amount: formatEther(FUND_AMOUNT) } };
+      })();
+
+      fundInFlight.set(key, work);
+      try { const r = await work; return send(res, r.status, r.body, origin); }
+      finally { fundInFlight.delete(key); }
     }
 
     // ── Sponsored onboarding: seed a fresh driver/venue wallet (Route A) ──────
@@ -989,7 +1012,10 @@ async function handler(req, res) {
 
     return send(res, 404, { error: "not found" }, origin);
   } catch (e) {
-    return send(res, 500, { error: e?.shortMessage ?? e?.message ?? String(e) }, origin);
+    // A rejected request is the client's fault, not ours — carry the status the
+    // thrower chose (e.g. readJson's 413) instead of flattening it to a 500,
+    // which would tell a caller to retry a body that will never be accepted.
+    return send(res, e?.httpStatus ?? 500, { error: e?.shortMessage ?? e?.message ?? String(e) }, origin);
   }
 }
 
@@ -1050,8 +1076,8 @@ if (SHIELD_KEEPER) setInterval(shieldKeeperTick, SHIELD_KEEPER_POLL_MS).unref?.(
 // this module must never bind PORT or the suite collides with a running relay.
 export { server, handler, relay, provider, clientKey, rateLimitKeys };
 
-if (IS_MAIN) server.listen(PORT, () => {
-  console.log(`[relay] FARE venue relay on :${PORT}`);
+if (IS_MAIN) server.listen(PORT, BIND, () => {
+  console.log(`[relay] FARE venue relay on ${BIND}:${PORT}`);
   console.log(`[relay] relay account: ${relay.address}`);
   console.log(`[relay] settlement:    ${settlementAddr}`);
   console.log(`[relay] relayable:     ${[...RELAYABLE].join(", ")}`);

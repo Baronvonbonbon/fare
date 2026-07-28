@@ -267,3 +267,59 @@ test("sponsored onboarding validates role and address once enabled", async () =>
   assert.equal(bad.status, 400);
   assert.match((await bad.json()).error, /role must be driver\|venue/);
 });
+
+// ── TEST-FINDINGS #3: an oversized body is the caller's fault ────────────────
+
+test("an oversized body is refused as 413, not reported as a server error", async () => {
+  // readJson caps the body at 256 KB. That rejection used to fall through the
+  // handler's catch-all and surface as a 500, which tells a client the server
+  // broke and the request is worth retrying — it is neither.
+  const res = await post("/msg", JSON.stringify({ topic: topicA, msg: { pad: "x".repeat(300 * 1024) } }));
+  assert.equal(res.status, 413);
+  assert.match((await res.json()).error, /too large/);
+});
+
+// ── TEST-FINDINGS #2: concurrent /fund must not double-fund ─────────────────
+
+test("two concurrent /fund calls for one address send exactly one transaction", async () => {
+  process.env.RATE_MAX = "10000";
+  const mod = await import("./relay.mjs?fundrace");
+  const url = await new Promise((r) =>
+    mod.server.listen(0, "127.0.0.1", () => r(`http://127.0.0.1:${mod.server.address().port}`)));
+  after(() => mod.server.close());
+
+  const burner = "0x" + "cd".repeat(20);
+  const relayAddr = mod.relay.address.toLowerCase();
+
+  // Both callers read the burner as empty — the interleaving that made each of
+  // them decide, independently, that it had to fund.
+  let released;
+  const gate = new Promise((r) => { released = r; });
+  mod.provider.getBalance = async (addr) => {
+    if (String(addr).toLowerCase() === relayAddr) return 10n ** 21n; // relay is solvent
+    await gate;                                                      // hold caller 1 inside the check
+    return 0n;                                                       // burner is empty
+  };
+  mod.provider.getTransactionCount = async () => 0;
+  mod.provider.getFeeData = async () => ({ maxFeePerGas: 1n });
+  mod.provider.estimateGas = async () => 21_000n;
+
+  let sends = 0;
+  mod.relay.sendTransaction = async () => { sends++; return { hash: "0x" + "ab".repeat(32) }; };
+
+  const fund = () => fetch(`${url}/fund`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ address: burner }),
+  });
+
+  const both = Promise.all([fund(), fund()]);
+  setTimeout(released, 50); // let the second request arrive while the first is mid-check
+  const [a, b] = await both;
+
+  assert.equal(sends, 1, "the second caller must not send its own funding transaction");
+  assert.equal(a.status, 200);
+  assert.equal(b.status, 200);
+  // The coalesced caller reports the same outcome, so the client contract is
+  // indistinguishable from having made a single call.
+  assert.deepEqual(await a.json(), await b.json());
+});

@@ -41,8 +41,12 @@ web/public/shield/*.zkey
 # circom binary, if fetched locally for scripts/setup-shieldnote.mjs
 /circom
 
-# venue node relay secrets
+# venue node relay secrets. The wildcard catches operational copies too — an
+# `.env.bak-<date>` taken before an edit holds RELAY_PRIVATE_KEY just like the
+# original, and is otherwise one `git add -A` away from being committed.
 venue-node/.env
+venue-node/.env.*
+!venue-node/.env.example
 venue-node/node_modules/
 
 # Kusama Shield probe scratch (ephemeral notes)

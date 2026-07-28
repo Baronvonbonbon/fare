@@ -233,6 +233,30 @@ npm install
 npm run relay                   # node --env-file=.env relay.mjs  (Node 22+)
 ```
 
+### Run it for real (systemd + Cloudflare tunnel)
+
+`npm run relay` dies with your shell. For a relay that survives a reboot, run it
+as a **systemd user unit** and expose it through a tunnel rather than a forwarded
+port. That is how the live demo relay is deployed:
+
+```bash
+systemctl --user status fare-relay        # the relay itself
+systemctl --user status cloudflare-tunnel # the only public path to it
+journalctl --user -u fare-relay -f
+```
+
+Two things make this safe to leave running:
+
+- **`RELAY_BIND=127.0.0.1` in `.env`.** The relay holds a funded key, so bare on
+  a host it should not listen on the LAN — the tunnel is the only way in. Leave
+  `RELAY_BIND` unset under docker-compose, where Caddy has to reach it over the
+  compose network.
+- **`ALLOWED_ORIGINS=https://<your-pwa-host>`, not `*`.** `*` is only reasonable
+  behind a proxy that is itself rate-limiting. A tunnel that forwards straight to
+  the relay is not that, so pin the origin and rely on in-process `RATE_MAX`.
+
+User units only start at boot if lingering is on: `loginctl enable-linger $USER`.
+
 ### Point the app at it
 Build the web app with `VITE_RELAY_URL=https://<your-relay-host>`. The PWA then
 prefers this relay for gas sponsorship and settlement submission, falling back to
