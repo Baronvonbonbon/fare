@@ -18,7 +18,7 @@ const VENUE_LON = -122_419_400;
 
 const FUND = {
   venue: eth("60"), // gas for registerVenue + vault.withdraw
-  driver: eth("60"), // gas for register + placeBid + vault.withdraw
+  driver: eth("60"), // gas for register + commitBid + vault.withdraw
   relay: eth("600"), // 500M-weight settlement calls reserve ~500 PAS each
 };
 

@@ -62,9 +62,7 @@ import {
 import { proveProximity, positionCommit } from "./zk";
 import { sponsorGas, relaySettle, relayForward, relayWithdraw, ensureGas, activeRelayUrl, sponsorOnboarding, fundBurner, forwarderAvailable } from "./relay";
 import { initShieldedFunder } from "./shield";
-import {
-  shieldBuckets, planShielding, queueShieldedPayout, claimShieldedPayouts, pendingShieldedPayouts,
-} from "./shieldpayout";
+import { shieldBuckets, planShielding } from "./shieldpayout";
 import {
   zkShieldAvailable, insertShieldNote, spendShieldNote, pendingShieldNotes,
 } from "./shieldnote";
@@ -234,32 +232,6 @@ export default function App() {
         toRead.map(async (idStr) => {
           const id = BigInt(idStr);
           const o = await c.orders.orders(id);
-          let bidders: OrderRow["bidders"] = [];
-          if (Number(o.status) === 1) {
-            const addrs: string[] = await c.orders.biddersOf(id);
-            // Enrich each bid with the driver's on-chain reputation so the
-            // customer can weigh trust against price (A6).
-            const rows = await Promise.all(
-              addrs.map(async (addr) => {
-                const amount: bigint = await c.orders.bidOf(id, addr);
-                let delivered = 0, failed = 0, ratingX100 = 0, ratingN = 0;
-                try {
-                  const d = await c.drivers.drivers(addr);
-                  delivered = Number(d.delivered);
-                  failed = Number(d.failed);
-                } catch {}
-                if (c.ratings) {
-                  try {
-                    const [avg, n] = await c.ratings.driverRating(addr);
-                    ratingX100 = Number(avg);
-                    ratingN = Number(n);
-                  } catch {}
-                }
-                return { addr, amount, delivered, failed, ratingX100, ratingN };
-              })
-            );
-            bidders = rows.filter((b) => b.amount > 0n).sort((a, b) => (a.amount < b.amount ? -1 : 1));
-          }
           return {
             id,
             customer: o.customer,
@@ -276,7 +248,6 @@ export default function App() {
             pickupDeadline: o.pickupDeadline,
             deliveryDeadline: o.deliveryDeadline,
             token: o.token,
-            bidders,
           } as OrderRow;
         })
       );
@@ -838,11 +809,10 @@ function VaultStrip({ vaultBal, vaultTokenBal, pendingDust, busy, act, signed, s
 /// fixed denomination now, a relay keeper deposits it in a batch with other
 /// people's, and the resulting note spends like any other.
 ///
-/// Hidden entirely when no pool/keeper is configured: there is nothing honest to
-/// offer without one.
+/// Hidden entirely when no pool is configured: there is nothing honest to offer
+/// without one.
 function ShieldEarningsStrip({ vaultBal, busy, signed, say, refresh }: any) {
   const [buckets, setBuckets] = useState<bigint[]>([]);
-  const [pending, setPending] = useState(() => pendingShieldedPayouts());
   const [zkNotes, setZkNotes] = useState(() => pendingShieldNotes());
   const [zk, setZk] = useState(false); // ZK path wired on-chain?
   const [working, setWorking] = useState(false);
@@ -851,40 +821,25 @@ function ShieldEarningsStrip({ vaultBal, busy, signed, say, refresh }: any) {
   useEffect(() => { shieldBuckets().then(setBuckets).catch(() => setBuckets([])); }, []);
   useEffect(() => { zkShieldAvailable().then(setZk).catch(() => setZk(false)); }, []);
 
-  // Deposited payouts only become spendable once this device replays the batch,
-  // so sweep for claimable ones on mount rather than making it a manual step.
-  useEffect(() => {
-    if (!relay) return;
-    claimShieldedPayouts(relay)
-      .then((n) => { if (n > 0) { setPending(pendingShieldedPayouts()); say(`${n} shielded payout${n > 1 ? "s" : ""} now spendable`); } })
-      .catch(() => {});
-  }, [relay]);
-
   const plan = useMemo(() => planShielding(vaultBal, buckets), [vaultBal, buckets]);
   if (!relay || buckets.length === 0) return null;
 
   const shieldable = plan.reduce((a, b) => a + b, 0n);
-  const queued = pending.reduce((a, p) => a + BigInt(p.bucketWei), 0n);
 
   async function shieldAll() {
     if (!signed) return say("Connect a wallet first", true);
     setWorking(true);
     try {
-      if (zk) {
-        // Phase 3: each bucket becomes a note, spendable with a proof that names
-        // nobody. No keeper, no batch to wait for.
-        for (const bucket of plan) {
-          await insertShieldNote(signed.vault.runner, relay!, bucket);
-          setZkNotes(pendingShieldNotes());
-        }
-        say(`Shielded ${fmt(shieldable)} PAS into ${plan.length} note${plan.length > 1 ? "s" : ""} — spend when ready`);
-      } else {
-        for (const bucket of plan) {
-          await queueShieldedPayout(signed.vault.runner, relay!, bucket);
-          setPending(pendingShieldedPayouts());
-        }
-        say(`Queued ${fmt(shieldable)} PAS — deposited once the batch fills`);
+      // Each bucket becomes a note, spendable with a proof that names nobody.
+      // There is no keeper fallback: if the ZK path is not wired on-chain we
+      // refuse rather than route earnings through a keeper that could see the
+      // account↔commitment pairing.
+      if (!zk) return say("This deployment has no ZK note pool — shielding is unavailable", true);
+      for (const bucket of plan) {
+        await insertShieldNote(signed.vault.runner, relay!, bucket);
+        setZkNotes(pendingShieldNotes());
       }
+      say(`Shielded ${fmt(shieldable)} PAS into ${plan.length} note${plan.length > 1 ? "s" : ""} — spend when ready`);
       await refresh();
     } catch (e: any) {
       say(e?.reason ?? e?.shortMessage ?? e?.message ?? String(e), true);
@@ -925,11 +880,6 @@ function ShieldEarningsStrip({ vaultBal, busy, signed, say, refresh }: any) {
       <div>
         <div className="lbl">shield earnings — unlink payouts from your address</div>
         <div className="amt">{fmt(shieldable)} PAS shieldable</div>
-        {queued > 0n && (
-          <div className="hint">
-            {fmt(queued)} PAS queued in {pending.length} note{pending.length > 1 ? "s" : ""} — waiting for the batch to fill
-          </div>
-        )}
         {zkNotes.length > 0 && (
           <div className="hint">
             {zkNotes.length} shielded note{zkNotes.length > 1 ? "s" : ""} held — spend them into the pool when you like
@@ -940,7 +890,7 @@ function ShieldEarningsStrip({ vaultBal, busy, signed, say, refresh }: any) {
             zero-knowledge path: no keeper holds your note, and spending names nobody
           </div>
         )}
-        {shieldable === 0n && queued === 0n && (
+        {shieldable === 0n && (
           <div className="hint">
             below the smallest denomination ({fmt(buckets[0])} PAS) — earn a little more to shield
           </div>
@@ -1723,7 +1673,7 @@ function CustomerOrder({ o, venues, act, busy, session, say }: any) {
       {o.status === 1 && (
         <>
           <div className="section-note">driver bids — you pick, price isn't everything</div>
-          {o.bidders.length === 0 && sealedBids.length === 0 && <p className="hint">Waiting for driver bids…</p>}
+          {sealedBids.length === 0 && <p className="hint">Waiting for driver bids…</p>}
 
           {/* Sealed bids: readable only here, and only shown after the revealed
               terms are checked against the on-chain commitment. */}
@@ -1746,41 +1696,6 @@ function CustomerOrder({ o, venues, act, busy, session, say }: any) {
                     }
                     await ensureGas(o.customer, b.amountWei + parse("0.2"));
                     return os!.orders.acceptSealedBid(o.id, b.driver, b.amountWei, b.salt, { value: b.amountWei });
-                  })}>
-                  Accept
-                </button>
-              </span>
-            </div>
-          ))}
-          {o.bidders.map((b: any) => (
-            <div className="kv" key={b.addr}>
-              <span className="k mono">
-                {short(b.addr)}
-                <span className="hint" title="rating · delivered / failed on-chain">
-                  {b.ratingN > 0 ? ` · ★${(b.ratingX100 / 100).toFixed(1)} (${b.ratingN})` : ""}
-                  {" "}· ✓{b.delivered} ✗{b.failed}
-                  {b.delivered + b.failed > 0
-                    ? ` · ${Math.round((b.delivered / (b.delivered + b.failed)) * 100)}%`
-                    : " · new"}
-                </span>
-              </span>
-              <span className="v">
-                <span className="amount">{fmtAsset(b.amount, o.token)} </span>
-                <button className="btn small" disabled={busy || orphaned}
-                  onClick={() => act("Accept bid", async () => {
-                    // Value action → must go direct; ensure the order burner has
-                    // gas first. Gasless actions skip this entirely.
-                    if (assetOf(o.token).isToken) {
-                      // Escrow the fare in the order's stablecoin: the burner
-                      // self-mints it (testnet faucet), approves, then accepts.
-                      await ensureGas(o.customer, parse("0.3"));
-                      const w = walletFor(o.customer)!;
-                      await mintStablecoin(w, o.customer, b.amount);
-                      await approveToken(w, o.token, ADDRESSES.orders, b.amount);
-                      return os!.orders.acceptBidERC20(o.id, b.addr);
-                    }
-                    await ensureGas(o.customer, b.amount + parse("0.2"));
-                    return os!.orders.acceptBid(o.id, b.addr, { value: b.amount });
                   })}>
                   Accept
                 </button>
@@ -2038,23 +1953,19 @@ function DriverAccount({ me, act, busy, signed, say }: any) {
 
 function DriverBid({ o, venues, act, busy, signed, session, dist, say }: any) {
   const [amount, setAmount] = useState("");
-  const [sealed, setSealed] = useState(false); // contract supports sealed bids?
+  const [sealed, setSealed] = useState(false); // contract exposes commitBid?
   const [mine, setMine] = useState(() => myBids(o.id));
   const relay = activeRelayUrl();
-  const myBid = o.bidders.find(
-    (b: any) => session && b.addr.toLowerCase() === session.address.toLowerCase()
-  );
   useEffect(() => { sealedBidsAvailable().then(setSealed).catch(() => setSealed(false)); }, []);
 
-  /// Sealed by default when both the contract and a relay support it: an open
-  /// bid publishes this driver's price and availability to everyone, forever.
+  /// Sealed is the ONLY way to bid. There used to be an open-bid fallback here
+  /// for when no relay was reachable; it published this driver's price and
+  /// availability on-chain forever, and a privacy property you can fall out of
+  /// by being unlucky about relay reachability is not a property. So this now
+  /// fails closed: no relay, no bid.
   const canSeal = sealed && !!relay;
 
   async function bid() {
-    if (!canSeal) {
-      return act("Place bid", () =>
-        relayForward("orders", signed.orders, "placeBid", [o.id, parseAsset(amount, o.token)]));
-    }
     try {
       await placeSealedBid(signed.orders.runner, relay!, o.id, o.customer, parseAsset(amount, o.token));
       setMine(myBids(o.id));
@@ -2073,9 +1984,6 @@ function DriverBid({ o, venues, act, busy, signed, session, dist, say }: any) {
         <span className={`badge ${badgeClass(o.status)}`}>{STATUS[o.status]}</span>
       </div>
       <OrderMeta o={o} venues={venues} />
-      {myBid && (
-        <div className="kv"><span className="k">your bid</span><span className="v amount">{fmtAsset(myBid.amount, o.token)}</span></div>
-      )}
       {mine.map((b) => (
         <div className="kv" key={b.hash}>
           <span className="k">your sealed bid</span>
@@ -2085,8 +1993,8 @@ function DriverBid({ o, venues, act, busy, signed, session, dist, say }: any) {
       <div className="btn-row">
         <input style={{ flex: 1, minWidth: 120 }} placeholder={`≤ ${fmtAsset(o.maxFare, o.token)}`}
           value={amount} onChange={(e) => setAmount(e.target.value)} inputMode="decimal" />
-        <button className="btn small" disabled={busy || !amount} onClick={bid}>
-          {canSeal ? "Bid (sealed)" : myBid ? "Rebid" : "Bid"}
+        <button className="btn small" disabled={busy || !amount || !canSeal} onClick={bid}>
+          Bid (sealed)
         </button>
         {mine.map((b) => (
           <button className="btn ghost small" key={b.hash} disabled={busy}
@@ -2097,16 +2005,12 @@ function DriverBid({ o, venues, act, busy, signed, session, dist, say }: any) {
             Withdraw sealed
           </button>
         ))}
-        {myBid && (
-          <button className="btn ghost small" disabled={busy}
-            onClick={() => act("Withdraw bid", () => relayForward("orders", signed.orders, "withdrawBid", [o.id]))}>
-            Withdraw
-          </button>
-        )}
       </div>
-      {!canSeal && sealed === false && (
+      {!canSeal && (
         <div className="hint">
-          open bid — this publishes your price and availability on-chain, permanently
+          {sealed
+            ? "no relay reachable — bidding is disabled rather than falling back to an open bid that would publish your price and availability on-chain, permanently"
+            : "this deployment predates sealed bids — bidding is disabled rather than publishing your price and availability on-chain"}
         </div>
       )}
     </div>

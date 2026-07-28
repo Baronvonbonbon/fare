@@ -1,14 +1,14 @@
 {
   "network": "polkadotTestnet",
   "chainId": 420420417,
-  "deployedAt": "2026-07-26T04:44:49.446Z",
+  "deployedAt": "2026-07-28T22:23:32.730Z",
   "addresses": {
     "router": "0xD6643539347439583A86F7c9EE46BC0dFD1cD91c",
     "pauseRegistry": "0x631758fCC31a5cfA826f39397A995E873D387D17",
-    "vault": "0x1ebE61af02d4b5E6083089f220e5D95766643a13",
+    "vault": "0xD5cd5b5F2099ccF514F769dEf7f1e5b2e2023A7E",
     "drivers": "0x8f7f8c8197548249aaAE2BcA7b59A703Dd106996",
     "venues": "0x6Ec53c31bDC858B5995D9d6858fBe93EB14bD352",
-    "orders": "0x0e638033a89Fa4367acEbb57F62f59776d1c6437",
+    "orders": "0x9eD223784CacbE61369d345CE99a2f89f15D248F",
     "settlement": "0xC560fE5E50694E7F9c9b567279640D7518925a8E",
     "disputes": "0x7d3619FeDCf4591cd0b40D80adcFB1671F0294b7",
     "locationVerifier": "0xfF3Ed3Bd62D8664f55799ffB8D28E399d53b28E9",

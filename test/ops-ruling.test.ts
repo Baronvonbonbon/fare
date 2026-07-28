@@ -3,6 +3,7 @@ import { ethers } from "hardhat";
 import { time } from "@nomicfoundation/hardhat-toolbox/network-helpers";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
+import { assignSealed } from "./helpers/bids";
 
 // The differential half of TEST-PLAN C5: the arbiter console's escrow-split
 // PREVIEW against what FareOrders.resolveDisputed actually does.
@@ -74,8 +75,7 @@ describe("arbiter console: the ruling preview matches the chain", () => {
   async function ruleOn(f: any, orderValue: bigint, fare: bigint, bps: number, orderId: bigint) {
     const commit = ethers.keccak256(abi.encode(["int32", "int32", "uint256"], [37_784_913, -122_431_777, DROP_SALT]));
     await f.orders.connect(f.customer).createOrder(1n, commit, orderValue, 0, fare, 0, 0, { value: orderValue });
-    await f.orders.connect(f.driver).placeBid(orderId, fare);
-    await f.orders.connect(f.customer).acceptBid(orderId, f.driver.address, { value: fare });
+    await assignSealed(f.orders, orderId, f.driver, f.customer, fare);
 
     const now = await time.latest();
     const dAtt = { orderId, phase: 1, actor: f.driver.address, lat: NEAR.lat, lon: NEAR.lon, timestamp: now };
@@ -140,8 +140,7 @@ describe("arbiter console: the ruling preview matches the chain", () => {
     const f = await deployAll();
     const commit = ethers.keccak256(abi.encode(["int32", "int32", "uint256"], [37_784_913, -122_431_777, DROP_SALT]));
     await f.orders.connect(f.customer).createOrder(1n, commit, PAS(1), 0, PAS("0.7"), 0, 0, { value: PAS(1) });
-    await f.orders.connect(f.driver).placeBid(1n, PAS("0.7"));
-    await f.orders.connect(f.customer).acceptBid(1n, f.driver.address, { value: PAS("0.7") });
+    await assignSealed(f.orders, 1n, f.driver, f.customer, PAS("0.7"));
     await f.disputes.connect(f.customer).openDispute(1n, "ipfs://e");
 
     // Chain: bad-bps. Console: throws rather than rendering an impossible split.

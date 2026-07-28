@@ -6,6 +6,7 @@ import type { HardhatEthersSigner } from "@nomicfoundation/hardhat-ethers/signer
 import { poseidonContract } from "circomlibjs";
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
+import { assignSealed } from "./helpers/bids";
 
 // Gas snapshot (TEST-PLAN A1). Every user-facing path is measured on a local
 // chain and diffed against a committed baseline, so a change that makes a
@@ -187,8 +188,7 @@ describe("gas snapshot", function () {
   /// …assigned to `driver` through the open-bid path.
   async function assigned(f: any) {
     const id = await opened(f);
-    await f.orders.connect(f.driver).placeBid(id, FARE);
-    await f.orders.connect(f.customer).acceptBid(id, f.driver.address, { value: FARE });
+    await assignSealed(f.orders, id, f.driver, f.customer, FARE);
     return id;
   }
 
@@ -238,19 +238,6 @@ describe("gas snapshot", function () {
     ));
   });
 
-  it("orders.placeBid", async () => {
-    const f = await loadFixture(deployAll);
-    const id = await opened(f);
-    await measure("orders.placeBid", f.orders.connect(f.driver).placeBid(id, FARE));
-  });
-
-  it("orders.acceptBid", async () => {
-    const f = await loadFixture(deployAll);
-    const id = await opened(f);
-    await f.orders.connect(f.driver).placeBid(id, FARE);
-    await measure("orders.acceptBid",
-      f.orders.connect(f.customer).acceptBid(id, f.driver.address, { value: FARE }));
-  });
 
   it("settlement.confirmPickup", async () => {
     const f = await loadFixture(deployAll);
@@ -338,13 +325,6 @@ describe("gas snapshot", function () {
   });
 
   // ── shielded payouts ──────────────────────────────────────────────────────
-
-  it("vault.queueShieldCredit", async () => {
-    const f = await loadFixture(deployAll);
-    const id = await assigned(f);
-    await delivered(f, id);
-    await measure("vault.queueShieldCredit", f.vault.connect(f.driver).queueShieldCredit(PAS(1)));
-  });
 
   it("vault.insertShieldNote", async () => {
     const f = await loadFixture(deployAll);

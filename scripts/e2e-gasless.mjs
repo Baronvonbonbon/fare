@@ -2,7 +2,7 @@
 // FareOrders). A customer wallet with ZERO native PAS places and funds a USDC
 // order entirely by SIGNATURES:
 //   permit (EIP-2612) + ForwardRequest(createOrderERC20WithPermit) → relay executes
-//   → driver bids → ForwardRequest(acceptBidERC20) → relay executes
+//   → driver bids (sealed) → ForwardRequest(acceptSealedBidERC20) → relay executes
 //   → confirmPickup → confirmDropoffZK → withdrawToken payouts.
 // The relay (venue-node wallet) pays ALL gas; the customer's PAS balance stays 0.
 import { ethers } from "ethers";
@@ -11,6 +11,10 @@ import * as snarkjs from "snarkjs";
 import fs from "fs";
 import path from "path";
 import { ROOT, provider, book, env, loadState, waitTx, leanGas, GAS_PRICE_WEI, fmt } from "./shield/e2e-lib.mjs";
+
+// Sealed bids are the only bid path. A fixed salt is fine for a scripted run:
+// in production the driver picks it and it travels to the customer off-chain.
+const BID_SALT = ethers.keccak256(ethers.toUtf8Bytes("fare-e2e-bid"));
 
 const OFF_LAT = 90_000_000n, OFF_LON = 180_000_000n;
 const encLat = (m) => BigInt(m) + OFF_LAT, encLon = (m) => BigInt(m) + OFF_LON;
@@ -79,10 +83,10 @@ async function main() {
   ], deployer);
   const ordersIface = new ethers.Interface([
     "function createOrderERC20WithPermit(address token, uint64 venueId, bytes32 dropCommit, uint96 orderValue, uint96 tip, uint96 maxFare, uint64 pw, uint64 dw, uint256 permitValue, uint256 permitDeadline, uint8 v, bytes32 r, bytes32 s)",
-    "function acceptBidERC20(uint256 orderId, address driver)",
+    "function acceptSealedBidERC20(uint256 orderId, address driver, uint96 amount, bytes32 salt)",
   ]);
   const ordersRead = new ethers.Contract(b.orders, ["function nextOrderId() view returns(uint256)", "function statusOf(uint256) view returns(uint8)", "function treasury() view returns(address)", "function orders(uint256) view returns (address customer, uint64 venueId, uint8 status, address driver, uint96 orderValue, uint96 tip, uint96 fare, uint96 maxFare, uint96 escrow, bytes32 dropCommit, uint64 createdAt, uint64 pickupWindowSecs, uint64 deliveryWindowSecs, uint64 pickupDeadline, uint64 deliveryDeadline)"], prov);
-  const orders = new ethers.Contract(b.orders, ["function placeBid(uint256,uint96)"], D);
+  const orders = new ethers.Contract(b.orders, ["function commitBid(uint256,bytes32,bytes32)", "function bidHashOf(uint256,address,uint96,bytes32) pure returns (bytes32)"], D);
   const vault = new ethers.Contract(b.vault, ["function tokenBalanceOf(address,address) view returns(uint256)", "function withdrawToken(address)"], prov);
   const FWD = new ethers.Contract(b.forwarder, [
     "function nonces(address) view returns(uint256)",
@@ -139,17 +143,18 @@ async function main() {
   console.log(`   orderId ${orderId}  o.customer=${o.customer} (== customer: ${o.customer.toLowerCase() === customer.address.toLowerCase()})  escrow ${fmt6(o.escrow)} USDC`);
   await assertZeroGas("after gasless create");
 
-  // ── 3. driver placeBid ──────────────────────────────────────────────────────
-  console.log(`\n3. driver placeBid ${fmt6(FARE)} USDC`);
-  const bt = await orders.placeBid(orderId, FARE, { gasLimit: await leanGas(orders.placeBid, [orderId, FARE]) });
-  await rec(prov, { step: "G.bid", party: "driver", action: "placeBid", hash: bt.hash });
+  // ── 3. driver commitBid (sealed) ────────────────────────────────────────────
+  console.log(`\n3. driver commitBid ${fmt6(FARE)} USDC (sealed)`);
+  const bidHash = await orders.bidHashOf(orderId, D.address, FARE, BID_SALT);
+  const bt = await orders.commitBid(orderId, bidHash, ethers.ZeroHash, { gasLimit: await leanGas(orders.commitBid, [orderId, bidHash, ethers.ZeroHash]) });
+  await rec(prov, { step: "G.bid", party: "driver", action: "commitBid", hash: bt.hash });
 
-  // ── 4. GASLESS acceptBidERC20 (forward, relay executes) ─────────────────────
-  console.log(`\n4. GASLESS acceptBidERC20 — customer signs, relay executes`);
-  const acceptData = ordersIface.encodeFunctionData("acceptBidERC20", [orderId, D.address]);
+  // ── 4. GASLESS acceptSealedBidERC20 (forward, relay executes) ───────────────
+  console.log(`\n4. GASLESS acceptSealedBidERC20 — customer signs, relay executes`);
+  const acceptData = ordersIface.encodeFunctionData("acceptSealedBidERC20", [orderId, D.address, FARE, BID_SALT]);
   const req2 = await signForward(acceptData);
   const tx2 = await FWD.execute(req2, { gasLimit: 500_000_000n, nonce: await prov.getTransactionCount(R.address) });
-  await rec(prov, { step: "G.accept", party: "relay(venue-node)", action: "forward:acceptBidERC20", hash: tx2.hash, tokenValue: FARE });
+  await rec(prov, { step: "G.accept", party: "relay(venue-node)", action: "forward:acceptSealedBidERC20", hash: tx2.hash, tokenValue: FARE });
   console.log(`   status ${await ordersRead.statusOf(orderId)} (2=Assigned)`);
   await assertZeroGas("after gasless accept");
 

@@ -113,82 +113,55 @@ deposits being indistinguishable from yours, which means batching.
 
 ---
 
-## 4. Shielded payouts (phase 1 — this branch)
+## 4. Shielded payouts — the keeper path, and why it was removed
 
-Split the payout into two transactions with no shared identity:
+**This section describes a design that no longer exists in the code.** It is kept
+because §3's finding still holds and because the reasoning explains why the
+replacement looks the way it does.
 
-```
-T1  driver signs an EIP-712 shield authorization (off-chain) and hands the
-    keeper its commitment OFF-CHAIN — the commitment must never ride in this
-    transaction's calldata, which is as public and permanent as storage.
-    relay submits it → vault moves `bucket` from balanceOf[driver] into a
-                       shared buffer and issues a TICKET
-                       ── on-chain: (driver, bucket, ticket#). No commitment. ──
+The keeper path split a payout across three transactions so that none carried
+both an account and a pool commitment: `queueShieldCredit` moved a fixed bucket
+into a shared buffer and took a ticket (naming the account, no commitment);
+`sealShieldBatch` consumed the N oldest tickets FIFO (naming no commitment); and
+`depositShieldBatch` deposited N commitments (naming no account, no ticket).
+Bucketing was load-bearing — without fixed denominations the amounts re-identify
+the entries and the batch is decorative.
 
-    ...dwell: the queue fills with other drivers' and venues' tickets...
+It worked, and it was measured working. But it bought less than it appeared to,
+and it cost something real:
 
-T2  keeper executes a batch of N commitments in ONE tx, consuming the N
-    oldest tickets FIFO
-    → N × pool.depositNative{value: bucket}(commitment_i)
-                       ── on-chain: N commitments. No account. ──
-```
+- **The anonymity set was the seal size**, not the pool. Eight payouts sealed
+  together hid among eight. The ZK note path hides a spend among every unspent
+  note of its bucket in the tree.
+- **The keeper held the pairing and could divert the buffer.** The vault cannot
+  check that a batched commitment belongs to a ticket holder, because knowing
+  that is exactly the pairing the design destroys. An authorized keeper could
+  submit commitments it controlled, consume the tickets and keep the notes. That
+  is a custody escalation over the plain vault, where a relay can submit but
+  never divert.
+- **It traded liveness for privacy.** A completed delivery produced earnings that
+  could not move until `shieldMinBatch` strangers happened to cash out the same
+  denomination.
 
-An observer of T2 sees N equal-value deposits from the vault. An observer of T1
-sees that a driver moved a *bucketed* amount into the buffer. Pairing the two
-requires guessing which of the N commitments is theirs — the anonymity set is the
-batch, on top of whatever the pool already holds.
+The mitigation was governance: only an authorized keeper could execute, so the
+risk was dormant while nobody held that authorization. That is a weak kind of
+safety — it is one `setShieldKeeper` transaction from being live, and a property
+that an owner call can void is not a property. Once phase 3 (§7) shipped a path
+with no keeper in it at all, keeping this one meant maintaining a strictly worse
+mechanism whose only real function was to be a footgun.
 
-Design rules that make this hold:
+So `queueShieldCredit`, `queueShieldCreditFor`, `sealShieldBatch`,
+`depositShieldBatch`, `reclaimShieldTicket`, `setShieldKeeper`, `setShieldParams`
+and the ticket state are **gone from `FareVault`**, along with the relay's
+`/shield-queue` and `/shield-claim` endpoints, `venue-node/shieldkeeper.mjs` and
+the client's queue/claim half. What remains of phase 1 is the part both paths
+shared: the fixed **denominations**, which are what make any of this work.
 
-- **Denomination bucketing.** Deposits are fixed sizes (e.g. 1 / 5 / 25 PAS).
-  A driver with 7.3 PAS shields 5 + 1 + 1 and leaves 0.3 credited. Without this,
-  amounts are fingerprints and the batch is decorative.
-- **Minimum batch size.** Executing a batch of 1 is the §3 anti-pattern with extra
-  steps. The queue must not execute below a floor (and the floor is a real
-  liveness/latency tradeoff — see §8).
-- **Dwell.** A batch must not chase a just-queued ticket, or timing re-links it.
-  Enforced on-chain (`shieldMinDwell`) rather than left to keeper discipline.
-- **Ticket ownership is on-chain, commitment ownership is not.** A ticket records
-  its owner so the owner can reclaim a stalled one; that publishes only
-  (account, bucket, position), which T1's event already revealed. What is never
-  written anywhere is which commitment redeems which ticket.
-  **Amended by the live run:** in isolation that is true, but consuming tickets
-  in the *same transaction* as the deposits let an observer pair them. Phase 2
-  splits the two (`sealShieldBatch` / `depositShieldBatch`), which fixes it
-  without concealing anything — see [E2E-PRIVACY-LIVE.md](E2E-PRIVACY-LIVE.md) §2.
-- **The buffer is fungible.** Value lives in one vault-held pool, not
-  per-account, so the buffer balance itself reveals nothing about who queued.
-
-### What this does *not* hide
-
-- **The amount a driver earns per order** stays public in `OrderDelivered` /
-  `RelayServiceFeePaid`. This design hides *where the money goes*, not what it
-  was. Hiding amounts needs confidential escrow — out of reach here (§8).
-- **T2's executor knows the pairing** if it also submitted T1. That is the T2
-  threat, and phase 1 does not close it — phase 3 does (§7).
-- **A keeper can steal the buffer.** This is the sharpest edge in phase 1 and it
-  is inherent, not an oversight: the vault cannot check that a commitment in a
-  batch belongs to a ticket holder, because knowing that is exactly the pairing
-  the design exists to destroy. An authorized keeper that submits commitments it
-  controls consumes the tickets and keeps the notes. Phase 1 bounds this rather
-  than solving it — keepers are governance-authorized (`setShieldKeeper`), theft
-  is immediately visible to the victims (their note does not exist in the pool),
-  and the exposure is capped by what is queued at that moment. It is a genuine
-  custody escalation over today's vault, where a relay can submit but never
-  divert. **Do not enable a keeper you would not trust with the queued balance.**
-  **Closed in phase 3** (§7): `depositShieldNoteZK` binds the deposit target into
-  the proof and needs no keeper at all — prefer that path wherever the verifier
-  is wired. The description of the fix that used to sit here was wrong in the
-  same way phase 2's first attempt was: it imagined proving entitlement against a
-  *ticket*, but a ticket's position is derivable from queue order, so the note
-  pool replaces tickets rather than authenticating them.
-- **USDC payouts.** The pool holds native PAS; the live USDC flow derives escrow
-  by swapping shielded PAS → USDC on the local DEX (`venue-node/swap.mjs`). A
-  shielded USDC *payout* needs the reverse swap, and it must happen at the
-  **batch** level — a per-driver USDC→PAS swap is a fresh on-chain edge that
-  re-links exactly what the batch just unlinked.
-
----
+**The replacement is §7's note pool.** A payee converts balance into a note — a
+transaction that names them AND their commitment, which is fine, because the
+anonymity comes from the SPEND, which reveals only a nullifier. Nothing says
+which note was spent. And because the proof binds the shielded-pool commitment,
+the deposit is permissionless: anyone may submit it, nobody can redirect it.
 
 ## 5. Need-to-know encryption (phase 1)
 
@@ -276,8 +249,15 @@ acceptSealedBid(orderId, driver, amount, salt)   the customer reveals the winner
   are capped per order.
 
 **The winner is still public** — they perform the delivery and are paid. What
-this removes is the losers, which is most of the graph. The open-bid path is
-untouched and still works, so this is additive.
+this removes is the losers, which is most of the graph.
+
+Sealed bids started out **additive**: the open-bid path stayed callable beside
+them and the UI merely defaulted to sealed. That was the wrong shape. A privacy
+property any driver can opt out of — or fall out of, when no relay is reachable
+and the client quietly falls back — is a default, not a property. `placeBid`,
+`withdrawBid`, `acceptBid`, `acceptBidERC20` and the public bid mapping have
+since been **removed from the contract**, so sealed is now the only way to bid
+and the client fails closed rather than publishing a driver's terms.
 
 ### Getting the terms to the customer without a third party learning them
 
@@ -389,14 +369,14 @@ to be worth anything.
 
 | Phase | Contents | Contract change | Status |
 |---|---|---|---|
-| **1a** | Batched shielded payouts (§4) — vault queue, batch, reclaim | `FareVault` | **built** |
-| **1b** | Keeper (`venue-node/shieldkeeper.mjs`) + client queue/claim (`web/src/shieldpayout.ts`) | no | **built** |
+| **1a** | Batched shielded payouts (§4) — vault queue, batch, reclaim | `FareVault` | **REMOVED** — superseded by phase 3; see §4 |
+| **1b** | Keeper + client queue/claim | no | **REMOVED** with 1a |
 | **1c** | Encrypted registration metadata (§5) + driver-facing UI — commitment in `metadataURI`, reveal over the order thread | no | **built** |
 | **1d** | Disclosure capsule (§7) — capsule crypto, escrow at thread open, on-chain anchor, arbiter console | no | **built** |
-| **2a** | Decouple sealing from depositing so the chain's per-tx deposit ceiling stops capping the anonymity set | `FareVault` | **built** |
+| **2a** | Decouple sealing from depositing so the chain's per-tx deposit ceiling stops capping the anonymity set | `FareVault` | **REMOVED** with 1a (it tuned the batch path) |
 | **2b** | Denomination tuning, known-roots retry, batch telemetry, tier UX | no | next |
 | **3** | Relay hardening: multi-relay, blinded queue authorization (ZK), no-log posture | new circuit | spike first |
-| **4a** | Sealed bids (§6) — commit/reveal so losing bids name nobody | `FareOrders` | **built** |
+| **4a** | Sealed bids (§6) — commit/reveal so losing bids name nobody | `FareOrders` | **built**, and now the ONLY bid path |
 | **4b** | Sealed-bid client + relay bid box carrying terms to the customer | no | **built** |
 | **4c** | Venue payouts entering the note pool as commitments (the only fix that hides the venue for good) | `FareOrders`/`FareSettlement` | research |
 

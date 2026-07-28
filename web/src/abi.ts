@@ -14,18 +14,12 @@ export const ORDERS_ABI = [
   "event BidRevoked(uint256 indexed orderId, bytes32 bidHash)",
   "function nextOrderId() view returns (uint256)",
   "function orders(uint256) view returns (address customer, uint64 venueId, uint8 status, address driver, uint96 orderValue, uint96 tip, uint96 fare, uint96 maxFare, uint96 escrow, bytes32 dropCommit, uint64 createdAt, uint64 pickupWindowSecs, uint64 deliveryWindowSecs, uint64 pickupDeadline, uint64 deliveryDeadline, address token)",
-  "function biddersOf(uint256) view returns (address[])",
-  "function bidOf(uint256, address) view returns (uint96)",
   "function createOrder(uint64 venueId, bytes32 dropCommit, uint96 orderValue, uint96 tip, uint96 maxFare, uint64 pickupWindowSecs, uint64 deliveryWindowSecs) payable returns (uint256)",
-  "function placeBid(uint256 orderId, uint96 amount)",
-  "function withdrawBid(uint256 orderId)",
-  "function acceptBid(uint256 orderId, address driver) payable",
   "function increaseTip(uint256 orderId) payable",
   // Stablecoin (ERC-20) escrow variants (C3). Value-in via transferFrom, so the
   // customer must approve the orders contract first; escrow settles in `token`.
   "function createOrderERC20(address token, uint64 venueId, bytes32 dropCommit, uint96 orderValue, uint96 tip, uint96 maxFare, uint64 pickupWindowSecs, uint64 deliveryWindowSecs) returns (uint256)",
   "function createOrderERC20WithPermit(address token, uint64 venueId, bytes32 dropCommit, uint96 orderValue, uint96 tip, uint96 maxFare, uint64 pickupWindowSecs, uint64 deliveryWindowSecs, uint256 permitValue, uint256 permitDeadline, uint8 v, bytes32 r, bytes32 s) returns (uint256)",
-  "function acceptBidERC20(uint256 orderId, address driver)",
   "function increaseTipERC20(uint256 orderId, uint96 amount)",
   "function acceptedToken(address) view returns (bool)",
   "function setAcceptedToken(address token, bool accepted)",
@@ -113,12 +107,11 @@ export const VAULT_ABI = [
   "function nextNoteIndex() view returns (uint32)",
   "function shieldNullifierSpent(uint256) view returns (bool)",
   "event ShieldNoteInserted(address indexed account, uint96 indexed bucket, uint256 commitment, uint32 index)",
-  // Shielded payouts (privacy phase 1): queue a bucket, then a keeper batches it.
+  // Shield denominations. The keeper path that used to sit here
+  // (queueShieldCredit + shieldPending) is gone with the contract functions.
   "function shieldNonce(address) view returns (uint256)",
   "function shieldBuckets(uint256) view returns (uint96)",
   "function shieldBucketCount() view returns (uint256)",
-  "function queueShieldCredit(uint96 bucket)",
-  "function shieldPending(uint96 bucket) view returns (uint64)",
   // Governance params (D2): withdrawal relay fee.
   "function withdrawFeeBps() view returns (uint16)",
   "function setWithdrawFeeBps(uint16 bps)",
@@ -130,7 +123,7 @@ export const VAULT_ABI = [
 ];
 
 // Minimal ERC-20 surface for stablecoin orders (C3): approve the orders
-// contract before createOrderERC20 / acceptBidERC20, read balances/decimals.
+// contract before createOrderERC20 / acceptSealedBidERC20, read balances/decimals.
 export const ERC20_ABI = [
   "function decimals() view returns (uint8)",
   "function symbol() view returns (string)",

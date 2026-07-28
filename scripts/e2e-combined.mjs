@@ -4,7 +4,7 @@
 //   2. USDC to the burner           — open MockUSDC mint (the testnet "shared
 //      faucet" analog for the escrow value; mainnet would need a USDC-shielding
 //      path — the honest gap).
-//   3. Burner runs a USDC-escrowed order (createOrderERC20 → acceptBidERC20),
+//   3. Burner runs a USDC-escrowed order (createOrderERC20 → acceptSealedBidERC20),
 //      relay settles gaslessly (dual-sig pickup + ZK dropoff — no coords on-chain),
 //      payouts in USDC, then the burner shielded-returns its leftover PAS gas.
 //
@@ -16,6 +16,10 @@ import fs from "fs";
 import path from "path";
 import { WITHDRAW_WASM, loadWithdrawZkey } from "./shield/zkey.mjs";
 import { ROOT, provider, book, env, loadState, waitTx, leanGas, GAS_PRICE_WEI, KS_POOL, fmt, eth } from "./shield/e2e-lib.mjs";
+
+// Sealed bids are the only bid path. A fixed salt is fine for a scripted run:
+// in production the driver picks it and it travels to the customer off-chain.
+const BID_SALT = ethers.keccak256(ethers.toUtf8Bytes("fare-e2e-bid"));
 
 const BN254_R = 21888242871839275222246405745257275088548364400416034343698204186575808495617n;
 const OFF_LAT = 90_000_000n, OFF_LON = 180_000_000n;
@@ -71,7 +75,7 @@ async function main() {
   const USDC = new ethers.Contract(b.stablecoin, ["function mint(address,uint256)", "function approve(address,uint256) returns(bool)", "function balanceOf(address) view returns(uint256)"], main);
   const orders = new ethers.Contract(b.orders, [
     "function createOrderERC20(address,uint64,bytes32,uint96,uint96,uint96,uint64,uint64) returns(uint256)",
-    "function placeBid(uint256,uint96)", "function acceptBidERC20(uint256,address)",
+    "function bidHashOf(uint256,address,uint96,bytes32) pure returns (bytes32)", "function commitBid(uint256,bytes32,bytes32)", "function acceptSealedBid(uint256,address,uint96,bytes32) payable", "function acceptSealedBidERC20(uint256,address,uint96,bytes32)",
     "function nextOrderId() view returns(uint256)", "function statusOf(uint256) view returns(uint8)",
     "function dropCommitOf(uint256) view returns(bytes32)", "function treasury() view returns(address)",
   ], prov);
@@ -133,8 +137,8 @@ async function main() {
     console.log(`   orderId ${st.orderId}`);
   }
   const orderId = BigInt(st.orderId);
-  if (!st.bid) { console.log(`\n4. driver placeBid ${fmt6(FARE)} USDC`); const od = orders.connect(D); const tx = await od.placeBid(orderId, FARE, { gasLimit: await leanGas(od.placeBid, [orderId, FARE]) }); await rec(prov, { step: "C.bid", party: "driver", action: "placeBid", hash: tx.hash }); st.bid = true; saveC(st); }
-  if (!st.accepted) { console.log(`\n5. burner acceptBidERC20 (escrow fare ${fmt6(FARE)} USDC)`); const oc = orders.connect(burner); const tx = await oc.acceptBidERC20(orderId, D.address, { gasLimit: await leanGas(oc.acceptBidERC20, [orderId, D.address]) }); await rec(prov, { step: "C.accept", party: "customer-burner", action: "acceptBidERC20", hash: tx.hash, tokenValue: FARE }); st.accepted = true; saveC(st); }
+  if (!st.bid) { console.log(`\n4. driver commitBid ${fmt6(FARE)} USDC (sealed — the chain sees only a hash)`); const od = orders.connect(D); const h = await orders.bidHashOf(orderId, D.address, FARE, BID_SALT); const tx = await od.commitBid(orderId, h, ethers.ZeroHash, { gasLimit: await leanGas(od.commitBid, [orderId, h, ethers.ZeroHash]) }); await rec(prov, { step: "C.bid", party: "driver", action: "commitBid", hash: tx.hash }); st.bid = true; saveC(st); }
+  if (!st.accepted) { console.log(`\n5. burner acceptSealedBidERC20 (escrow fare ${fmt6(FARE)} USDC)`); const oc = orders.connect(burner); const a = [orderId, D.address, FARE, BID_SALT]; const tx = await oc.acceptSealedBidERC20(...a, { gasLimit: await leanGas(oc.acceptSealedBidERC20, a) }); await rec(prov, { step: "C.accept", party: "customer-burner", action: "acceptSealedBidERC20", hash: tx.hash, tokenValue: FARE }); st.accepted = true; saveC(st); }
   console.log(`   status ${await orders.statusOf(orderId)} (2=Assigned)`);
 
   // ── 4. Settlement (relay submits, gasless for burner) ───────────────────────

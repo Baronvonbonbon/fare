@@ -172,7 +172,7 @@ describe("relay endpoints (against a real chain)", () => {
     await drivers.connect(driver).register("ipfs://driver", { value: PAS(1) });
     await venues.connect(venueOp).registerVenue(37_774_900, -122_419_400, venueSigner.address, venueOp.address, "ipfs://venue");
 
-    // an Open order, so a forwarded placeBid has something to bid on. The drop
+    // an Open order, so a forwarded cancelOpen has something to act on. The drop
     // commit only has to be non-zero here — no dropoff is settled in this file.
     const dropCommit = ethers.keccak256(ethers.toUtf8Bytes("relay-endpoints-drop"));
     await orders.connect(customer).createOrder(1n, dropCommit, 0, 0, PAS(1), 0, 0, { value: 0 });
@@ -326,23 +326,25 @@ describe("relay endpoints (against a real chain)", () => {
   // ── /forward: the relay picks the target, so the allowlist is its own ─────
 
   it("/forward relays a user-signed action under the user's identity", async () => {
-    const amount = PAS("0.3");
-    const data = orders.interface.encodeFunctionData("placeBid", [1n, amount]);
-    const request = await signForward(driver, orders.target as string, data);
+    // cancelOpen is customer-authorized and reads _msgSender(), so a successful
+    // forward proves the contract saw the CUSTOMER, not the relay that paid.
+    // (This used to forward placeBid; that path is gone, and its sealed
+    // replacement deliberately names nobody, so it carries no identity to test.)
+    const data = orders.interface.encodeFunctionData("cancelOpen", [1n]);
+    const request = await signForward(customer, orders.target as string, data);
 
     const res = await post("/forward", { request });
     expect(res.status).to.equal(200);
     const body = await res.json();
     expect(body.forwarded).to.equal(true);
-    expect(body.fn).to.equal("placeBid");
-    // identity is the driver, not the relay — the point of EIP-2771
-    expect(await orders.bidOf(1n, driver.address)).to.equal(amount);
+    expect(body.fn).to.equal("cancelOpen");
+    expect((await orders.orders(1n)).status).to.equal(5n); // Cancelled, by the customer
   });
 
   it("/forward refuses a target outside the allowlist", async () => {
     // A relay that forwards arbitrary targets is a signing oracle for any
     // contract that trusts this forwarder. Only orders + ratings are allowed.
-    const data = orders.interface.encodeFunctionData("placeBid", [1n, PAS("0.1")]);
+    const data = orders.interface.encodeFunctionData("cancelOpen", [1n]);
     const request = await signForward(driver, vault.target as string, data);
 
     const res = await post("/forward", { request });
@@ -351,7 +353,7 @@ describe("relay endpoints (against a real chain)", () => {
   });
 
   it("/forward refuses to carry value", async () => {
-    const data = orders.interface.encodeFunctionData("placeBid", [1n, PAS("0.1")]);
+    const data = orders.interface.encodeFunctionData("cancelOpen", [1n]);
     const request = { ...(await signForward(driver, orders.target as string, data)), value: "1" };
 
     const res = await post("/forward", { request });
@@ -360,14 +362,19 @@ describe("relay endpoints (against a real chain)", () => {
   });
 
   it("/forward cannot forge the sender — a mismatched signature is rejected", async () => {
-    const data = orders.interface.encodeFunctionData("placeBid", [1n, PAS("0.9")]);
+    // A fresh order: the forward test above cancelled #1, and this asserts that
+    // NOTHING executed, which needs a target that is still actionable.
+    const id = await orders.nextOrderId();
+    await orders.connect(customer).createOrder(
+      1n, ethers.keccak256(ethers.toUtf8Bytes("forge-test-drop")), 0, 0, PAS(1), 0, 0, { value: 0 });
+    const data = orders.interface.encodeFunctionData("cancelOpen", [id]);
     const signed = await signForward(driver, orders.target as string, data);
     // claim to be the customer while carrying the driver's signature
     const request = { ...signed, from: customer.address };
 
     const res = await post("/forward", { request });
     expect(res.status).to.be.gte(400);
-    expect(await orders.bidOf(1n, customer.address)).to.equal(0n);
+    expect((await orders.orders(id)).status).to.equal(1n); // still Open — nothing executed
   });
 
   // ── concurrency ──────────────────────────────────────────────────────────

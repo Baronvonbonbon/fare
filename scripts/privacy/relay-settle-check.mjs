@@ -40,8 +40,9 @@ const commit = (lat, lon, s) => poseidon3([encLat(lat), encLon(lon), s]);
 
 const ORDERS_ABI = [
   "function createOrder(uint64 venueId, bytes32 dropCommit, uint96 orderValue, uint96 tip, uint96 maxFare, uint64 pw, uint64 dw) payable returns (uint256)",
-  "function placeBid(uint256 orderId, uint96 amount)",
-  "function acceptBid(uint256 orderId, address driver) payable",
+  "function bidHashOf(uint256 orderId, address driver, uint96 amount, bytes32 salt) pure returns (bytes32)",
+  "function commitBid(uint256 orderId, bytes32 bidHash, bytes32 revokeHash)",
+  "function acceptSealedBid(uint256 orderId, address driver, uint96 amount, bytes32 salt) payable",
   "function relayServiceFee(address) view returns (uint96)",
   "function statusOf(uint256) view returns (uint8)",
   "function nextOrderId() view returns (uint256)",
@@ -117,11 +118,16 @@ async function main() {
   log(`   serviceFee snapshotted on the order: ${ethers.formatEther(o.serviceFee)} PAS`);
 
   // ── auction ───────────────────────────────────────────────────────────────
-  log(`\n3. bid + accept`);
+  log(`\n3. sealed bid + accept`);
   const dOrders = new ethers.Contract(BOOK.orders, ORDERS_ABI, driver);
-  await (await dOrders.placeBid(orderId, FARE, await est(dOrders.placeBid, [orderId, FARE]))).wait();
-  await (await orders.acceptBid(orderId, driver.address,
-    await est(orders.acceptBid, [orderId, driver.address], { value: FARE }))).wait();
+  // Sealed bid: only a hash reaches the chain. The open-bid path was removed, so
+  // this is the only route to Assigned.
+  const bidSalt = ethers.keccak256(ethers.toUtf8Bytes("settle-check"));
+  const bidHash = await orders.bidHashOf(orderId, driver.address, FARE, bidSalt);
+  const cbArgs = [orderId, bidHash, ethers.ZeroHash];
+  await (await orders.commitBid(...cbArgs, await est(orders.commitBid, cbArgs))).wait();
+  const asArgs = [orderId, driver.address, FARE, bidSalt];
+  await (await orders.acceptSealedBid(...asArgs, await est(orders.acceptSealedBid, asArgs, { value: FARE }))).wait();
   log(`   status ${await orders.statusOf(orderId)} (2 = Assigned)`);
 
   // ── pickup, through the relay (budget-gated, not profit-gated) ────────────

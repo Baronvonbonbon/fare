@@ -77,14 +77,10 @@ const MATRIX: Entry[] = [
   { c: "vault", fn: "setRouter", args: [A1], allow: ["owner"] },
   { c: "vault", fn: "setShieldPool", args: [A1], allow: ["owner"] },
   { c: "vault", fn: "setShieldBuckets", args: [[PAS(1)]], allow: ["owner"] },
-  { c: "vault", fn: "setShieldParams", args: [8, 300, 3600], allow: ["owner"] },
-  { c: "vault", fn: "setShieldKeeper", args: [A1, true], allow: ["owner"] },
   { c: "vault", fn: "setShieldVerifier", args: [A1], allow: ["owner"] },
   { c: "vault", fn: "setShieldPoseidon", args: [A1], allow: ["owner"] },
   { c: "vault", fn: "setAuthorized", args: [A1, true], allow: ["owner"] },
   { c: "vault", fn: "creditToken", args: [A1, A1, 1], allow: ["authorized"] },
-  { c: "vault", fn: "sealShieldBatch", args: [PAS(1), 8], allow: ["keeper"] },
-  { c: "vault", fn: "depositShieldBatch", args: [PAS(1), [B32]], allow: ["keeper"] },
 
   // ── FareDrivers ─────────────────────────────────────────────────────────
   { c: "drivers", fn: "setRouter", args: [A1], allow: ["owner"] },
@@ -213,7 +209,6 @@ describe("access control matrix", () => {
     await vault.setAuthorized(authorized.address, true);
     await drivers.setAuthorized(authorized.address, true);
     await venues.setAuthorized(authorized.address, true);
-    await vault.setShieldKeeper(keeper.address, true);
     await disputes.setArbiter(arbiter.address);
     await pause.setGuardian(guardian.address, true);
     await venues.connect(operator).registerVenue(37_774_900, -122_419_400, operator.address, operator.address, "ipfs://v");
