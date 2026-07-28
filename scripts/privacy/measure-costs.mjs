@@ -153,6 +153,8 @@ async function main() {
 
   const ORDERS_ABI = [
     "function createOrder(uint64,bytes32,uint96,uint96,uint96,uint64,uint64) payable returns (uint256)",
+    // F6-flat: createOrder requires msg.value == orderValue + tip + this.
+    "function relayServiceFee(address) view returns (uint96)",
     "function nextOrderId() view returns (uint256)",
     "function statusOf(uint256) view returns (uint8)",
     "function bidHashOf(uint256,address,uint96,bytes32) pure returns (bytes32)",
@@ -210,7 +212,10 @@ async function main() {
   const orderId = await orders.nextOrderId();
   const oc = orders.connect(customer);
   const coArgs = [1n, dropCommit, ORDER_VALUE, 0n, ethers.parseEther("3"), 0, 0];
-  const co = await oc.createOrder(...coArgs, await est(oc.createOrder, coArgs, { value: ORDER_VALUE }));
+  // The flat service fee is escrowed on top of orderValue+tip — omitting it
+  // reverts with "bad-value".
+  const svcFee = await orders.relayServiceFee(ethers.ZeroAddress);
+  const co = await oc.createOrder(...coArgs, await est(oc.createOrder, coArgs, { value: ORDER_VALUE + svcFee }));
   await receiptOf(co.hash);
   await track("createOrder", { payer: "customer" }, co.hash);
 
@@ -378,7 +383,9 @@ async function main() {
     ranAt: new Date().toISOString(), chain: "paseo-assethub", gasPriceGwei: "1000",
     orders: BOOK.orders, vault: BOOK.vault, orderId: orderId.toString(),
     relays: RELAYS.map((r) => ({ id: r.id, address: r.address })),
-    fees: { protocolFeeBps: 250, relayRebateBps: 0, relayServiceFeePAS: "0", withdrawFeeBps: 100 },
+    // Read the live fee rather than hardcoding it: a stale "0" here silently
+    // understates what a delivery costs the customer by the whole service fee.
+    fees: { protocolFeeBps: 250, relayRebateBps: 0, relayServiceFeePAS: ethers.formatEther(svcFee), withdrawFeeBps: 100 },
   });
   fs.writeFileSync(path.join(OUT, "costs.json"), JSON.stringify(report, null, 2));
 

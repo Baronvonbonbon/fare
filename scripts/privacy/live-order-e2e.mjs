@@ -86,6 +86,9 @@ class NoteTree {
 
 const ORDERS_ABI = [
   "function createOrder(uint64 venueId, bytes32 dropCommit, uint96 orderValue, uint96 tip, uint96 maxFare, uint64 pw, uint64 dw) payable returns (uint256)",
+  // F6-flat: createOrder requires msg.value == orderValue + tip + this. Read it
+  // rather than assuming zero — it is governed and changes without redeploying.
+  "function relayServiceFee(address) view returns (uint96)",
   "function nextOrderId() view returns (uint256)",
   "function statusOf(uint256) view returns (uint8)",
   "function bidHashOf(uint256 orderId, address driver, uint96 amount, bytes32 salt) pure returns (bytes32)",
@@ -201,7 +204,12 @@ async function main() {
   const orderId = await orders.nextOrderId();
   const oc = orders.connect(customer);
   const coArgs = [1n, dropCommit, ORDER_VALUE, TIP, MAX_FARE, 0, 0];
-  await send("createOrder", oc.createOrder(...coArgs, await est(oc.createOrder, coArgs, { value: ORDER_VALUE + TIP })));
+  // The flat relay service fee is escrowed ON TOP of orderValue+tip; sending
+  // only orderValue+tip reverts with "bad-value".
+  const svcFee = await orders.relayServiceFee(ethers.ZeroAddress);
+  const coValue = ORDER_VALUE + TIP + svcFee;
+  log(`   value ${ethers.formatEther(ORDER_VALUE)} + tip ${ethers.formatEther(TIP)} + service fee ${ethers.formatEther(svcFee)} = ${ethers.formatEther(coValue)} PAS`);
+  await send("createOrder", oc.createOrder(...coArgs, await est(oc.createOrder, coArgs, { value: coValue })));
   log(`   order #${orderId} · status ${await orders.statusOf(orderId)} (1=Open)`);
 
   // ── 3. Sealed bid ──────────────────────────────────────────────────────────
@@ -375,7 +383,11 @@ async function main() {
   log(`   report e2e-runs/privacy-order/report.json\n`);
 }
 
-main().catch((e) => {
+// The provider's poller keeps the event loop alive, so a run that succeeded
+// would sit there looking like it was still working until something killed it —
+// in CI, until the job timed out. The report is written synchronously above, so
+// there is nothing pending to lose by leaving now.
+main().then(() => process.exit(0)).catch((e) => {
   console.error("\n❌", e?.shortMessage ?? e?.reason ?? e?.message ?? e);
   fs.mkdirSync(OUT, { recursive: true });
   fs.writeFileSync(path.join(OUT, "failure.json"), JSON.stringify({ error: String(e?.message ?? e), steps }, null, 2));
