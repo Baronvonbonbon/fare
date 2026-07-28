@@ -8,7 +8,7 @@ import "@openzeppelin/contracts/metatx/ERC2771Forwarder.sol";
 ///         venue relay calls `execute` with a user-signed `ForwardRequest`; the
 ///         relay pays gas while the target (FareOrders / FareRatings) sees the
 ///         *user* as `_msgSender()`. Only the non-value-bearing user actions are
-///         forwarded this way — placeBid / withdrawBid / cancels / rate — so the
+///         forwarded this way — commitBid / revokeBid / cancels / rate — so the
 ///         relay never fronts a customer's escrow (value actions stay on the
 ///         gas-sponsored funded-burner path). See docs/NETWORK-ARCHITECTURE.md.
 ///

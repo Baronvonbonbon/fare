@@ -83,7 +83,6 @@ const order = (o: Partial<OrderRow> & { id: bigint; status: number }): OrderRow 
   createdAt: 1000n, pickupWindowSecs: 1800n,
   pickupDeadline: 5000n, deliveryDeadline: 9000n,
   token: "0x0000000000000000000000000000000000000000",
-  bidders: [],
   ...o,
 });
 

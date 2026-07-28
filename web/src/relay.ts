@@ -86,7 +86,7 @@ async function relayFund(address: string): Promise<DripResult> {
   return (await res.json().catch(() => ({}))) as DripResult;
 }
 
-/// Ensure `address` holds gas before a VALUE action (createOrder / acceptBid),
+/// Ensure `address` holds gas before a VALUE action (createOrder / acceptSealedBid),
 /// which must be submitted directly (the relay can't front escrow) and so needs
 /// the burner to pay its own gas. Gasless non-value actions never call this, so
 /// bidding/canceling/rating trigger no drip. No-op if already funded; otherwise
@@ -186,9 +186,9 @@ export async function relaySettle(
 }
 
 // ── gasless user actions via EIP-2771 forwarder (F8) ─────────────────────────
-// Only the NON-VALUE actions (placeBid / withdrawBid / cancelOpen /
+// Only the NON-VALUE actions (commitBid / revokeBid / cancelOpen /
 // cancelAssigned / abandonOrder / rate) are forwardable — the contracts read
-// _msgSender() for those. Value actions (createOrder / acceptBid / increaseTip)
+// _msgSender() for those. Value actions (createOrder / acceptSealedBid / increaseTip)
 // stay on the direct funded-burner path so the relay never fronts escrow.
 
 const FORWARDER_ABI = ["function nonces(address owner) view returns (uint256)"];

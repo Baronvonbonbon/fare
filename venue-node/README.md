@@ -69,8 +69,6 @@ by doing the two things that are safe to relay:
 | `POST /forward { request }` | **Relay a gasless user action (F8).** Submits a user-signed EIP-2771 `ForwardRequest` through `FareForwarder`. Guarded: `value` must be 0 and `to` must be `FareOrders`/`FareRatings`, so the relay pays gas but never fronts a customer's escrow. |
 | `POST /withdraw { account, recipient, deadline, signature }` | **Relay a gasless withdrawal (F8).** Submits a driver-signed `FareVault.withdrawFor`; the relay is `msg.sender`, so a configured `withdrawFeeBps` reimburses its gas. Lets a driver pull earnings with zero gas held. |
 | `POST /shield-withdraw { pA, pB, pC, pubSignals, recipient, burner? }` | **Fund a fresh burner through Kusama Shield (C4).** Submits a client-built `proxy_withdraw` on the KS pool. See the shielded-funding section below. |
-| `POST /shield-queue { account, bucket, deadline, signature, commitment }` | **Queue a shielded payout (privacy phase 1).** Submits a driver-signed `FareVault.queueShieldCreditFor` and holds the note's commitment off-chain for a later batch. See the shielded-payouts section below. |
-| `GET /shield-claim?commitment=0x…` | Where a queued payout landed: the batch's pre-deposit tree state, so the recipient can derive its own note path. Public chain state only. |
 | `GET /health` | Relay address + gas balance + wired settlement + forwarder + vault + shield pool/mode. |
 
 ### Relay discovery (DATUM `relayUrl` pattern)
@@ -83,18 +81,27 @@ location is discoverable and region-scoped — a venue that runs a relay serves 
 region's customers automatically, mirroring DATUM's `manifest.relayUrl`.
 
 **Gasless user actions via the forwarder (F8).** `FareOrders`/`FareRatings` are
-EIP-2771-aware, so the **non-value** actions — `placeBid`, `withdrawBid`,
+EIP-2771-aware, so the **non-value** actions — `commitBid`, `revokeBid`,
 `cancelOpen`, `cancelAssigned`, `abandonOrder`, `rate` — read `_msgSender()` and
 can be meta-forwarded: the user signs a `ForwardRequest`, the relay `execute()`s
 it and pays gas, and the contract still sees the *user* as the sender (the
-forwarder verifies the signature). Drivers can bid fully gasless.
+forwarder verifies the signature).
 
-**Still direct (not forwarded):** the **value-bearing** actions `createOrder` /
-`acceptBid` / `increaseTip`. They move the user's *own* money, so meta-forwarding
-would make the relay front the escrow — instead these stay on the gas-sponsored
-funded-burner path (`/fund` tops the burner up so it can pay its own value). The
-order value is always the user's money; gasless removes the "buy PAS for gas"
-friction, not the payment.
+`acceptSealedBidERC20` is forwardable too, even though it moves value: its escrow
+is a `transferFrom` from the customer's own balance, so a forwarding relay never
+fronts anything (Option C).
+
+**Still direct (not forwarded):** the **native** value-bearing actions
+`createOrder` / `acceptSealedBid` / `increaseTip`. They carry `msg.value`, so
+meta-forwarding would make the relay front the escrow — instead these stay on the
+gas-sponsored funded-burner path (`/fund` tops the burner up so it can pay its
+own value). The order value is always the user's money; gasless removes the "buy
+PAS for gas" friction, not the payment.
+
+> Bidding is **sealed only**. `commitBid` names nobody on-chain, which is why the
+> relay submits it: a driver-signed forward would put the driver's address in the
+> forwarder's calldata and undo the point. The open-bid path that used to sit
+> alongside it has been removed from the contract.
 
 ### Trust
 The relay holds a **funded venue account and pays gas only** — it can never move a
@@ -134,47 +141,38 @@ a root baked into a proof). Config: `SHIELD_POOL`, `SHIELD_FEE_PAS`.
 > relay recoup that from the withdrawn amount (the customer still ultimately pays;
 > the relay breaks even). See the C4 e2e report's recommendation R2.
 
-### Shielded payouts (`POST /shield-queue`, privacy phase 1)
+### Shielded payouts (ZK notes)
 
 Shielded *funding* (above) protects the customer. Shielded **payouts** protect the
 other side: driver and venue earnings otherwise leave `FareVault` at a persistent
 address, so anyone with an indexer holds a complete revenue graph.
 
-Set `SHIELD_KEEPER=1` to run this relay as a batch keeper. It then plays two
-roles, deliberately split so **no transaction ever carries both an account and a
-pool commitment** — the failure that makes the obvious one-shot design useless
-(see [../docs/PRIVACY-TIERS.md](../docs/PRIVACY-TIERS.md) §3):
+A payee converts a bucket of vault balance into a **note** (`insertShieldNote`, or
+`/shield-note` for the gasless version), then later spends it with a Groth16 proof
+that reveals only a nullifier (`/shield-note-spend`). The spend is
+**permissionless** — anyone may submit it, and because the proof binds the
+shielded-pool commitment, nobody can redirect it.
 
-1. `POST /shield-queue` submits the payee's EIP-712 authorization. The commitment
-   arrives in the request **body** and is stored off-chain; it must never reach
-   that transaction's calldata, which is as public and permanent as storage.
-2. The keeper tick deposits held commitments once a bucket has `shieldMinBatch`
-   of them and the oldest ticket has cleared `shieldMinDwell` — one transaction,
-   N equal deposits, no account named.
+> **A keeper used to live here, and it is gone.** Until 2026-07-28 this relay
+> could run as a batch keeper: `POST /shield-queue` took a payee's authorization
+> on-chain while their commitment stayed in the request body, and a tick later
+> sealed and deposited a batch. It worked, but it bought a smaller guarantee than
+> it looked like — the anonymity set was the seal size rather than the whole note
+> tree, and the keeper was the only party holding the account↔commitment pairing,
+> so **an authorized keeper could substitute its own commitments and keep the
+> notes**. The vault could not check otherwise; knowing which commitment belonged
+> to whom was exactly the pairing the design destroyed.
+>
+> That concession only ever made sense while the ZK path did not exist. It does,
+> so the keeper, its endpoints (`/shield-queue`, `/shield-claim`), its store, its
+> `SHIELD_KEEPER*` settings and the vault functions behind it
+> (`queueShieldCredit`, `sealShieldBatch`, `depositShieldBatch`,
+> `setShieldKeeper`) have all been removed rather than left switched off. A
+> guarantee that one `setShieldKeeper` call can void is not a guarantee.
 
-| Var | Default | Meaning |
-|---|---|---|
-| `SHIELD_KEEPER` | off | `1` runs the batch keeper (endpoints 503 otherwise) |
-| `SHIELD_KEEPER_STORE` | `./shield-keeper.json` | Pending commitments + batch receipts |
-| `SHIELD_KEEPER_POLL_MS` | `60000` | How often to try to batch |
-
-> **Trust — read this before enabling.** The keeper is the only party holding the
-> account↔commitment pairing, and the vault *cannot* check that a batched
-> commitment belongs to a ticket holder — knowing that is exactly the pairing the
-> design destroys. **An authorized keeper can substitute its own commitments and
-> keep the notes.** Governance gates who may execute (`setShieldKeeper`); theft is
-> immediately visible to the payees; exposure is capped by the queue depth.
-> Do not enable a keeper you would not trust with the queued balance. Phase 3's
-> ZK authorization is what removes the concession.
-
-> The store is **load-bearing**: a keeper that forgets a commitment after its
-> ticket is consumed has destroyed that payout — the ticket is spent and nothing
-> on-chain records who was owed a note. It is written through on every mutation
-> via write-then-rename; back it up like a key.
-
-Relaying `/shield-queue` earns nothing (the vault takes no fee on queueing), so
-it draws on the same subsidy budget as sponsor-mode shielded funding and declines
-when that budget is exhausted.
+Route the insert and the spend through **different relays** where more than one
+is configured: the insert names the account, the spend names the commitment, and
+one relay seeing both learns what the proof hides.
 
 ### Gas sizing on Paseo (why some limits are 500 M and others aren't)
 

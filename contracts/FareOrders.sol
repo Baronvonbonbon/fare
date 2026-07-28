@@ -25,7 +25,7 @@ import "./lib/GeoLib.sol";
 ///             time before dropoff.
 ///
 ///         Lifecycle:
-///           Open ──acceptBid──► Assigned ──pickup cosign──► PickedUp
+///           Open ──acceptSealedBid──► Assigned ──pickup cosign──► PickedUp
 ///             │                    │                            │
 ///          cancelOpen      cancelAssigned/abandon          dropoff cosign
 ///             ▼                    ▼                            ▼
@@ -66,9 +66,9 @@ contract FareOrders is Ownable2Step, ReentrancyGuard, FareUpgradable, ERC2771Con
     uint256 public nextOrderId = 1;
     mapping(uint256 => Order) public orders;
 
-    // Reverse auction: open bids, customer picks any bidder.
-    mapping(uint256 => mapping(address => uint96)) public bidOf;
-    mapping(uint256 => address[]) internal _bidders;
+    // Reverse auction: SEALED bids only. The open-bid mappings (`bidOf`,
+    // `_bidders`) are gone — see the sealed-bid section for why an on-chain
+    // record of who bid what was a standing profile of every losing driver.
 
     IFareVault public vault;
     IFareDrivers public drivers;
@@ -113,8 +113,6 @@ contract FareOrders is Ownable2Step, ReentrancyGuard, FareUpgradable, ERC2771Con
         uint96 maxFare,
         bytes32 dropCommit
     );
-    event BidPlaced(uint256 indexed orderId, address indexed driver, uint96 amount);
-    event BidWithdrawn(uint256 indexed orderId, address indexed driver);
     event OrderAssigned(uint256 indexed orderId, address indexed driver, uint96 fare, uint64 pickupDeadline);
     event TipIncreased(uint256 indexed orderId, uint96 added, uint96 newTip);
     event OrderPickedUp(uint256 indexed orderId, uint64 deliveryDeadline);
@@ -144,9 +142,9 @@ contract FareOrders is Ownable2Step, ReentrancyGuard, FareUpgradable, ERC2771Con
     uint8 public constant REASON_DRIVER_ABANDON = 3;
 
     /// @param _forwarder trusted EIP-2771 forwarder (FareForwarder) for gasless
-    ///        meta-txs on the non-value user actions — placeBid / withdrawBid /
+    ///        meta-txs on the non-value user actions — commitBid / revokeBid /
     ///        cancels / abandon (F8). Pass address(0) to disable meta-txs; value
-    ///        actions (createOrder / acceptBid / increaseTip) always use the
+    ///        actions (createOrder / acceptSealedBid / increaseTip) use the
     ///        direct caller, so the relay can never front a customer's escrow.
     constructor(address _pauseRegistry, address _forwarder)
         Ownable(msg.sender)
@@ -297,7 +295,7 @@ contract FareOrders is Ownable2Step, ReentrancyGuard, FareUpgradable, ERC2771Con
     ///         this, and the whole order is gas-free for the customer. Permit is
     ///         best-effort (try/catch): a front-run permit that already set the
     ///         allowance doesn't brick the order. Set `permitValue` high (e.g.
-    ///         type(uint256).max) so it also covers the later acceptBidERC20/tips.
+    ///         type(uint256).max) so it also covers the later sealed accept/tips.
     function createOrderERC20WithPermit(
         address token,
         uint64 venueId,
@@ -332,7 +330,7 @@ contract FareOrders is Ownable2Step, ReentrancyGuard, FareUpgradable, ERC2771Con
     ) internal returns (uint256 orderId) {
         require(acceptedToken[token], "token-not-accepted");
         // orderValue + tip may be 0 for a fare-only order — the fare is escrowed
-        // in-token later at acceptBidERC20. The flat relay service fee (F6-flat) is
+        // in-token later at acceptSealedBidERC20. The flat relay service fee (F6-flat) is
         // pulled up front too, so it's available to pay the relay at settlement.
         uint256 escrow = uint256(orderValue) + tip + relayServiceFee[token];
         if (escrow > 0) IERC20(token).safeTransferFrom(customer, address(this), escrow);
@@ -388,7 +386,7 @@ contract FareOrders is Ownable2Step, ReentrancyGuard, FareUpgradable, ERC2771Con
     }
 
     // whenNotFrozen intentionally absent from everything below createOrder/
-    // placeBid/acceptBid/increaseTip: cancels, settlement callbacks, and
+    // commitBid/acceptSealedBid/increaseTip: cancels, settlement callbacks, and
     // dispute hooks are drain paths that must keep working on a frozen v1.
     function increaseTip(uint256 orderId) external payable whenNotFrozen {
         Order storage o = orders[orderId];
@@ -478,37 +476,24 @@ contract FareOrders is Ownable2Step, ReentrancyGuard, FareUpgradable, ERC2771Con
 
     // ---- drivers: reverse auction ----
 
-    function placeBid(uint256 orderId, uint96 amount) external whenNotPaused whenNotFrozen {
-        Order storage o = orders[orderId];
-        address driver = _msgSender(); // gasless via forwarder (F8)
-        require(o.status == Status.Open, "bad-status");
-        require(drivers.isEligible(driver), "driver-not-eligible");
-        require(amount > 0 && amount <= o.maxFare, "bad-amount");
-        if (bidOf[orderId][driver] == 0) {
-            _bidders[orderId].push(driver);
-        }
-        bidOf[orderId][driver] = amount;
-        emit BidPlaced(orderId, driver, amount);
-    }
-
-    function withdrawBid(uint256 orderId) external {
-        address driver = _msgSender(); // gasless via forwarder (F8)
-        require(bidOf[orderId][driver] > 0, "no-bid");
-        bidOf[orderId][driver] = 0;
-        emit BidWithdrawn(orderId, driver);
-    }
-
-    // ── sealed bids (privacy phase 4) ────────────────────────────────────────
-    // `BidPlaced` publishes (order, driver, amount) for EVERY bid, including the
-    // ones that lose. Drivers are persistent identities, so that is a standing
-    // record of where each driver was willing to work and for how much — a
-    // coverage and availability profile assembled for free by anyone with an
-    // indexer, about people who never won the job.
+    // ── sealed bids — the ONLY bid path (privacy phase 4) ────────────────────
+    // There was an open-bid path here: `placeBid` emitted (order, driver,
+    // amount) for EVERY bid, including the ones that lost. Drivers are
+    // persistent identities, so that was a standing record of where each driver
+    // was willing to work and for how much — a coverage and availability profile
+    // assembled for free by anyone with an indexer, about people who never won
+    // the job.
     //
-    // The customer needs the bid. The world does not. So a sealed bid puts only
-    // a HASH on-chain and carries (driver, amount) to the customer off-chain over
-    // the order channel; the customer reveals it when accepting. Losing bids are
-    // never attributable to anyone.
+    // Sealed bids were added alongside it and the UI defaulted to them, but
+    // leaving the open path callable meant the weaker guarantee was still one
+    // transaction away, and a privacy property that any participant can opt out
+    // of is not a property of the system. So `placeBid`, `withdrawBid`,
+    // `acceptBid`, `acceptBidERC20`, `bidOf`, `_bidders` and their events are
+    // GONE, not deprecated.
+    //
+    // A sealed bid puts only a HASH on-chain and carries (driver, amount) to the
+    // customer off-chain over the order channel; the customer reveals it when
+    // accepting. Losing bids are never attributable to anyone.
     //
     // The winner is necessarily public — they perform the delivery and get paid.
     // What this removes is the losers, which is most of the graph.
@@ -580,12 +565,19 @@ contract FareOrders is Ownable2Step, ReentrancyGuard, FareUpgradable, ERC2771Con
     {
         Order storage o = orders[orderId];
         require(o.token == address(0), "use-erc20-accept");
-        _prepareSealedAccept(o, orderId, driver, amount, salt);
+        // Native value function: read msg.sender directly, never _msgSender() —
+        // a relay must not be able to front msg.value.
+        _prepareSealedAccept(o, orderId, driver, amount, salt, msg.sender);
         require(msg.value == amount, "bad-value");
         _assign(o, orderId, driver, amount);
     }
 
     /// @notice Accept a sealed bid on a stablecoin order.
+    /// @dev Gaslessly forwardable (Option C), like the ERC-20 accept it
+    ///      replaced: the escrow is a `transferFrom` from the customer's own
+    ///      balance, so a forwarding relay never fronts value. Reads
+    ///      `_msgSender()` for exactly that reason — see the EIP-2771 note at
+    ///      the bottom of this contract.
     function acceptSealedBidERC20(uint256 orderId, address driver, uint96 amount, bytes32 salt)
         external
         whenNotPaused
@@ -594,67 +586,24 @@ contract FareOrders is Ownable2Step, ReentrancyGuard, FareUpgradable, ERC2771Con
     {
         Order storage o = orders[orderId];
         require(o.token != address(0), "use-native-accept");
-        _prepareSealedAccept(o, orderId, driver, amount, salt);
-        IERC20(o.token).safeTransferFrom(msg.sender, address(this), amount);
+        address customer = _msgSender();
+        _prepareSealedAccept(o, orderId, driver, amount, salt, customer);
+        IERC20(o.token).safeTransferFrom(customer, address(this), amount);
         _assign(o, orderId, driver, amount);
     }
 
     /// @dev Sealed-accept validation. The amount bounds are checked HERE rather
     ///      than at commit time, because at commit time the amount is hidden.
     function _prepareSealedAccept(
-        Order storage o, uint256 orderId, address driver, uint96 amount, bytes32 salt
+        Order storage o, uint256 orderId, address driver, uint96 amount, bytes32 salt, address caller
     ) internal view {
-        require(msg.sender == o.customer, "not-customer");
+        require(caller == o.customer, "not-customer");
         require(o.status == Status.Open, "bad-status");
         require(amount > 0 && amount <= o.maxFare, "bad-amount");
         require(drivers.isEligible(driver), "driver-not-eligible");
         SealedBid storage b = sealedBid[orderId][bidHashOf(orderId, driver, amount, salt)];
         require(b.exists, "no-bid");
         require(!b.revoked, "bid-revoked");
-    }
-
-    /// @notice Customer picks the winning driver — any bid, not forced-lowest,
-    ///         so reputation and stake can outweigh a marginally cheaper bid.
-    ///         The winning fare is escrowed with this call.
-    function acceptBid(uint256 orderId, address driver)
-        external
-        payable
-        whenNotPaused
-        whenNotFrozen
-        nonReentrant
-    {
-        Order storage o = orders[orderId];
-        require(o.token == address(0), "use-erc20-accept"); // native path only
-        uint96 amount = _prepareAccept(o, orderId, driver, msg.sender);
-        require(msg.value == amount, "bad-value");
-        _assign(o, orderId, driver, amount);
-    }
-
-    /// @notice Accept a bid on a stablecoin order (C3): escrow the winning fare
-    ///         in the order's token (customer must have approved this contract).
-    function acceptBidERC20(uint256 orderId, address driver)
-        external
-        whenNotPaused
-        whenNotFrozen
-        nonReentrant
-    {
-        Order storage o = orders[orderId];
-        require(o.token != address(0), "use-native-accept"); // token path only
-        // Gaslessly forwardable (Option C): transferFrom pulls the fare from the
-        // customer's own balance, so the relay never fronts value.
-        address customer = _msgSender();
-        uint96 amount = _prepareAccept(o, orderId, driver, customer);
-        IERC20(o.token).safeTransferFrom(customer, address(this), amount);
-        _assign(o, orderId, driver, amount);
-    }
-
-    /// @dev Shared accept validation; returns the winning fare to escrow.
-    function _prepareAccept(Order storage o, uint256 orderId, address driver, address caller) internal view returns (uint96 amount) {
-        require(caller == o.customer, "not-customer");
-        require(o.status == Status.Open, "bad-status");
-        amount = bidOf[orderId][driver];
-        require(amount > 0, "no-bid");
-        require(drivers.isEligible(driver), "driver-not-eligible");
     }
 
     /// @dev Shared assignment write once the fare escrow has been collected.
@@ -805,16 +754,12 @@ contract FareOrders is Ownable2Step, ReentrancyGuard, FareUpgradable, ERC2771Con
         return (o.pickupDeadline, o.deliveryDeadline);
     }
 
-    function biddersOf(uint256 orderId) external view returns (address[] memory) {
-        return _bidders[orderId];
-    }
-
     // ---- EIP-2771 context (F8) ----
     // Context is inherited via both Ownable and ERC2771Context; resolve to the
     // 2771 versions so `_msgSender()` unwraps the appended sender on a forwarded
-    // call. NATIVE value functions (createOrder/acceptBid/increaseTip) read
+    // call. NATIVE value functions (createOrder/acceptSealedBid/increaseTip) read
     // `msg.sender` directly — a relay must never front `msg.value`. The TOKEN
-    // value functions (createOrderERC20[WithPermit]/acceptBidERC20/increaseTipERC20)
+    // value functions (createOrderERC20[WithPermit]/acceptSealedBidERC20/increaseTipERC20)
     // read `_msgSender()`: their escrow is a `transferFrom` from the customer's own
     // balance, so a forwarding relay never fronts value → they are gaslessly
     // meta-forwardable (Option C).

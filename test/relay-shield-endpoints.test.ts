@@ -98,19 +98,6 @@ describe("relay shielded endpoints", function () {
   /// EIP-712 ShieldCredit — authorizes moving `bucket` out of the vault balance
   /// into the shielded queue. The commitment is deliberately NOT in this
   /// signature: it travels in the request body and stays off-chain.
-  async function signShieldCredit(account: HardhatEthersSigner, bucket: bigint, deadline: bigint, signer = account) {
-    const nonce = await vault.shieldNonce(account.address);
-    return signer.signTypedData(
-      { name: "FareVault", version: "1", chainId, verifyingContract: vault.target as string },
-      {
-        ShieldCredit: [
-          { name: "account", type: "address" }, { name: "bucket", type: "uint96" },
-          { name: "nonce", type: "uint256" }, { name: "deadline", type: "uint256" },
-        ],
-      },
-      { account: account.address, bucket, nonce, deadline }
-    );
-  }
 
   /// EIP-712 ShieldNote — this one DOES cover the commitment, which is what
   /// stops a relay substituting its own.
@@ -196,110 +183,11 @@ describe("relay shielded endpoints", function () {
 
   // ── /shield-queue ─────────────────────────────────────────────────────────
 
-  it("/shield-queue and /shield-claim refuse on a relay that keeps no payouts", async () => {
-    const res = await post("/shield-queue", { account: payee.address, bucket: BUCKET.toString(), commitment: b32(1n), deadline: 0, signature: "0x" }, plainUrl);
-    expect(res.status).to.equal(503);
-    expect((await res.json()).error).to.match(/does not keep shielded payouts/);
-
-    const claim = await fetch(`${plainUrl}/shield-claim?commitment=${b32(1n)}`);
-    expect(claim.status).to.equal(503);
-  });
-
-  it("/shield-queue validates the account, signature and commitment shape", async () => {
-    const base = { account: payee.address, bucket: BUCKET.toString(), commitment: b32(randField()), deadline: 0, signature: "0x00" };
-    const cases: [any, RegExp][] = [
-      [{ ...base, account: "nope" }, /bad account/],
-      [{ ...base, signature: 12345 }, /missing signature/],
-      [{ ...base, commitment: "0xdead" }, /32-byte hex/],
-      [{ ...base, commitment: 99 }, /32-byte hex/],
-      [{ ...base, bucket: "not-a-number" }, /bad bucket/],
-    ];
-    for (const [body, msg] of cases) {
-      const res = await post("/shield-queue", body);
-      expect(res.status, JSON.stringify(body)).to.equal(400);
-      expect((await res.json()).error).to.match(msg);
-    }
-  });
-
-  it("/shield-queue queues a payout — and the transaction never names the commitment", async () => {
-    // PRIVACY-TIERS §3: the relay holds the account↔commitment pairing, and the
-    // whole design depends on those two never sharing a transaction. The queue
-    // tx names the account, so the commitment must be absent from its calldata.
-    const commitment = b32(randField());
-    const deadline = BigInt(await time.latest()) + 3600n;
-    const signature = await signShieldCredit(payee, BUCKET, deadline);
-
-    const before = await vault.shieldPending(BUCKET);
-    const res = await post("/shield-queue", {
-      account: payee.address, bucket: BUCKET.toString(), commitment, deadline: Number(deadline), signature,
-    });
-    expect(res.status).to.equal(200);
-    const { txHash } = await res.json();
-    expect(await vault.shieldPending(BUCKET)).to.equal(before + 1n);
-
-    const tx = await ethers.provider.getTransaction(txHash);
-    const calldata = tx!.data.toLowerCase();
-    expect(calldata).to.include(payee.address.slice(2).toLowerCase(), "sanity: the account IS named");
-    expect(calldata).to.not.include(commitment.slice(2).toLowerCase(), "the queue tx leaked the commitment");
-  });
-
-  it("/shield-queue rejects a commitment it is already holding", async () => {
-    const commitment = b32(randField());
-    const mk = async () => {
-      const deadline = BigInt(await time.latest()) + 3600n;
-      return post("/shield-queue", {
-        account: payee.address, bucket: BUCKET.toString(), commitment,
-        deadline: Number(deadline), signature: await signShieldCredit(payee, BUCKET, deadline),
-      });
-    };
-    expect((await mk()).status).to.equal(200);
-    const dup = await mk();
-    expect(dup.status).to.equal(409);
-    expect((await dup.json()).error).to.match(/already queued/);
-  });
-
-  it("/shield-queue releases the held commitment when the chain rejects the authorization", async () => {
-    // The commitment is recorded BEFORE the ticket is spent, so a failed
-    // submission has to roll it back. If it did not, that commitment would 409
-    // forever and the payee could never queue it — a silent, permanent loss.
-    const commitment = b32(randField());
-    const deadline = BigInt(await time.latest()) + 3600n;
-
-    const bad = await post("/shield-queue", {
-      account: payee.address, bucket: BUCKET.toString(), commitment, deadline: Number(deadline),
-      signature: await signShieldCredit(payee, BUCKET, deadline, other), // signed by the wrong party
-    });
-    expect(bad.status).to.equal(502);
-
-    // The same commitment must now be acceptable with a good signature.
-    const d2 = BigInt(await time.latest()) + 3600n;
-    const good = await post("/shield-queue", {
-      account: payee.address, bucket: BUCKET.toString(), commitment, deadline: Number(d2),
-      signature: await signShieldCredit(payee, BUCKET, d2),
-    });
-    expect(good.status).to.equal(200, "the rollback did not release the commitment");
-  });
-
-  // ── /shield-claim ─────────────────────────────────────────────────────────
-
-  it("/shield-claim reports pending, then 404s a commitment it never held", async () => {
-    const commitment = b32(randField());
-    const deadline = BigInt(await time.latest()) + 3600n;
-    await post("/shield-queue", {
-      account: payee.address, bucket: BUCKET.toString(), commitment, deadline: Number(deadline),
-      signature: await signShieldCredit(payee, BUCKET, deadline),
-    });
-
-    const held = await fetch(`${keeperUrl}/shield-claim?commitment=${commitment}`);
-    expect(held.status).to.equal(200);
-    expect(await held.json()).to.deep.equal({ deposited: false, pending: true });
-
-    const unknown = await fetch(`${keeperUrl}/shield-claim?commitment=${b32(randField())}`);
-    expect(unknown.status).to.equal(404);
-  });
-
-  // ── /shield-note ──────────────────────────────────────────────────────────
-
+  // The /shield-queue and /shield-claim tests lived here. Both endpoints are
+  // gone with the vault's keeper path: they queued a payout for a keeper to
+  // batch, and that keeper held the account↔commitment pairing. /shield-note
+  // below is the replacement — the payee signs for their own note and the
+  // relay cannot substitute a commitment, which the third test asserts.
   it("/shield-note validates its inputs", async () => {
     const base = { account: payee.address, bucket: BUCKET.toString(), commitment: "1", deadline: 0, signature: "0x00" };
     const cases: [any, RegExp][] = [

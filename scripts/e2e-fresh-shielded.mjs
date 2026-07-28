@@ -8,7 +8,7 @@
 //   (then launch the relay with RELAY_PRIVATE_KEY = the fresh relay wallet)
 //   phase `deliver`: main shields PAS → relay /shield-withdraw funds a fresh burner
 //                    → burner COVERAGE-SWAPS PAS→USDC(1337) (the swap.mjs rail) →
-//                    gasless createOrderERC20/acceptBidERC20 via relay /forward →
+//                    gasless createOrderERC20/acceptSealedBidERC20 via relay /forward →
 //                    driver bids → relay /submit confirmPickup + confirmDropoffZK →
 //                    USDC splits to venue/driver/treasury/relay, each withdraws.
 //
@@ -31,6 +31,10 @@ import path from "path";
 import { fileURLToPath } from "url";
 import { WITHDRAW_WASM, loadWithdrawZkey } from "./shield/zkey.mjs";
 import { priceNativePerToken, planCoverage, executeSwap, fallbackAccountId, RUNTIME_PALLETS_ADDR } from "../venue-node/swap.mjs";
+
+// Sealed bids are the only bid path. A fixed salt is fine for a scripted run:
+// in production the driver picks it and it travels to the customer off-chain.
+const BID_SALT = ethers.keccak256(ethers.toUtf8Bytes("fare-e2e-bid"));
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.join(__dirname, "..");
@@ -191,7 +195,7 @@ async function deliver() {
   const USDC = new ethers.Contract(USDC_1337, ["function balanceOf(address) view returns(uint256)", "function approve(address,uint256) returns(bool)"], prov);
   const orders = new ethers.Contract(b.orders, [
     "function createOrderERC20(address,uint64,bytes32,uint96,uint96,uint96,uint64,uint64) returns(uint256)",
-    "function placeBid(uint256,uint96)", "function acceptBidERC20(uint256,address)",
+    "function bidHashOf(uint256,address,uint96,bytes32) pure returns (bytes32)", "function commitBid(uint256,bytes32,bytes32)", "function acceptSealedBid(uint256,address,uint96,bytes32) payable", "function acceptSealedBidERC20(uint256,address,uint96,bytes32)",
     "function statusOf(uint256) view returns(uint8)", "function treasury() view returns(address)",
     "function relayServiceFee(address) view returns(uint96)",
     "event OrderCreated(uint256 indexed orderId, address indexed customer, uint64 indexed venueId, uint96 orderValue, uint96 tip, uint96 maxFare, bytes32 dropCommit)",
@@ -241,7 +245,7 @@ async function deliver() {
     // ── 4. burner approves Orders for USDC (direct; gas from shielded PAS) ────
     // Approve the exact escrow total: the asset-1337 ERC20 precompile is backed by
     // pallet-assets, whose approval amount is a u128 — MaxUint256 overflows it and
-    // reverts. createOrder pulls orderValue+tip, acceptBid pulls fare → NEED_USDC.
+    // reverts. createOrder pulls orderValue+tip, the sealed accept pulls fare → NEED_USDC.
     console.log(`\n4. burner approve(Orders) ${fmt6(need)} USDC`);
     const ap = await USDC.connect(burner).approve(b.orders, need, { gasLimit: 500_000n });
     const aprc = await rec(prov, "burner", "USDC.approve(orders)", ap.hash);
@@ -261,15 +265,16 @@ async function deliver() {
     console.log(`   orderId ${st.orderId}`);
 
     // ── 6. driver bids (direct) ; burner accepts gasless via /forward ────────
-    console.log(`\n6. driver placeBid ${fmt6(FARE)} USDC (direct)`);
-    const bidTx = await orders.connect(D).placeBid(orderId, FARE, { gasLimit: 2_000_000n });
-    await rec(prov, "driver", "placeBid", bidTx.hash);
+    console.log(`\n6. driver commitBid ${fmt6(FARE)} USDC (sealed, direct)`);
+    const bidHash = await orders.bidHashOf(orderId, D.address, FARE, BID_SALT);
+    const bidTx = await orders.connect(D).commitBid(orderId, bidHash, ethers.ZeroHash, { gasLimit: 2_000_000n });
+    await rec(prov, "driver", "commitBid", bidTx.hash);
 
-    console.log(`\n7. acceptBidERC20 (escrow fare ${fmt6(FARE)}) — gasless via /forward`);
-    const acceptData = orders.interface.encodeFunctionData("acceptBidERC20", [orderId, D.address]);
+    console.log(`\n7. acceptSealedBidERC20 (escrow fare ${fmt6(FARE)}) — gasless via /forward`);
+    const acceptData = orders.interface.encodeFunctionData("acceptSealedBidERC20", [orderId, D.address, FARE, BID_SALT]);
     const acceptReq = await buildForward(burner, b.forwarder, b.orders, acceptData, chainId, prov);
     const af = await relayPost("/forward", { request: acceptReq });
-    await rec(prov, "relay(fwd)", "acceptBidERC20 (burner)", af.txHash, { usdc: FARE });
+    await rec(prov, "relay(fwd)", "acceptSealedBidERC20 (burner)", af.txHash, { usdc: FARE });
     console.log(`   status ${await orders.statusOf(orderId)} (2=Assigned)`);
 
     // ── 8. settlement via relay /submit (dual-sig pickup + ZK dropoff) ───────

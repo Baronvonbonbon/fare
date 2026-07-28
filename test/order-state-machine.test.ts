@@ -3,6 +3,7 @@ import { ethers } from "hardhat";
 import { loadFixture } from "@nomicfoundation/hardhat-toolbox/network-helpers";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { assignSealed, assignSealedERC20 } from "./helpers/bids";
 
 // The order state machine, exhaustively (TEST-PLAN D5).
 //
@@ -85,21 +86,11 @@ const ACTIONS: {
     call: (c) => c.orders.connect(c.driver).abandonOrder(c.id),
   },
   {
-    name: "placeBid",
-    legal: ["Open"],
-    call: (c) => c.orders.connect(c.driver2).placeBid(c.id, PAS("1")),
-  },
-  {
     name: "commitBid",
     legal: ["Open"],
     // Deliberately callable by anyone — it is submitted by a relay so the
     // transaction does not name the bidder.
     call: (c) => c.orders.connect(c.relay).commitBid(c.id, b32("d5-bid-" + c.id), b32("d5-rev")),
-  },
-  {
-    name: "acceptBid",
-    legal: ["Open"],
-    call: (c) => c.orders.connect(c.customer).acceptBid(c.id, c.driver.address, { value: PAS("1") }),
   },
   {
     name: "acceptSealedBid",
@@ -194,9 +185,8 @@ describe("order state machine: every action, every status", function () {
     const id = BigInt(rc.logs.find((l: any) => l.fragment?.name === "OrderCreated")!.args[0]);
     if (target === "Open") return id;
 
-    await f.orders.connect(f.driver).placeBid(id, FARE);
-    if (token) await f.orders.connect(f.customer).acceptBidERC20(id, f.driver.address);
-    else await f.orders.connect(f.customer).acceptBid(id, f.driver.address, { value: FARE });
+    if (token) await assignSealedERC20(f.orders, id, f.driver, f.customer, FARE, "reach");
+    else await assignSealed(f.orders, id, f.driver, f.customer, FARE, "reach");
 
     // Cancelled is reached from ASSIGNED, not from Open. Both produce the same
     // status, but cancelling an open order leaves no driver — and then
@@ -300,7 +290,7 @@ describe("order state machine: every action, every status", function () {
     // two halves still tile the whole grid.
     const legalCells = ACTIONS.reduce((n, a) => n + a.legal.length, 0);
     expect(illegal).to.equal(ACTIONS.length * STATUS.length - legalCells);
-    expect(illegal, "suspiciously few illegal cells — did an action lose its guard?").to.equal(86);
+    expect(illegal, "suspiciously few illegal cells — did an action lose its guard?").to.equal(72);
     expect(failures, `\n  ${failures.join("\n  ")}\n`).to.have.length(0);
   });
 
@@ -308,7 +298,7 @@ describe("order state machine: every action, every status", function () {
     // The other half, and the reason the matrix cannot be satisfied by a
     // contract that simply reverts everything: a legal cell must NOT be
     // rejected on status. It may still revert for a different reason —
-    // `acceptBid` with no bid placed, `increaseTipERC20` on a native order —
+    // `acceptSealedBid` with no bid committed, `increaseTipERC20` on a native order —
     // and those are other suites' questions.
     const f = await loadFixture(fixture);
     const failures: string[] = [];
@@ -328,7 +318,7 @@ describe("order state machine: every action, every status", function () {
     }
 
     expect(legal).to.equal(ACTIONS.reduce((n, a) => n + a.legal.length, 0));
-    expect(legal).to.equal(18);
+    expect(legal).to.equal(16);
     expect(failures, `\n  ${failures.join("\n  ")}\n`).to.have.length(0);
   });
 
@@ -355,8 +345,7 @@ describe("order state machine: every action, every status", function () {
     // The two internal helpers are reached through their public wrappers, which
     // is how the table names them.
     const viaWrapper: Record<string, string[]> = {
-      _prepareAccept: ["acceptBid"],
-      _prepareSealedAccept: ["acceptSealedBid"],
+        _prepareSealedAccept: ["acceptSealedBid"],
     };
     const covered = new Set(ACTIONS.map((a) => a.name));
     const missing: string[] = [];
@@ -395,8 +384,7 @@ describe("order state machine: every action, every status", function () {
     };
 
     const wrapper: Record<string, string> = {
-      acceptBid: "_prepareAccept",
-      acceptSealedBid: "_prepareSealedAccept",
+        acceptSealedBid: "_prepareSealedAccept",
       // Reads the same guard as its native sibling.
       increaseTipERC20: "increaseTipERC20",
     };

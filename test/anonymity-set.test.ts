@@ -17,12 +17,10 @@ import { poseidonContract } from "circomlibjs";
 
 const PAS = (n: string | number) => ethers.parseEther(String(n));
 const BUCKETS = [PAS(1), PAS(5), PAS(25)];
-const MIN_BATCH = 4;
-const MIN_DWELL = 60;
 
 describe("anonymity set, measured", () => {
   async function shieldFixture() {
-    const [owner, keeper, crediter, ...accounts] = await ethers.getSigners();
+    const [owner, crediter, ...accounts] = await ethers.getSigners();
     const vault = await (await ethers.getContractFactory("FareVault")).deploy();
     const pool = await (await ethers.getContractFactory("MockShieldPool")).deploy();
     const verifier = await (await ethers.getContractFactory("FareShieldVerifier")).deploy();
@@ -35,14 +33,12 @@ describe("anonymity set, measured", () => {
     await vault.setAuthorized(crediter.address, true);
     await vault.setShieldPool(pool.target);
     await vault.setShieldBuckets(BUCKETS);
-    await vault.setShieldKeeper(keeper.address, true);
-    await vault.setShieldParams(MIN_BATCH, MIN_DWELL, 3600);
     await vault.setShieldPoseidon(adapter.target);
     await vault.setShieldVerifier(verifier.target);
 
     const payees = accounts.slice(0, 12);
     for (const p of payees) await vault.connect(crediter).credit(p.address, { value: PAS(60) });
-    return { vault, pool, owner, keeper, crediter, payees };
+    return { vault, pool, owner, crediter, payees };
   }
 
   /// The set a ZK spend of `bucket` actually hides in: notes of THAT bucket.
@@ -118,54 +114,9 @@ describe("anonymity set, measured", () => {
     expect(last).to.equal(6);
   });
 
-  // ── the batch path (phases 1–2) ───────────────────────────────────────────
-
-  it("the batch set is the seal size, and minBatch is its floor", async () => {
-    const f = await loadFixture(shieldFixture);
-    for (let i = 0; i < MIN_BATCH; i++) await f.vault.connect(f.payees[i]).queueShieldCredit(BUCKETS[0]);
-    await time.increase(MIN_DWELL + 1);
-
-    // Below the floor the chain refuses — the set cannot be smaller than this.
-    await expect(f.vault.connect(f.keeper).sealShieldBatch(BUCKETS[0], MIN_BATCH - 1))
-      .to.be.revertedWith("batch-too-small");
-
-    await f.vault.connect(f.keeper).sealShieldBatch(BUCKETS[0], MIN_BATCH);
-    expect(await f.vault.shieldOwed(BUCKETS[0])).to.equal(MIN_BATCH);
-  });
-
-  it("a quiet bucket cannot borrow a busy one's crowd", async () => {
-    // Ten tickets exist, but only two are 5 PAS — and a 5 PAS payee waits,
-    // because the floor applies per denomination. This is "anonymity is only as
-    // large as usage" as a number: 2 < minBatch, so the batch never forms.
-    const f = await loadFixture(shieldFixture);
-    for (let i = 0; i < 8; i++) await f.vault.connect(f.payees[i]).queueShieldCredit(BUCKETS[0]);
-    for (let i = 0; i < 2; i++) await f.vault.connect(f.payees[i]).queueShieldCredit(BUCKETS[1]);
-    await time.increase(MIN_DWELL + 1);
-
-    expect(await f.vault.shieldPending(BUCKETS[0])).to.equal(8);
-    expect(await f.vault.shieldPending(BUCKETS[1])).to.equal(2);
-
-    // The busy bucket seals fine…
-    await f.vault.connect(f.keeper).sealShieldBatch(BUCKETS[0], 8);
-    // …and the quiet one still cannot, at any size it could actually fill.
-    for (const n of [1, 2, 3]) {
-      await expect(
-        f.vault.connect(f.keeper).sealShieldBatch(BUCKETS[1], n),
-        `bucket 1 should not seal ${n}`
-      ).to.be.reverted;
-    }
-  });
-
-  it("sealing a larger batch buys a larger set — the floor is not the ceiling", async () => {
-    // A regression guard on the live-run finding: the per-transaction deposit
-    // ceiling must not become the anonymity set. Sealing 8 gives a set of 8
-    // even though deposits go out two at a time.
-    const f = await loadFixture(shieldFixture);
-    for (let i = 0; i < 8; i++) await f.vault.connect(f.payees[i]).queueShieldCredit(BUCKETS[0]);
-    await time.increase(MIN_DWELL + 1);
-
-    await f.vault.connect(f.keeper).sealShieldBatch(BUCKETS[0], 8);
-    expect(await f.vault.shieldOwed(BUCKETS[0])).to.equal(8);
-    expect(Number(await f.vault.shieldOwed(BUCKETS[0]))).to.be.greaterThan(MIN_BATCH);
-  });
+  // The batch path (phases 1–2) had three tests here, measuring the seal size as
+  // its anonymity set and the per-denomination floor. That path is gone: its set
+  // was only ever the seal, and a keeper could substitute its own commitments.
+  // What replaced it is measured above — a ZK spend hides among every unspent
+  // note of its bucket, with no keeper in the picture at all.
 });

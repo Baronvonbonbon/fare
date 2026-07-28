@@ -2,8 +2,9 @@ import { expect } from "chai";
 import { ethers } from "hardhat";
 import { loadFixture, time } from "@nomicfoundation/hardhat-toolbox/network-helpers";
 import type { HardhatEthersSigner } from "@nomicfoundation/hardhat-ethers/signers";
+import { bidSalt, revokeHashFor } from "./helpers/bids";
 
-// Option C — GASLESS stablecoin orders. createOrderERC20 / acceptBidERC20 read
+// Option C — GASLESS stablecoin orders. createOrderERC20 / acceptSealedBidERC20 read
 // _msgSender() (their escrow is a transferFrom from the customer's own balance,
 // so a forwarding relay never fronts value), and createOrderERC20WithPermit
 // carries an EIP-2612 permit so there's no separate approve. A customer with
@@ -97,7 +98,7 @@ describe("FARE — gasless stablecoin orders (Option C)", () => {
     expect(await f.usdc.balanceOf(f.customer.address)).to.equal(USDC(1000) - ORDER_VALUE - TIP);
   });
 
-  it("acceptBidERC20 is gaslessly forwardable (relay pays, escrow from customer)", async () => {
+  it("acceptSealedBidERC20 is gaslessly forwardable (relay pays, escrow from customer)", async () => {
     const f = await loadFixture(deploy);
     // create (gasless) with a MaxUint256 permit so accept needs no further approve
     const p = await signPermit(f.usdc, f.customer, f.orders.target as string, ethers.MaxUint256, f.chainId);
@@ -105,10 +106,15 @@ describe("FARE — gasless stablecoin orders (Option C)", () => {
       f.usdc.target, f.venueId, commit, ORDER_VALUE, TIP, MAX_FARE, 0, 0, p.value, p.deadline, p.v, p.r, p.s]);
     await f.forwarder.connect(f.relay).execute(await signForward(f.forwarder, f.customer, f.orders.target as string, cData, f.chainId));
 
-    await f.orders.connect(f.driverS).placeBid(1n, FARE);
+    // Sealed commit — submitted by the relay, so the chain never names the bidder.
+    const salt = bidSalt("gasless");
+    const hash = await f.orders.bidHashOf(1n, f.driverS.address, FARE, salt);
+    await f.orders.connect(f.relay).commitBid(1n, hash, revokeHashFor("gasless"));
 
-    // accept, forwarded (customer still zero-gas)
-    const aData = f.orders.interface.encodeFunctionData("acceptBidERC20", [1n, f.driverS.address]);
+    // accept, forwarded (customer still zero-gas). The sealed ERC-20 accept
+    // reads _msgSender(), so the escrow is pulled from the CUSTOMER while the
+    // relay pays gas — the property the removed acceptBidERC20 used to carry.
+    const aData = f.orders.interface.encodeFunctionData("acceptSealedBidERC20", [1n, f.driverS.address, FARE, salt]);
     await f.forwarder.connect(f.relay).execute(await signForward(f.forwarder, f.customer, f.orders.target as string, aData, f.chainId));
 
     const o = await f.orders.orders(1n);

@@ -45,9 +45,11 @@ Drivers were the most exposed party a month ago and are now the most improved.
 
 | Closed | How |
 |---|---|
+| The keeper's divertible buffer | **Removed.** The three-transaction ticket path (`queueShieldCredit` → `sealShieldBatch` → `depositShieldBatch`) and `setShieldKeeper` are gone from the vault. Its anonymity set was only the seal size, and the keeper held the account↔commitment pairing, so it could substitute its own commitments — dormant only because nobody was authorized, and one owner call from being live. The ZK note path needs no keeper and is permissionless. |
 | Revenue graph | Payouts enter the shielded pool. With the ZK path the anonymity set is every unspent note **of the same bucket**, not a batch — the bucket is a public signal of the spend, so denominations partition the crowd (measured in `test/anonymity-set.test.ts`). |
 | Name, vehicle, plate, contact | On-chain is `keccak256(profile)`; the details are revealed only to the order counterparty and refused unless they hash to that commitment |
 | Losing bids | Sealed: only a hash is committed, and a relay submits it, so the chain never sees who bid or how much |
+| The open-bid escape hatch | **Removed.** `placeBid`/`withdrawBid`/`acceptBid`/`acceptBidERC20` and the public bid mapping are gone from the contract, not merely un-offered by the UI. Sealed bids were additive at first, which made the guarantee a default a driver could opt out of; there is now no second path to opt into. Asserted by absence in `test/expected-leaks.test.ts`. |
 | Pickup coordinates | Coarsened to ~33 m and no longer emitted |
 
 | Open | Why it matters |
@@ -55,7 +57,6 @@ Drivers were the most exposed party a month ago and are now the most improved.
 | **Persistent identity** | Stake, reputation, and the winning assignment are address-bound. Anonymous driver credentials (membership + reputation proof) were never in scope. |
 | **Per-order earnings** | `OrderDelivered` publishes the amount paid. |
 | **The winning bid is public** | Unavoidable in this design — the winner performs the delivery and is paid. Sealed bids remove the losers, which is most of the graph, not all of it. |
-| **The open-bid path still exists** | Sealed bids are additive. A driver bidding through the old path still publishes price and availability; the UI defaults to sealed and says so, but the choice is theirs. |
 
 ## Venue
 
@@ -77,7 +78,6 @@ Drivers were the most exposed party a month ago and are now the most improved.
 | **Relay metadata** | Request bodies are padded to fixed blocks, a note spend routes away from the relay that saw its insert, and client addresses are hashed under a rotating salt so no table of callers is kept. But with a single relay configured there is no split to make, and a malicious relay can still drop a disclosure capsule and get an honest party ruled against. |
 | **Anonymity is only as large as usage** | An empty note tree is an anonymity set of one. The mechanisms are right; the privacy is whatever adoption provides. |
 | **Amounts are public everywhere** | Order values, fees, and payouts. Hiding them needs confidential escrow, which nothing here provides. |
-| **A shield keeper can divert the ticket-path buffer** | Not currently reachable: no keeper is authorized on the live deployment, and the ZK path needs none. It becomes real the moment someone runs `setShieldKeeper`. |
 
 ---
 

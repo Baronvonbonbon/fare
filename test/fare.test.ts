@@ -2,6 +2,7 @@ import { expect } from "chai";
 import { ethers } from "hardhat";
 import { loadFixture, time } from "@nomicfoundation/hardhat-toolbox/network-helpers";
 import type { HardhatEthersSigner } from "@nomicfoundation/hardhat-ethers/signers";
+import { assignSealed, commitSealed, bidSalt } from "./helpers/bids";
 
 // ---- coordinate fixtures (San Francisco) ----
 const VENUE_LAT = 37_774_900; // 37.7749° N in microdegrees
@@ -201,10 +202,12 @@ describe("FARE protocol", () => {
         value: ORDER_VALUE + TIP,
       });
     const orderId = 1n;
-    await f.orders.connect(f.driver1).placeBid(orderId, ethers.parseEther("0.45"));
-    await f.orders.connect(f.driver2).placeBid(orderId, ethers.parseEther("0.4"));
+    // Two sealed bids; the customer reveals the one it accepts. driver1's losing
+    // bid is never attributable to driver1 on-chain.
+    await commitSealed(f.orders, orderId, f.driver1, ethers.parseEther("0.45"), "d1");
+    const win = await commitSealed(f.orders, orderId, f.driver2, ethers.parseEther("0.4"), "d2");
     const fare = ethers.parseEther("0.4");
-    await f.orders.connect(f.customer).acceptBid(orderId, f.driver2.address, { value: fare });
+    await f.orders.connect(f.customer).acceptSealedBid(orderId, f.driver2.address, fare, win.salt, { value: fare });
     return { orderId, fare };
   }
 
@@ -393,8 +396,7 @@ describe("FARE protocol", () => {
         .createOrder(f.venueId, commit, 0, 0, MAX_FARE, 0, 0, { value: 0 });
       const orderId = 1n;
       const fare = ethers.parseEther("0.3");
-      await f.orders.connect(f.driver1).placeBid(orderId, fare);
-      await f.orders.connect(f.customer).acceptBid(orderId, f.driver1.address, { value: fare });
+      await assignSealed(f.orders, orderId, f.driver1, f.customer, fare);
 
       await confirmPickupOk(f, orderId, f.driver1);
       expect(await f.vault.balanceOf(f.venueOp.address)).to.equal(0n); // nothing to release
@@ -412,38 +414,45 @@ describe("FARE protocol", () => {
         .createOrder(f.venueId, commit, 0, 0, MAX_FARE, 0, 0, { value: 0 });
       const orderId = 1n;
 
+      // Eligibility and the fare bound are enforced at ACCEPT, not at commit:
+      // a sealed commit is only a hash, so the contract cannot see who bid or
+      // how much until the customer reveals it.
+      const ineligible = await commitSealed(f.orders, orderId, f.stranger, ethers.parseEther("0.1"), "stranger");
       await expect(
-        f.orders.connect(f.stranger).placeBid(orderId, ethers.parseEther("0.1"))
+        f.orders.connect(f.customer)
+          .acceptSealedBid(orderId, f.stranger.address, ethers.parseEther("0.1"), ineligible.salt, { value: ethers.parseEther("0.1") })
       ).to.be.revertedWith("driver-not-eligible");
+
+      const overMax = await commitSealed(f.orders, orderId, f.driver1, MAX_FARE + 1n, "over");
       await expect(
-        f.orders.connect(f.driver1).placeBid(orderId, MAX_FARE + 1n)
+        f.orders.connect(f.customer)
+          .acceptSealedBid(orderId, f.driver1.address, MAX_FARE + 1n, overMax.salt, { value: MAX_FARE + 1n })
       ).to.be.revertedWith("bad-amount");
 
-      // rebid replaces, doesn't duplicate the bidder list
-      await f.orders.connect(f.driver1).placeBid(orderId, ethers.parseEther("0.45"));
-      await f.orders.connect(f.driver1).placeBid(orderId, ethers.parseEther("0.42"));
-      expect((await f.orders.biddersOf(orderId)).length).to.equal(1);
+      const bid = await commitSealed(f.orders, orderId, f.driver1, ethers.parseEther("0.42"), "real");
 
       // exact fare escrow required
       await expect(
-        f.orders
-          .connect(f.customer)
-          .acceptBid(orderId, f.driver1.address, { value: ethers.parseEther("0.41") })
+        f.orders.connect(f.customer)
+          .acceptSealedBid(orderId, f.driver1.address, ethers.parseEther("0.42"), bid.salt, { value: ethers.parseEther("0.41") })
       ).to.be.revertedWith("bad-value");
       // only the customer picks
       await expect(
-        f.orders
-          .connect(f.stranger)
-          .acceptBid(orderId, f.driver1.address, { value: ethers.parseEther("0.42") })
+        f.orders.connect(f.stranger)
+          .acceptSealedBid(orderId, f.driver1.address, ethers.parseEther("0.42"), bid.salt, { value: ethers.parseEther("0.42") })
       ).to.be.revertedWith("not-customer");
-
-      // withdrawn bid can't be accepted
-      await f.orders.connect(f.driver1).withdrawBid(orderId);
+      // a bid nobody committed cannot be conjured by naming a different amount
       await expect(
-        f.orders
-          .connect(f.customer)
-          .acceptBid(orderId, f.driver1.address, { value: ethers.parseEther("0.42") })
+        f.orders.connect(f.customer)
+          .acceptSealedBid(orderId, f.driver1.address, ethers.parseEther("0.43"), bid.salt, { value: ethers.parseEther("0.43") })
       ).to.be.revertedWith("no-bid");
+
+      // revoked bid can't be accepted
+      await f.orders.connect(f.driver1).revokeBid(orderId, bid.hash, bidSalt("real"));
+      await expect(
+        f.orders.connect(f.customer)
+          .acceptSealedBid(orderId, f.driver1.address, ethers.parseEther("0.42"), bid.salt, { value: ethers.parseEther("0.42") })
+      ).to.be.revertedWith("bid-revoked");
     });
 
     it("tips can be increased until dropoff", async () => {
@@ -461,26 +470,31 @@ describe("FARE protocol", () => {
   });
 
   describe("gasless meta-transactions (F8)", () => {
-    it("placeBid via the forwarder: bid recorded under the driver, relay pays gas", async () => {
+    // This used to forward `placeBid` and assert the bid was recorded under the
+    // driver rather than the relay. `placeBid` is gone, and its sealed
+    // replacement deliberately names NOBODY on-chain, so there is no identity
+    // left for the forwarder to preserve there. The F8 property still matters
+    // for the actions that do read `_msgSender()`, so it is pinned on one:
+    // cancelOpen is customer-authorized, so forwarding it proves the contract
+    // sees the customer and not the relay that paid.
+    it("cancelOpen via the forwarder: attributed to the customer, relay pays gas", async () => {
       const f = await loadFixture(deployAll);
-      // an Open order to bid on
       const commit = dropCommit(DROP_LAT, DROP_LON, DROP_SALT);
       await f.orders.connect(f.customer).createOrder(f.venueId, commit, 0, 0, MAX_FARE, 0, 0, { value: 0 });
       const orderId = 1n;
 
-      const amount = ethers.parseEther("0.3");
-      const data = f.orders.interface.encodeFunctionData("placeBid", [orderId, amount]);
-      const req = await signForwardRequest(f.forwarder, f.driver1, f.orders.target as string, data);
+      const data = f.orders.interface.encodeFunctionData("cancelOpen", [orderId]);
+      const req = await signForwardRequest(f.forwarder, f.customer, f.orders.target as string, data);
 
-      // driver1 holds NO gas of its own; the relay (deployer) submits + pays.
-      const driverBalBefore = await ethers.provider.getBalance(f.driver1.address);
+      // the customer holds NO gas of its own; the relay (deployer) submits + pays.
+      const customerBalBefore = await ethers.provider.getBalance(f.customer.address);
       await expect(f.forwarder.connect(f.deployer).execute(req))
-        .to.emit(f.orders, "BidPlaced")
-        .withArgs(orderId, f.driver1.address, amount); // identity = driver1, not the relay
+        .to.emit(f.orders, "OrderCancelled")
+        .withArgs(orderId, 0, 0, 0); // REASON_CUSTOMER_OPEN — so _msgSender() resolved to the customer
 
-      expect(await f.orders.bidOf(orderId, f.driver1.address)).to.equal(amount);
-      // the driver spent nothing — fully gasless
-      expect(await ethers.provider.getBalance(f.driver1.address)).to.equal(driverBalBefore);
+      expect((await f.orders.orders(orderId)).status).to.equal(5); // Cancelled
+      // the customer spent nothing — fully gasless
+      expect(await ethers.provider.getBalance(f.customer.address)).to.equal(customerBalBefore);
     });
 
     it("rate via the forwarder: the order's customer rates gaslessly", async () => {
@@ -499,13 +513,13 @@ describe("FARE protocol", () => {
     it("a forged forward request (signer ≠ from) is rejected by the forwarder", async () => {
       const f = await loadFixture(deployAll);
       await f.orders.connect(f.customer).createOrder(f.venueId, dropCommit(DROP_LAT, DROP_LON, DROP_SALT), 0, 0, MAX_FARE, 0, 0, { value: 0 });
-      const data = f.orders.interface.encodeFunctionData("placeBid", [1n, ethers.parseEther("0.3")]);
-      // stranger signs but claims to be driver1 → OZ forwarder validates the sig
-      // against `from` and refuses to execute.
+      const data = f.orders.interface.encodeFunctionData("cancelOpen", [1n]);
+      // stranger signs but claims to be the customer → OZ forwarder validates the
+      // sig against `from` and refuses to execute.
       const req = await signForwardRequest(f.forwarder, f.stranger, f.orders.target as string, data);
-      req.from = f.driver1.address;
+      req.from = f.customer.address;
       await expect(f.forwarder.connect(f.deployer).execute(req)).to.be.reverted;
-      expect(await f.orders.bidOf(1n, f.driver1.address)).to.equal(0n);
+      expect((await f.orders.orders(1n)).status).to.equal(1); // still Open
     });
   });
 
@@ -857,8 +871,7 @@ describe("FARE protocol", () => {
       const commit = dropCommit(DROP_LAT, DROP_LON, DROP_SALT);
       await f.orders.connect(f.customer).createOrder(f.venueId, commit, ORDER_VALUE, TIP, MAX_FARE, 0, 0, { value: ORDER_VALUE + TIP });
       const o2 = 2n;
-      await f.orders.connect(f.driver2).placeBid(o2, ethers.parseEther("0.4"));
-      await f.orders.connect(f.customer).acceptBid(o2, f.driver2.address, { value: ethers.parseEther("0.4") });
+      await assignSealed(f.orders, o2, f.driver2, f.customer, ethers.parseEther("0.4"));
       await confirmPickupOk(f, o2, f.driver2);
       await confirmDropoffOk(f, o2, f.driver2);
       await f.ratings.connect(f.customer).rate(o2, 2, 0);
@@ -943,7 +956,7 @@ describe("FARE protocol", () => {
           .createOrder(f.venueId, commit, 0, 0, MAX_FARE, 0, 0, { value: 0 })
       ).to.be.revertedWith("paused");
       await expect(
-        f.orders.connect(f.driver1).placeBid(1n, ethers.parseEther("0.1"))
+        f.orders.connect(f.driver1).commitBid(1n, ethers.keccak256(ethers.toUtf8Bytes("x")), ethers.ZeroHash)
       ).to.be.revertedWith("paused");
       // exit path stays open under pause
       await f.orders.connect(f.customer).cancelOpen(1n);

@@ -26,13 +26,16 @@ import { poseidon3 } from "poseidon-lite";
 //
 // ── What is deliberately NOT here ────────────────────────────────────────────
 //
-// Four Open rows are not claims about chain data and cannot be leak tests:
+// Three Open rows are not claims about chain data and cannot be leak tests:
 // the single-party trusted setups (a process fact — C4's mainnet gate),
-// relay metadata (B5), "anonymity is only as large as usage" (B4's measured
-// numbers), and the dormant shield keeper (unreachable until someone calls
-// `setShieldKeeper`; the authority is covered by C3). They are listed here as
-// data so the completeness check can account for every row rather than
-// silently ignoring the ones that were inconvenient.
+// relay metadata (B5), and "anonymity is only as large as usage" (B4's measured
+// numbers). They are listed here as data so the completeness check can account
+// for every row rather than silently ignoring the ones that were inconvenient.
+//
+// Two rows left this list by being CLOSED rather than delegated: the open-bid
+// path and the divertible shield keeper were both REMOVED from the contracts.
+// The open-bid one still has a test — it now asserts the functions are absent
+// from the ABI, which is the direction this file usually runs in reverse.
 //
 // ── Maintenance ─────────────────────────────────────────────────────────────
 //
@@ -58,7 +61,6 @@ const PINNED_ROWS = [
   "**Persistent identity**",
   "**Per-order earnings**",
   "**The winning bid is public**",
-  "**The open-bid path still exists**",
   "**Location and menu are public**",
   "**Settlement names the venue**",
   "**Amounts are public everywhere**",
@@ -71,7 +73,6 @@ const DELEGATED_ROWS: Record<string, string> = {
   "**Both trusted setups are single-party**": "C4 — mainnet gate, a process fact",
   "**Relay metadata**": "B5 — venue-node/relaymeta.test.mjs",
   "**Anonymity is only as large as usage**": "B4 — test/anonymity-set.test.ts",
-  "**A shield keeper can divert the ticket-path buffer**": "C3 — unreachable until setShieldKeeper",
   "**Order volume and timing**": "derived from the venue edge; no separate on-chain fact",
 };
 
@@ -281,18 +282,25 @@ describe("expected leaks: the Open list, executable", function () {
     );
   });
 
-  it("the open-bid path still exists and publishes price and availability", async () => {
-    // Sealed bids are additive; the old path is still callable, and a driver
-    // using it still names themselves and their price on chain. The UI defaults
-    // to sealed and says so, but the choice is the driver's.
-    const open = await orders.connect(loser).placeBid.staticCall(orderId, PAS(1)).then(() => true).catch(() => false);
-    const bidderView = typeof orders.bidOf === "function";
-    stillLeaks(
-      "**The open-bid path still exists**",
-      typeof orders.placeBid === "function" && bidderView,
-      "placeBid or its public bid mapping is gone"
-    );
-    void open; // the call reverts once assigned; existence is the claim
+  it("the open-bid path is GONE — there is no way to publish price and availability", async () => {
+    // This used to be a documented leak: sealed bids were additive, the old path
+    // stayed callable, and a driver who used it named themselves and their price
+    // on-chain forever. The UI defaulted to sealed, but the choice was the
+    // driver's — which makes it a default, not a guarantee.
+    //
+    // The path is now removed from the contract, so this asserts its ABSENCE.
+    // Reading it off the ABI is the point: a leak you can no longer call is
+    // closed in a way that a leak the UI merely avoids is not.
+    for (const gone of ["placeBid", "withdrawBid", "acceptBid", "acceptBidERC20", "bidOf", "biddersOf"]) {
+      expect(orders.interface.hasFunction(gone), `${gone} is still on the contract`).to.equal(false);
+    }
+    // And the events that published the bid graph are gone with them.
+    for (const gone of ["BidPlaced", "BidWithdrawn"]) {
+      expect(orders.interface.hasEvent(gone), `${gone} is still emitted`).to.equal(false);
+    }
+    // The replacement is reachable, so this is a removal, not an amputation.
+    expect(orders.interface.hasFunction("commitBid")).to.equal(true);
+    expect(orders.interface.hasFunction("acceptSealedBid")).to.equal(true);
   });
 
   // ── Venue ─────────────────────────────────────────────────────────────────

@@ -1,6 +1,7 @@
 import { expect } from "chai";
 import { ethers } from "hardhat";
 import { loadFixture } from "@nomicfoundation/hardhat-toolbox/network-helpers";
+import { assignSealed } from "./helpers/bids";
 
 // Sealed bids (privacy phase 4).
 //
@@ -200,8 +201,7 @@ describe("sealed bids (privacy phase 4)", () => {
 
   it("leaves the open-bid path working, so the change is additive", async () => {
     const f = await loadFixture(fixture);
-    await f.orders.connect(f.driver1).placeBid(f.orderId, PAS("0.6"));
-    await f.orders.connect(f.customer).acceptBid(f.orderId, f.driver1.address, { value: PAS("0.6") });
+    await assignSealed(f.orders, f.orderId, f.driver1, f.customer, PAS("0.6"));
     expect((await f.orders.orders(f.orderId)).status).to.equal(2);
   });
 });

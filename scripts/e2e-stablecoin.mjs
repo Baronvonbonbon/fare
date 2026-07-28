@@ -1,6 +1,6 @@
 // Live stablecoin (C3) e2e on Paseo — the full delivery lifecycle escrowed and
 // settled ENTIRELY in USDC (6-decimal MockUSDC), the ERC-20 path:
-//   mint + approve → createOrderERC20 → placeBid → acceptBidERC20 → confirmPickup
+//   mint + approve → createOrderERC20 → commitBid → acceptSealedBidERC20 → confirmPickup
 //   → confirmDropoffZK → withdrawToken payouts.
 // Reuses the registered venue (id 3) + driver from the native e2e; a fresh
 // customer holds USDC (escrow) + PAS (gas). Settlement is submitted by the
@@ -14,6 +14,9 @@ import {
   ROOT, provider, book, env, loadState, waitTx, leanGas, GAS_PRICE_WEI, fmt, eth,
 } from "./shield/e2e-lib.mjs";
 
+// Sealed bids are the only bid path. A fixed salt is fine for a scripted run:
+// in production the driver picks it and it travels to the customer off-chain.
+const BID_SALT = ethers.keccak256(ethers.toUtf8Bytes("fare-e2e-bid"));
 const OFF_LAT = 90_000_000n, OFF_LON = 180_000_000n;
 const encLat = (m) => BigInt(m) + OFF_LAT, encLon = (m) => BigInt(m) + OFF_LON;
 const b32 = (x) => ethers.zeroPadValue(ethers.toBeHex(x), 32);
@@ -70,7 +73,7 @@ async function main() {
   ], deployer);
   const orders = new ethers.Contract(b.orders, [
     "function createOrderERC20(address,uint64,bytes32,uint96,uint96,uint96,uint64,uint64) returns(uint256)",
-    "function placeBid(uint256,uint96)", "function acceptBidERC20(uint256,address)",
+    "function bidHashOf(uint256,address,uint96,bytes32) pure returns (bytes32)", "function commitBid(uint256,bytes32,bytes32)", "function acceptSealedBid(uint256,address,uint96,bytes32) payable", "function acceptSealedBidERC20(uint256,address,uint96,bytes32)",
     "function nextOrderId() view returns(uint256)", "function statusOf(uint256) view returns(uint8)",
     "function dropCommitOf(uint256) view returns(bytes32)", "function treasury() view returns(address)", "function feeBps() view returns(uint16)",
   ], prov);
@@ -106,21 +109,23 @@ async function main() {
   }
   const orderId = BigInt(st.orderId);
 
-  // ── 3. driver placeBid ─────────────────────────────────────────────────────
+  // ── 3. driver commitBid (sealed) ───────────────────────────────────────────
   if (!st.bid) {
-    console.log(`\n3. driver placeBid ${fmt6(FARE)} USDC`);
+    console.log(`\n3. driver commitBid ${fmt6(FARE)} USDC (sealed — the chain sees only a hash)`);
     const od = orders.connect(D);
-    const tx = await od.placeBid(orderId, FARE, { gasLimit: await leanGas(od.placeBid, [orderId, FARE]) });
-    await rec(prov, { step: "S.bid", party: "driver", action: "placeBid", hash: tx.hash });
+    const h = await orders.bidHashOf(orderId, D.address, FARE, BID_SALT);
+    const tx = await od.commitBid(orderId, h, ethers.ZeroHash, { gasLimit: await leanGas(od.commitBid, [orderId, h, ethers.ZeroHash]) });
+    await rec(prov, { step: "S.bid", party: "driver", action: "commitBid", hash: tx.hash });
     st.bid = true; saveSt(st);
   }
 
-  // ── 4. acceptBidERC20 (pulls fare in USDC) ─────────────────────────────────
+  // ── 4. acceptSealedBidERC20 (pulls fare in USDC) ───────────────────────────
   if (!st.accepted) {
-    console.log(`\n4. customer acceptBidERC20 (escrows fare ${fmt6(FARE)} USDC)`);
+    console.log(`\n4. customer acceptSealedBidERC20 (escrows fare ${fmt6(FARE)} USDC)`);
     const oc = orders.connect(C);
-    const tx = await oc.acceptBidERC20(orderId, D.address, { gasLimit: await leanGas(oc.acceptBidERC20, [orderId, D.address]) });
-    await rec(prov, { step: "S.accept", party: "customer", action: "acceptBidERC20", hash: tx.hash, tokenValue: FARE });
+    const a = [orderId, D.address, FARE, BID_SALT];
+    const tx = await oc.acceptSealedBidERC20(...a, { gasLimit: await leanGas(oc.acceptSealedBidERC20, a) });
+    await rec(prov, { step: "S.accept", party: "customer", action: "acceptSealedBidERC20", hash: tx.hash, tokenValue: FARE });
     st.accepted = true; saveSt(st);
   }
   console.log(`   status ${await orders.statusOf(orderId)} (2=Assigned)`);

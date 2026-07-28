@@ -158,22 +158,30 @@ describe("Invariant fuzz: escrow conservation & vault solvency", () => {
       created.push({ id: BigInt(created.length + 1), customer, dropCommit, salt, status: 1 });
       return "create";
     }
+    // Bids are SEALED: only a hash reaches the chain, so there is no on-chain
+    // bidder list to read back. The fuzzer keeps its own, exactly as a real
+    // customer's client does — the terms travel off-chain and are revealed at
+    // accept. Losing that map would strand the order, which is the property.
+    const openBids = new Map<string, { addr: string; amt: bigint; salt: string }[]>();
+
     async function opBid(info: OrderInfo) {
       const o = await orders.orders(info.id);
       const amount = someWei() % o.maxFare || 1n;
-      await (await orders.connect(pick(drivers)).placeBid(info.id, amount)).wait();
+      const driver = pick(drivers);
+      const held = openBids.get(String(info.id)) ?? [];
+      const salt = ethers.keccak256(abi.encode(["uint256", "uint256"], [info.id, BigInt(held.length)]));
+      const hash = await orders.bidHashOf(info.id, driver.address, amount, salt);
+      await (await orders.commitBid(info.id, hash, ethers.ZeroHash)).wait();
+      held.push({ addr: driver.address, amt: amount, salt });
+      openBids.set(String(info.id), held);
       return "bid";
     }
     async function opAccept(info: OrderInfo) {
-      const bidders: string[] = await orders.biddersOf(info.id);
-      const withBids: { addr: string; amt: bigint }[] = [];
-      for (const b of bidders) {
-        const amt = await orders.bidOf(info.id, b);
-        if (amt > 0n) withBids.push({ addr: b, amt });
-      }
-      if (withBids.length === 0) throw new Error("no-bids");
-      const win = pick(withBids);
-      await (await orders.connect(info.customer).acceptBid(info.id, win.addr, { value: win.amt })).wait();
+      const held = openBids.get(String(info.id)) ?? [];
+      if (held.length === 0) throw new Error("no-bids");
+      const win = pick(held);
+      await (await orders.connect(info.customer)
+        .acceptSealedBid(info.id, win.addr, win.amt, win.salt, { value: win.amt })).wait();
       return "accept";
     }
     async function opTip(info: OrderInfo) {
@@ -260,9 +268,7 @@ describe("Invariant fuzz: escrow conservation & vault solvency", () => {
       const r = rng();
       switch (info.status) {
         case 1: { // Open
-          const bidders: string[] = await orders.biddersOf(info.id);
-          let anyBid = false;
-          for (const b of bidders) if ((await orders.bidOf(info.id, b)) > 0n) { anyBid = true; break; }
+          const anyBid = (openBids.get(String(info.id)) ?? []).length > 0;
           if (!anyBid) return opBid(info);                 // no bids yet → bid
           if (r < 0.68) return opAccept(info);             // advance
           if (r < 0.83) return opBid(info);

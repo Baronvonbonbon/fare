@@ -63,8 +63,13 @@ async function main() {
   const orderId = (await orders.nextOrderId()) - 1n;
 
   console.log("Placing bids...");
-  await (await orders.connect(driver1).placeBid(orderId, ethers.parseEther("0.45"))).wait();
-  await (await orders.connect(driver2).placeBid(orderId, ethers.parseEther("0.4"))).wait();
+  // Sealed bids: only a hash reaches the chain, so the seeded order looks like a
+  // real one. In production a relay submits these so the bidder is never named.
+  const bidSalt = (tag: string) => ethers.keccak256(ethers.toUtf8Bytes(tag));
+  for (const [d, amt, tag] of [[driver1, "0.45", "seed-d1"], [driver2, "0.4", "seed-d2"]] as const) {
+    const h = await orders.bidHashOf(orderId, d.address, ethers.parseEther(amt), bidSalt(tag));
+    await (await orders.commitBid(orderId, h, ethers.ZeroHash)).wait();
+  }
 
   console.log(`\nSeeded: venue #${venueId}, order #${orderId} with 2 bids.`);
   console.log(`Drop location salt (customer keeps this secret until dropoff): ${salt}`);

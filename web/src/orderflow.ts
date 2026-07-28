@@ -38,7 +38,6 @@ export interface OrderRow {
   pickupDeadline: bigint;
   deliveryDeadline: bigint;
   token: string;
-  bidders: { addr: string; amount: bigint; delivered: number; failed: number; ratingX100: number; ratingN: number }[];
 }
 
 export interface VenueRow {

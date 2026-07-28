@@ -2,7 +2,7 @@
 //
 //   1. customer-main deposits 5 PAS into the KS pool (the only linkable step)
 //   2. relay submits proxy_withdraw → the fresh burner receives 5 PAS, UNLINKED
-//   3. burner: createOrder → driver bids → burner acceptBid
+//   3. burner: createOrder → driver commits a sealed bid → burner acceptSealedBid
 //   4. relay (gasless): confirmPickup (dual-sig GPS) → confirmDropoffZK (Groth16)
 //   5. venue & driver pull their payouts from the vault
 //   6. shielded return: burner re-deposits its residual into the KS pool
@@ -19,6 +19,9 @@ import {
   KS_POOL, fmt, eth,
 } from "./e2e-lib.mjs";
 
+// Sealed bids are the only bid path. A fixed salt is fine for a scripted run:
+// in production the driver picks it and it travels to the customer off-chain.
+const BID_SALT = ethers.keccak256(ethers.toUtf8Bytes("fare-e2e-bid"));
 const BN254_R = 21888242871839275222246405745257275088548364400416034343698204186575808495617n;
 const OFF_LAT = 90_000_000n, OFF_LON = 180_000_000n;
 const encLat = (m) => BigInt(m) + OFF_LAT, encLon = (m) => BigInt(m) + OFF_LON;
@@ -150,8 +153,9 @@ async function main() {
   // ─── 3. Order lifecycle from the burner ────────────────────────────────────
   const orders = new ethers.Contract(bk.orders, [
     "function createOrder(uint64,bytes32,uint96,uint96,uint96,uint64,uint64) payable returns (uint256)",
-    "function placeBid(uint256,uint96)",
-    "function acceptBid(uint256,address) payable",
+    "function bidHashOf(uint256,address,uint96,bytes32) pure returns (bytes32)",
+    "function commitBid(uint256,bytes32,bytes32)",
+    "function acceptSealedBid(uint256,address,uint96,bytes32) payable",
     "function nextOrderId() view returns (uint256)",
     "function statusOf(uint256) view returns (uint8)",
     "function dropCommitOf(uint256) view returns (bytes32)",
@@ -179,22 +183,24 @@ async function main() {
 
   // driver bids
   if (!st.run.bidHash) {
-    console.log(`\n4. driver placeBid(${fmt(FARE)} PAS)`);
+    console.log(`\n4. driver commitBid(${fmt(FARE)} PAS) — sealed, the chain sees only a hash`);
     const od = orders.connect(D);
-    const gl = await leanGas(od.placeBid, [orderId, FARE]);
+    const h = await orders.bidHashOf(orderId, D.address, FARE, BID_SALT);
+    const gl = await leanGas(od.commitBid, [orderId, h, ethers.ZeroHash]);
     const nonce = await prov.getTransactionCount(D.address);
-    const tx = await od.placeBid(orderId, FARE, { gasLimit: gl, nonce });
-    await record(prov, { step: "B.bid", party: "driver", action: "placeBid", hash: tx.hash });
+    const tx = await od.commitBid(orderId, h, ethers.ZeroHash, { gasLimit: gl, nonce });
+    await record(prov, { step: "B.bid", party: "driver", action: "commitBid", hash: tx.hash });
     st.run.bidHash = tx.hash; saveState(st);
   } else console.log("\n4. = bid already placed");
 
   // burner accepts
   if (!st.run.acceptHash) {
-    console.log(`\n5. burner acceptBid(driver, ${fmt(FARE)} PAS)`);
-    const gl = await leanGas(orders.acceptBid, [orderId, D.address], { value: FARE });
+    console.log(`\n5. burner acceptSealedBid(driver, ${fmt(FARE)} PAS)`);
+    const a = [orderId, D.address, FARE, BID_SALT];
+    const gl = await leanGas(orders.acceptSealedBid, a, { value: FARE });
     const nonce = await prov.getTransactionCount(burner.address);
-    const tx = await orders.acceptBid(orderId, D.address, { value: FARE, gasLimit: gl, nonce });
-    await record(prov, { step: "B.accept", party: "customer-burner", action: "acceptBid", value: FARE, hash: tx.hash });
+    const tx = await orders.acceptSealedBid(...a, { value: FARE, gasLimit: gl, nonce });
+    await record(prov, { step: "B.accept", party: "customer-burner", action: "acceptSealedBid", value: FARE, hash: tx.hash });
     st.run.acceptHash = tx.hash; saveState(st);
   } else console.log("\n5. = bid already accepted");
   console.log(`   status after accept: ${await orders.statusOf(orderId)} (2 = Assigned)`);

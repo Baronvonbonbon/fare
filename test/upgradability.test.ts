@@ -1,6 +1,7 @@
 import { expect } from "chai";
 import { ethers } from "hardhat";
 import { loadFixture, time } from "@nomicfoundation/hardhat-toolbox/network-helpers";
+import { assignSealed } from "./helpers/bids";
 
 // Freeze-and-drain upgrade layer: FareGovernanceRouter registry +
 // FareUpgradable base. Invariants under test:
@@ -92,8 +93,7 @@ describe("Upgradability", () => {
     await f.orders.connect(f.customer).createOrder(1n, dropCommit(), 0, 0, ethers.parseEther("0.5"), 0, 0, { value: 0 });
     const orderId = (await f.orders.nextOrderId()) - 1n;
     const fare = ethers.parseEther("0.3");
-    await f.orders.connect(f.driver1).placeBid(orderId, fare);
-    await f.orders.connect(f.customer).acceptBid(orderId, f.driver1.address, { value: fare });
+    await assignSealed(f.orders, orderId, f.driver1, f.customer, fare);
     return { orderId, fare };
   }
 
@@ -128,7 +128,9 @@ describe("Upgradability", () => {
     await expect(
       f.orders.connect(f.customer).createOrder(1n, dropCommit(), 0, 0, 1n, 0, 0, { value: 0 })
     ).to.be.revertedWith("frozen");
-    await expect(f.orders.connect(f.driver1).placeBid(openId, 1n)).to.be.revertedWith("frozen");
+    await expect(
+      f.orders.connect(f.driver1).commitBid(openId, ethers.keccak256(ethers.toUtf8Bytes("frozen-bid")), ethers.ZeroHash)
+    ).to.be.revertedWith("frozen");
 
     // exits open on v1: cancel the open order
     await f.orders.connect(f.customer).cancelOpen(openId);

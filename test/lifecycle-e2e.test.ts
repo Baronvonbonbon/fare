@@ -7,6 +7,7 @@ import { join } from "node:path";
 // @ts-ignore — no types
 import * as snarkjs from "snarkjs";
 import { poseidon2, poseidon3 } from "poseidon-lite";
+import { poseidonContract } from "circomlibjs";
 
 // One delivery, end to end, on a local chain (TEST-PLAN D4).
 //
@@ -144,6 +145,15 @@ describe("full lifecycle on a local chain: one delivery, every seam", function (
     await venues.setAuthorized(orders.target, true);
     await vault.setShieldPool(pool.target);
     await vault.setShieldBuckets([BUCKET]);
+    // The ZK note path hashes the tree on-chain, so it needs the Poseidon
+    // precompile adapter. (The keeper path this replaced needed no hasher —
+    // which is exactly why it could not prove anything about a spend.)
+    const poseidonImpl = await new ethers.ContractFactory(
+      poseidonContract.generateABI(2), poseidonContract.createCode(2), deployer
+    ).deploy();
+    const adapter = await (await ethers.getContractFactory("PoseidonT3Adapter"))
+      .deploy(await poseidonImpl.getAddress());
+    await vault.setShieldPoseidon(adapter.target);
 
     await drivers.connect(driver).register("ipfs://driver", { value: PAS(1) });
     await drivers.connect(bidderB).register("ipfs://loser", { value: PAS(1) });
@@ -375,100 +385,41 @@ describe("full lifecycle on a local chain: one delivery, every seam", function (
     const before = await vault.balanceOf(driver.address);
     expect(before).to.equal(carried.driverEarnings);
 
+    // The driver converts a bucket of REAL earnings into a shielded note.
+    // This transaction names the account AND the commitment, and that is fine:
+    // the anonymity comes from the SPEND, which reveals only a nullifier. That
+    // is the whole difference from the keeper path this replaced, where the
+    // pairing lived off-chain in a keeper's store and could be substituted.
     const note = { nullifier: rand(), secret: rand() };
     const commitment = noteCommitment(note.nullifier, note.secret, BUCKET);
 
-    const nonce = await vault.shieldNonce(driver.address);
-    const deadline = BigInt(await time.latest()) + 3600n;
-    const signature = await driver.signTypedData(
-      { name: "FareVault", version: "1", chainId, verifyingContract: vault.target as string },
-      { ShieldCredit: [
-        { name: "account", type: "address" }, { name: "bucket", type: "uint96" },
-        { name: "nonce", type: "uint256" }, { name: "deadline", type: "uint256" }] },
-      { account: driver.address, bucket: BUCKET, nonce, deadline }
-    );
-
-    // The relay's /shield-queue half: the authorization goes on chain, the
-    // commitment stays in the request body.
-    const tx = await vault.connect(deployer).queueShieldCreditFor(driver.address, BUCKET, deadline, signature);
-    const rc = await tx.wait();
+    await expect(vault.connect(driver).insertShieldNote(BUCKET, commitment))
+      .to.emit(vault, "ShieldNoteInserted")
+      .withArgs(driver.address, BUCKET, commitment, 0);
 
     expect(await vault.balanceOf(driver.address)).to.equal(before - BUCKET);
-
-    // The pairing invariant, on real earnings: the account and its commitment
-    // must never share a transaction (PRIVACY-TIERS §3).
-    const blob = (tx.data + rc.logs.map((l: any) => l.data + l.topics.join("")).join("")).toLowerCase();
-    expect(blob, "the queue transaction named the commitment")
-      .to.not.include(commitment.toString(16));
-    expect(blob, "CONTROL: the account should be present — the matcher must be able to see")
-      .to.include(driver.address.slice(2).toLowerCase());
+    // The value left the balance but has not reached the pool: it is held
+    // against the note until someone proves the spend.
+    expect(await vault.shieldBuffer()).to.equal(BUCKET);
 
     carried.note = { note, commitment };
   });
 
-  it("8b. one delivery's note cannot be shielded alone — it waits for a crowd", async () => {
-    // The most important thing this lifecycle shows, and the reason it is worth
-    // running the whole delivery to get here: a complete, correct delivery
-    // produces a note the contract REFUSES to deposit. `shieldMinBatch` is 8,
-    // so a batch of one is rejected as linkable — B4's "a lone note has an
-    // anonymity set of 1", enforced on chain rather than merely documented.
-    await vault.setShieldKeeper(deployer.address, true);
-    await time.increase(6 * 60); // past shieldMinDwell, so only the size is at issue
+  it("8b. the note's anonymity set is the tree, and needs no crowd to form", async () => {
+    // The keeper path refused to deposit a lone note: a batch of one was
+    // linkable, so a complete delivery produced earnings that could not move
+    // until seven strangers happened to cash out the same denomination. That
+    // liveness-for-privacy trade is gone. The note exists NOW, spendable
+    // whenever its holder likes, and what hides it at spend time is every
+    // unspent note of its bucket rather than one batch.
+    const inserted = await vault.queryFilter(vault.filters.ShieldNoteInserted(), 0, "latest");
+    expect(inserted).to.have.length(1);
+    expect(inserted[0].args.account).to.equal(driver.address);
 
-    await expect(vault.connect(deployer).sealShieldBatch(BUCKET, 1))
-      .to.be.revertedWith("batch-too-small");
-
-    const minBatch = await vault.shieldMinBatch();
-    expect(minBatch).to.equal(8n);
-    carried.minBatch = Number(minBatch);
-  });
-
-  it("8c. with a crowd, the note reaches the pool naming nobody", async () => {
-    // Seven other drivers cash out into the same bucket. Only now can the
-    // delivery's note move — and the seal is what sizes the anonymity set, not
-    // the deposits, which is why the deposits can be chunked freely.
-    const others = (await ethers.getSigners()).slice(10, 10 + carried.minBatch - 1);
-    expect(others).to.have.length(7);
-
-    // The crowd's balances come from a direct credit rather than seven more
-    // deliveries — they exist to be a crowd, and their provenance is not what
-    // this file is about.
-    await vault.setAuthorized(deployer.address, true);
-
-    const crowd: bigint[] = [];
-    for (const s of others) {
-      await vault.connect(deployer).credit(s.address, { value: BUCKET });
-      await vault.connect(s).queueShieldCredit(BUCKET);
-      crowd.push(noteCommitment(rand(), rand(), BUCKET));
-    }
-    await time.increase(6 * 60); // the new tickets have to dwell too
-
-    await vault.connect(deployer).sealShieldBatch(BUCKET, carried.minBatch);
-
-    const all = [carried.note.commitment, ...crowd].map((c: bigint) => b32(c));
-    const before = await pool.depositCount();
-    // Chunked at two per call, the Paseo per-transaction ceiling.
-    for (let i = 0; i < all.length; i += 2) {
-      await vault.connect(deployer).depositShieldBatch(BUCKET, all.slice(i, i + 2));
-    }
-    expect(await pool.depositCount()).to.equal(before + BigInt(all.length));
-
-    // The delivery's own commitment is in the pool, funded with the bucket —
-    // and the pool was never told whose earnings paid for it.
-    const mine = b32(carried.note.commitment);
-    expect(await pool.depositedValue(mine)).to.equal(BUCKET);
-
-    // SEAM, stated as a number: the driver's earnings are now hidden among 8,
-    // not among 1. That is the whole purpose of the queue.
-    const deposited: string[] = [];
-    for (let i = Number(before); i < Number(before) + all.length; i++) {
-      deposited.push((await pool.commitments(i)).toLowerCase());
-    }
-    expect(deposited).to.include(mine.toLowerCase());
-    expect(new Set(deposited).size).to.equal(carried.minBatch);
-
-    // BOUNDARY: spending this note is the pool's own Groth16 withdraw circuit,
-    // which MockShieldPool cannot verify. The live nightly covers it (E3).
+    // BOUNDARY: the spend itself is a Groth16 proof against the note tree,
+    // covered against the real verifier in test/shieldnote-vault.test.ts. What
+    // this file pins is that a real delivery's earnings reach that point at all.
+    expect(await vault.nextNoteIndex()).to.equal(1n);
   });
 
   // ── 9. the unshielded path still works ─────────────────────────────────────
@@ -485,19 +436,15 @@ describe("full lifecycle on a local chain: one delivery, every seam", function (
 
     // Solvency across the whole run, stated explicitly rather than left to a
     // convenient coincidence: the vault's native balance is exactly the credits
-    // it still owes, plus the value held against unconsumed shield tickets.
-    // Everyone who touched it is summed — including the eight-strong crowd, so
-    // this cannot pass merely because their balances happened to be zero.
-    const holders = [
-      driver.address, treasury.address, venueOp.address, burner.address,
-      ...(await ethers.getSigners()).slice(10, 10 + carried.minBatch - 1).map((s) => s.address),
-    ];
+    // it still owes, plus the value held against un-deposited notes.
+    const holders = [driver.address, treasury.address, venueOp.address, burner.address];
     let owedTotal = 0n;
     for (const h of holders) owedTotal += await vault.balanceOf(h);
 
     expect(await ethers.provider.getBalance(vault.target)).to.equal(owedTotal + (await vault.shieldBuffer()));
 
-    // And the eight buckets really did leave — the pool holds them.
-    expect(await ethers.provider.getBalance(pool.target)).to.equal(BUCKET * BigInt(carried.minBatch));
+    // The shielded bucket is still held against the note — it reaches the pool
+    // when the note is SPENT, which is the Groth16 path covered elsewhere.
+    expect(await vault.shieldBuffer()).to.equal(BUCKET);
   });
 });

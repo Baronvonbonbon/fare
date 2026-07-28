@@ -7,6 +7,7 @@ import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
+import { bidSalt, revokeHashFor } from "./helpers/bids";
 
 // Per-payer cost ledger for a whole delivery, on a local chain (TEST-PLAN A3).
 //
@@ -198,11 +199,15 @@ describe("cost ledger: who pays for a delivery", function () {
     const co = await orders.connect(burner).createOrder(1n, dropCommit, PAS("0.5"), 0, PAS(2), 0, 0, { value: PAS("0.5") });
     await track("createOrder", "customer", co.hash);
 
-    const bid = await orders.connect(driver).placeBid(orderId, PAS(1));
-    await track("placeBid", "driver", bid.hash);
+    // Sealed commit — in production a relay submits it so the chain never names
+    // the bidder, but the ledger is about who PAYS, and here that is the driver.
+    const salt = bidSalt("cost");
+    const hash = await orders.bidHashOf(orderId, driver.address, PAS(1), salt);
+    const bid = await orders.connect(driver).commitBid(orderId, hash, revokeHashFor("cost"));
+    await track("commitBid", "driver", bid.hash);
 
-    const acc = await orders.connect(burner).acceptBid(orderId, driver.address, { value: PAS(1) });
-    await track("acceptBid", "customer", acc.hash);
+    const acc = await orders.connect(burner).acceptSealedBid(orderId, driver.address, PAS(1), salt, { value: PAS(1) });
+    await track("acceptSealedBid", "customer", acc.hash);
 
     // 3. settlement, relayed — gasless for both parties
     let now = await time.latest();
@@ -269,20 +274,20 @@ describe("cost ledger: who pays for a delivery", function () {
     expect(relaySteps).to.include("/fund (sponsor gas)");
     expect(relaySteps).to.include("/withdraw (gasless, earns 1%)");
 
-    for (const valueAction of ["createOrder", "acceptBid"]) {
+    for (const valueAction of ["createOrder", "acceptSealedBid"]) {
       expect(relaySteps, `the relay paid for ${valueAction} — it must never front escrow`)
         .to.not.include(valueAction);
     }
   });
 
   it("the customer pays only for the two actions that move their own money", async () => {
-    expect(ledger.stepsFor("customer")).to.deep.equal(["createOrder", "acceptBid"]);
+    expect(ledger.stepsFor("customer")).to.deep.equal(["createOrder", "acceptSealedBid"]);
   });
 
   it("the driver pays for nothing but their own bid", async () => {
     // Settlement and cash-out are both relayed, so a driver needs gas for the
     // bid alone — and with a forwarder even that goes away.
-    expect(ledger.stepsFor("driver")).to.deep.equal(["placeBid"]);
+    expect(ledger.stepsFor("driver")).to.deep.equal(["commitBid"]);
   });
 
   it("the relay earns on exactly one step, and loses money overall", async () => {

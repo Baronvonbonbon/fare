@@ -2,10 +2,11 @@ import { expect } from "chai";
 import { ethers } from "hardhat";
 import { loadFixture, time } from "@nomicfoundation/hardhat-toolbox/network-helpers";
 import type { HardhatEthersSigner } from "@nomicfoundation/hardhat-ethers/signers";
+import { assignSealedERC20, commitSealed } from "./helpers/bids";
 
 // C3 — stablecoin (ERC-20) escrow rail. Mirrors the native happy path from
 // fare.test.ts, but the order is escrowed and settled entirely in MockUSDC:
-// createOrderERC20 → placeBid → acceptBidERC20 → pickup → dropoff, with every
+// createOrderERC20 → commitBid → acceptSealedBidERC20 → pickup → dropoff, with every
 // release (venue / driver / treasury) landing as a token balance in the vault.
 
 // San Francisco coordinate fixtures (shared with fare.test.ts).
@@ -105,8 +106,7 @@ describe("FARE — stablecoin escrow (C3)", () => {
     const commit = dropCommit(DROP_LAT, DROP_LON, DROP_SALT);
     await f.orders.connect(f.customer).createOrderERC20(f.usdc.target, f.venueId, commit, ORDER_VALUE, TIP, MAX_FARE, 0, 0);
     const orderId = 1n;
-    await f.orders.connect(f.driver2).placeBid(orderId, FARE);
-    await f.orders.connect(f.customer).acceptBidERC20(orderId, f.driver2.address);
+    await assignSealedERC20(f.orders, orderId, f.driver2, f.customer, FARE);
     return { orderId };
   }
 
@@ -272,17 +272,17 @@ describe("FARE — stablecoin escrow (C3)", () => {
     const f = await loadFixture(deployAll);
     const commit = dropCommit(DROP_LAT, DROP_LON, DROP_SALT);
     await f.orders.connect(f.customer).createOrderERC20(f.usdc.target, f.venueId, commit, ORDER_VALUE, TIP, MAX_FARE, 0, 0);
-    await f.orders.connect(f.driver2).placeBid(1n, FARE);
+    const tokenBid = await commitSealed(f.orders, 1n, f.driver2, FARE, "tok");
     // Native accept on a token order is rejected.
-    await expect(f.orders.connect(f.customer).acceptBid(1n, f.driver2.address, { value: FARE }))
+    await expect(f.orders.connect(f.customer).acceptSealedBid(1n, f.driver2.address, FARE, tokenBid.salt, { value: FARE }))
       .to.be.revertedWith("use-erc20-accept");
     // Native tip on a token order is rejected.
     await expect(f.orders.connect(f.customer).increaseTip(1n, { value: 1n }))
       .to.be.revertedWith("use-erc20-tip");
     // Token accept on a NATIVE order is rejected.
     await f.orders.connect(f.customer).createOrder(f.venueId, commit, ORDER_VALUE, TIP, MAX_FARE, 0, 0, { value: ORDER_VALUE + TIP });
-    await f.orders.connect(f.driver1).placeBid(2n, FARE);
-    await expect(f.orders.connect(f.customer).acceptBidERC20(2n, f.driver1.address))
+    const nativeBid = await commitSealed(f.orders, 2n, f.driver1, FARE, "nat");
+    await expect(f.orders.connect(f.customer).acceptSealedBidERC20(2n, f.driver1.address, FARE, nativeBid.salt))
       .to.be.revertedWith("use-native-accept");
   });
 
@@ -292,8 +292,7 @@ describe("FARE — stablecoin escrow (C3)", () => {
     // No escrow pulled at creation.
     await f.orders.connect(f.customer).createOrderERC20(f.usdc.target, f.venueId, commit, 0, 0, MAX_FARE, 0, 0);
     expect(await f.usdc.balanceOf(f.orders.target)).to.equal(0n);
-    await f.orders.connect(f.driver2).placeBid(1n, FARE);
-    await f.orders.connect(f.customer).acceptBidERC20(1n, f.driver2.address);
+    await assignSealedERC20(f.orders, 1n, f.driver2, f.customer, FARE);
     expect(await f.usdc.balanceOf(f.orders.target)).to.equal(FARE);
     await confirmPickup(f, 1n, f.driver2);
     await confirmDropoff(f, 1n, f.driver2);

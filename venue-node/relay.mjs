@@ -13,7 +13,7 @@
 //                  / ZK proof and don't check msg.sender, so the relay can submit
 //                  them paying gas → those steps become fully gasless.
 //
-// Deliberately NOT relayed: createOrder / acceptBid / placeBid / rate / register.
+// Deliberately NOT relayed: createOrder / acceptSealedBid / rate / register.
 // Those check msg.sender and/or move the user's own value; full gasless for them
 // needs an EIP-2771 forwarder (a contract change) — see the README.
 //
@@ -32,7 +32,6 @@ import { JsonRpcProvider, Wallet, Contract, Interface, parseEther, formatEther, 
 import { rebateWei, withdrawFeeWei, coversCost, withinBudget, windowSpent } from "./economics.mjs";
 import { rebateInNative, shouldTopUp, planSwap, assetConversionQuote, priceFraction, cfg as swapCfg } from "./treasury.mjs";
 import { executeRecoverySwap } from "./swap.mjs";
-import { createStore, runOnce as keeperTick } from "./shieldkeeper.mjs";
 
 const PORT = Number(process.env.RELAY_PORT || 8788);
 // Bind address. Defaults to every interface because under docker-compose the
@@ -151,8 +150,8 @@ const RELAYABLE = new Set(["confirmPickup", "confirmDropoffZK"]);
 const settlement = new Contract(settlementAddr, SETTLEMENT_ABI, relay);
 
 // ── EIP-2771 forwarder for gasless user actions (F8) ─────────────────────────
-// The client builds + signs a ForwardRequest for a non-value action (placeBid /
-// withdrawBid / cancels / rate); the relay submits it and pays gas. The user
+// The client builds + signs a ForwardRequest for a non-value action (commitBid /
+// revokeBid / cancels / rate); the relay submits it and pays gas. The user
 // signs, so the relay can't act as them — the forwarder verifies the signature.
 const book = JSON.parse(readFileSync(new URL(ADDRESS_BOOK, import.meta.url), "utf8"));
 const addr = book.addresses ?? book;
@@ -176,8 +175,6 @@ const VAULT_ABI = [
   "function tokenBalanceOf(address token, address account) view returns (uint256)", // relay's accrued fee (F6-swap)
   "function withdrawToken(address token)",              // sweep the relay's own token balance out
   // shielded payouts (privacy phase 1)
-  "function queueShieldCreditFor(address account, uint96 bucket, uint256 deadline, bytes signature)",
-  "function sealShieldBatch(uint96 bucket, uint64 count)",
   "function depositShieldBatch(uint96 bucket, bytes32[] commitments)",
   "function shieldPending(uint96 bucket) view returns (uint64)",
   "function shieldScanned(uint96 bucket) view returns (uint64)",
@@ -192,21 +189,13 @@ const VAULT_ABI = [
 const vault = vaultAddr ? new Contract(vaultAddr, VAULT_ABI, relay) : null;
 const GAS_WITHDRAW = 200_000n;
 
-// ── Shielded payouts (privacy phase 1) ───────────────────────────────────────
-// The relay plays two roles here, deliberately split across two transactions so
-// neither one carries both an account and a pool commitment (PRIVACY-TIERS §3):
-//   POST /shield-queue — submit a driver's EIP-712 authorization. The commitment
-//                        travels in the request BODY and is held off-chain; it
-//                        must never reach this transaction's calldata.
-//   keeper tick        — once minBatch commitments are held for a bucket and the
-//                        oldest ticket has dwelled, SEAL them in one transaction
-//                        (that seal size is the anonymity set) and then deposit
-//                        them in chain-sized chunks that name no account.
-// Trust: a keeper holds the pairing and could substitute its own commitments for
-// the drivers' (PRIVACY-TIERS §4). Only run this on a relay the payees trust.
-const SHIELD_KEEPER = process.env.SHIELD_KEEPER === "1";
-const SHIELD_KEEPER_STORE = process.env.SHIELD_KEEPER_STORE || "./shield-keeper.json";
-const SHIELD_KEEPER_POLL_MS = Number(process.env.SHIELD_KEEPER_POLL_MS || 60_000);
+// ── Shielded payouts: ZK note path only ──────────────────────────────────────
+// There was a keeper here (POST /shield-queue + a batching tick against the
+// vault's ticket path). Both are gone with the contract functions they called:
+// a keeper held the account↔commitment pairing and could substitute its own
+// commitments, and its anonymity set was only the seal size. The ZK note path
+// needs no keeper, is permissionless, and hides the note among every unspent
+// note in the tree — see docs/PRIVACY-TIERS.md.
 // Paseo rejects more than 2 pool deposits in one transaction (proof size, not
 // gas — docs/E2E-PRIVACY-LIVE.md §2). Splitting costs no privacy.
 const SHIELD_MAX_PER_TX = Number(process.env.SHIELD_MAX_PER_TX || 2);
@@ -223,7 +212,6 @@ const GAS_BID = 500_000n;
 const BID_TTL_MS = Number(process.env.BID_TTL_MS || 24 * 3_600_000);
 const bidBox = new Map();
 setInterval(() => { const now = Date.now(); for (const [k, v] of bidBox) if (v.exp < now) bidBox.delete(k); }, 3_600_000).unref?.();
-const keeperStore = SHIELD_KEEPER ? createStore(SHIELD_KEEPER_STORE) : null;
 
 // ── Kusama Shield pool (C4 shielded funding) ─────────────────────────────────
 const SHIELD_ABI = [
@@ -252,8 +240,6 @@ const ORDERS_READ_ABI = [
   "function feeBps() view returns (uint16)",
   "function relayRebateBps() view returns (uint16)",
   // forwardable order actions — used to decode a /forward request's orderId
-  "function placeBid(uint256 orderId, uint96 amount)",
-  "function withdrawBid(uint256 orderId)",
   "function cancelOpen(uint256 orderId)",
   "function cancelAssigned(uint256 orderId)",
   "function abandonOrder(uint256 orderId)",
@@ -261,7 +247,7 @@ const ORDERS_READ_ABI = [
   // from the customer's own balance, relay never fronts value)
   "function createOrderERC20(address token, uint64 venueId, bytes32 dropCommit, uint96 orderValue, uint96 tip, uint96 maxFare, uint64 pw, uint64 dw)",
   "function createOrderERC20WithPermit(address token, uint64 venueId, bytes32 dropCommit, uint96 orderValue, uint96 tip, uint96 maxFare, uint64 pw, uint64 dw, uint256 permitValue, uint256 permitDeadline, uint8 v, bytes32 r, bytes32 s)",
-  "function acceptBidERC20(uint256 orderId, address driver)",
+  "function acceptSealedBidERC20(uint256 orderId, address driver, uint96 amount, bytes32 salt)",
   "function increaseTipERC20(uint256 orderId, uint96 amount)",
   "event OrderCreated(uint256 indexed orderId, address indexed customer, uint64 indexed venueId, uint96 orderValue, uint96 tip, uint96 maxFare, bytes32 dropCommit)",
 ];
@@ -276,7 +262,7 @@ const ORDERS_BID_ABI = [
 const ordersW = ordersAddr ? new Contract(ordersAddr, ORDERS_BID_ABI, relay) : null;
 const ordersIface = new Interface(ORDERS_READ_ABI);
 // Actions whose orderId is arg[0] (known at forward time).
-const ORDER_ACTIONS = new Set(["placeBid", "withdrawBid", "cancelOpen", "cancelAssigned", "abandonOrder", "acceptBidERC20", "increaseTipERC20"]);
+const ORDER_ACTIONS = new Set(["commitBid", "revokeBid", "cancelOpen", "cancelAssigned", "abandonOrder", "acceptSealedBidERC20", "increaseTipERC20"]);
 // Create actions have NO orderId yet — attributed to the order after the tx
 // mines, by parsing OrderCreated (so the relay's per-order P&L covers the
 // gasless-order creation gas too → the F6 rebate must cover it before settling).
@@ -739,55 +725,6 @@ async function handler(req, res) {
       return send(res, 200, { withdrawn: true, txHash: tx.hash, account }, origin);
     }
 
-    // ── Queue a shielded PAYOUT (privacy phase 1) ────────────────────────────
-    // Body: { account, bucket, deadline, signature, commitment }
-    // The signature authorizes moving `bucket` out of the account's vault
-    // balance; the commitment is held here and deposited later in a batch. The
-    // two must never share a transaction — see docs/PRIVACY-TIERS.md §3.
-    if (req.method === "POST" && url.pathname === "/shield-queue") {
-      if (!vault) return send(res, 503, { error: "vault not configured" }, origin);
-      if (!keeperStore) return send(res, 503, { error: "this relay does not keep shielded payouts" }, origin);
-      const { account, bucket, deadline, signature, commitment } = await readJson(req);
-      if (!isAddress(account)) return send(res, 400, { error: "bad account" }, origin);
-      if (typeof signature !== "string") return send(res, 400, { error: "missing signature" }, origin);
-      if (typeof commitment !== "string" || !/^0x[0-9a-fA-F]{64}$/.test(commitment))
-        return send(res, 400, { error: "commitment must be a 32-byte hex string" }, origin);
-      let bucketWei;
-      try { bucketWei = BigInt(bucket); } catch { return send(res, 400, { error: "bad bucket" }, origin); }
-
-      // Hold the commitment BEFORE spending the ticket. If the queue tx lands and
-      // we have not recorded the commitment, the payout is destroyed — the ticket
-      // is spent and nothing on-chain says who was owed a note.
-      if (!keeperStore.addPending(bucketWei, commitment))
-        return send(res, 409, { error: "commitment already queued" }, origin);
-
-      // Unrewarded like sponsor-mode shielded funding: the vault takes no fee on
-      // queueing, so this is a subsidy and belongs under the same budget.
-      const cost = await estCostWei(
-        () => vault.queueShieldCreditFor.estimateGas(account, bucketWei, deadline, signature), GAS_WITHDRAW
-      );
-      const hold = reserveBudget(cost);
-      if (PROFIT_GUARD && !hold.ok) {
-        hold.release();
-        keeperStore.dropPending(commitment);
-        return decline(res, "subsidy budget exhausted", { action: "shield-queue" }, origin);
-      }
-
-      let tx;
-      try {
-        tx = await serialize(async () => {
-          const nonce = await allocNonce();
-          return vault.queueShieldCreditFor(account, bucketWei, deadline, signature, { gasLimit: GAS_WITHDRAW, nonce });
-        });
-      } catch (e) {
-        hold.release();
-        keeperStore.dropPending(commitment); // the ticket was never taken
-        const msg = e?.shortMessage ?? e?.reason ?? e?.message ?? String(e);
-        return send(res, 502, { error: msg }, origin);
-      }
-      return send(res, 200, { queued: true, txHash: tx.hash, bucket: String(bucketWei) }, origin);
-    }
-
     // ── Sealed bids (privacy phase 4) ────────────────────────────────────────
     // The relay submits the commitment so the CHAIN never sees the bidder, and
     // stores the sealed terms so the CUSTOMER can read them. The terms are
@@ -1052,25 +989,6 @@ async function feeRecoveryTick() {
   } catch (e) { console.error("[relay] fee-recovery error:", e?.shortMessage ?? e?.message ?? e); }
 }
 if (FEE_RECOVERY && FEE_ASSET_ID != null) setInterval(feeRecoveryTick, SWAP_POLL_MS).unref?.();
-
-// ── shielded-payout keeper tick ──────────────────────────────────────────────
-// Deposits held commitments once a bucket has minBatch of them AND the oldest
-// ticket has cleared the contract's dwell. Both floors are enforced on-chain
-// too; checking here only saves a guaranteed-revert transaction.
-async function shieldKeeperTick() {
-  if (!vault || !keeperStore) return;
-  try {
-    await keeperTick({
-      vault, pool: shieldPool, provider, store: keeperStore, maxPerTx: SHIELD_MAX_PER_TX,
-      submit: (call) => serialize(async () => {
-        const nonce = await allocNonce();
-        return call({ gasLimit: GAS_SHIELD_BATCH, nonce });
-      }),
-      log: (m) => console.log(`[relay] ${m}`),
-    });
-  } catch (e) { console.error("[relay] shield-keeper error:", e?.shortMessage ?? e?.message ?? e); }
-}
-if (SHIELD_KEEPER) setInterval(shieldKeeperTick, SHIELD_KEEPER_POLL_MS).unref?.();
 
 // Exported for tests: they listen on an ephemeral port themselves. Importing
 // this module must never bind PORT or the suite collides with a running relay.
