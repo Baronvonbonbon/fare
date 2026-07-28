@@ -78,7 +78,7 @@ import { escrowCapsule, evidenceURI } from "./disclosure";
 import { usePasUsd, cachedRate, fiatOf, pasToUsd, formatUsd } from "./pricing";
 import {
   tokenOrdersEnabled, stablecoinAsset, assetOf, fmtAsset, parseAsset,
-  mintStablecoin, approveToken, stablecoinBalance,
+  approveToken, stablecoinBalance,
 } from "./token";
 import { MicroDeg, distanceMeters, fmtCoord, fmtDist, getPosition, snapToGrid } from "./geo";
 import { QRScan, QRShow } from "./qr";
@@ -1688,9 +1688,10 @@ function CustomerOrder({ o, venues, act, busy, session, say }: any) {
                 <button className="btn small" disabled={busy || orphaned}
                   onClick={() => act("Accept sealed bid", async () => {
                     if (assetOf(o.token).isToken) {
+                      // No self-mint: the escrow token is real USDC, so the
+                      // burner must already hold the fare.
                       await ensureGas(o.customer, parse("0.3"));
                       const w = walletFor(o.customer)!;
-                      await mintStablecoin(w, o.customer, b.amountWei);
                       await approveToken(w, o.token, ADDRESSES.orders, b.amountWei);
                       return os!.orders.acceptSealedBidERC20(o.id, b.driver, b.amountWei, b.salt);
                     }

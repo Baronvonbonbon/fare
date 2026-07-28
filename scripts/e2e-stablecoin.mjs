@@ -1,6 +1,7 @@
 // Live stablecoin (C3) e2e on Paseo — the full delivery lifecycle escrowed and
-// settled ENTIRELY in USDC (6-decimal MockUSDC), the ERC-20 path:
-//   mint + approve → createOrderERC20 → commitBid → acceptSealedBidERC20 → confirmPickup
+// settled ENTIRELY in REAL Asset Hub USDC (asset 1337, via its ERC-20
+// precompile), the ERC-20 path:
+//   swap-sourced USDC + approve → createOrderERC20 → commitBid → acceptSealedBidERC20 → confirmPickup
 //   → confirmDropoffZK → withdrawToken payouts.
 // Reuses the registered venue (id 3) + driver from the native e2e; a fresh
 // customer holds USDC (escrow) + PAS (gas). Settlement is submitted by the
@@ -67,9 +68,12 @@ async function main() {
   console.log(`stablecoin ${b.stablecoin} (USDC, 6dp)  venueId ${venueId}`);
   console.log(`customer ${C.address}  driver ${D.address}  venue ${V.address}`);
 
+  // REAL Asset Hub USDC (asset 1337) through its ERC-20 precompile. There is no
+  // `mint` — the precompile is a bare IERC20 over a real pallet-assets balance.
   const USDC = new ethers.Contract(b.stablecoin, [
-    "function mint(address,uint256)", "function approve(address,uint256) returns(bool)",
+    "function transfer(address,uint256) returns(bool)", "function approve(address,uint256) returns(bool)",
     "function balanceOf(address) view returns(uint256)", "function allowance(address,address) view returns(uint256)",
+    "function symbol() view returns(string)",
   ], deployer);
   const orders = new ethers.Contract(b.orders, [
     "function createOrderERC20(address,uint64,bytes32,uint96,uint96,uint96,uint64,uint64) returns(uint256)",
@@ -79,19 +83,35 @@ async function main() {
   ], prov);
   const vault = new ethers.Contract(b.vault, ["function tokenBalanceOf(address,address) view returns(uint256)", "function withdrawToken(address)"], prov);
 
-  // ── 1. Fund customer: PAS (gas) from deployer + mint USDC + approve ─────────
+  // ── 1. Fund customer: PAS (gas) + REAL USDC, sourced by SWAP ───────────────
+  // This used to `mint` MockUSDC — an ERC-20 with an open mint, i.e. printing
+  // yourself the money the demo then escrows. Real USDC has no mint and no
+  // faucet: the deployer buys it on Asset Hub's own asset-conversion DEX
+  // (scripts/swap-local-dex.mjs) and transfers a working balance here.
+  const NEED = ORDER_VALUE + TIP + FARE + usdc(5); // + headroom for the service fee
   if (!st.funded) {
-    console.log(`\n1. Fund customer — PAS gas + mint 100 USDC + approve orders`);
+    console.log(`\n1. Fund customer — PAS gas + transfer ${fmt6(NEED)} real USDC + approve orders`);
+    const held = await USDC.balanceOf(deployer.address);
+    if (held < NEED) {
+      throw new Error(
+        `deployer holds ${fmt6(held)} USDC, needs ${fmt6(NEED)}. There is no mint — ` +
+        `buy some first:  WANT_USDC=${Math.ceil(Number(NEED) / 1e6) + 5} node scripts/swap-local-dex.mjs`
+      );
+    }
     let nonce = await prov.getTransactionCount(deployer.address);
     const t1 = await deployer.sendTransaction({ to: C.address, value: eth("30"), gasLimit: 200_000n, nonce: nonce++ });
     await rec(prov, { step: "S.fund", party: "infra", action: "fund-customer-gas", hash: t1.hash });
-    const t2 = await USDC.mint(C.address, usdc(100), { gasLimit: 5_000_000n, nonce: nonce++ });
-    await rec(prov, { step: "S.mint", party: "infra", action: "mint-USDC→customer", hash: t2.hash, tokenValue: usdc(100) });
-    const ua = await USDC.connect(C).approve(b.orders, ethers.MaxUint256, { gasLimit: await leanGas(USDC.connect(C).approve, [b.orders, ethers.MaxUint256]) });
+    const t2 = await USDC.transfer(C.address, NEED, { gasLimit: 5_000_000n, nonce: nonce++ });
+    await rec(prov, { step: "S.fundUSDC", party: "infra", action: "transfer-real-USDC→customer", hash: t2.hash, tokenValue: NEED });
+  // NOT MaxUint256: the real USDC precompile narrows the amount to pallet-assets'
+  // u128, so an unlimited approval reverts with "Balance conversion failed".
+  // Approve what this run actually needs, with headroom.
+    const APPROVE = NEED;
+    const ua = await USDC.connect(C).approve(b.orders, APPROVE, { gasLimit: await leanGas(USDC.connect(C).approve, [b.orders, APPROVE]) });
     await rec(prov, { step: "S.approve", party: "customer", action: "USDC.approve(orders)", hash: ua.hash });
     st.funded = true; saveSt(st);
   }
-  console.log(`   customer USDC ${fmt6(await USDC.balanceOf(C.address))}  allowance ${(await USDC.allowance(C.address, b.orders)) === ethers.MaxUint256 ? "MAX" : "set"}`);
+  console.log(`   customer USDC ${fmt6(await USDC.balanceOf(C.address))}  allowance ${fmt6(await USDC.allowance(C.address, b.orders))}`);
 
   // ── 2. createOrderERC20 ────────────────────────────────────────────────────
   if (!st.orderId) {

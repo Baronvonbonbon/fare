@@ -118,7 +118,11 @@ async function main() {
     console.log(`\n2. mint 100 USDC → burner (testnet faucet analog) + approve orders`);
     const mt = await USDC.mint(burner.address, usdc(100), { gasLimit: 5_000_000n, nonce: await prov.getTransactionCount(main.address) });
     await rec(prov, { step: "C.mint", party: "faucet(mint)", action: "mint-USDC→burner", hash: mt.hash, tokenValue: usdc(100) });
-    const ap = await USDC.connect(burner).approve(b.orders, ethers.MaxUint256, { gasLimit: await leanGas(USDC.connect(burner).approve, [b.orders, ethers.MaxUint256]) });
+  // NOT MaxUint256: the real USDC precompile narrows the amount to pallet-assets'
+  // u128, so an unlimited approval reverts with "Balance conversion failed".
+  // Approve what this run actually needs, with headroom.
+    const APPROVE = ORDER_VALUE + TIP + FARE + usdc(5);
+    const ap = await USDC.connect(burner).approve(b.orders, APPROVE, { gasLimit: await leanGas(USDC.connect(burner).approve, [b.orders, APPROVE]) });
     await rec(prov, { step: "C.approve", party: "customer-burner", action: "USDC.approve(orders)", hash: ap.hash });
     st.minted = true; saveC(st);
   }

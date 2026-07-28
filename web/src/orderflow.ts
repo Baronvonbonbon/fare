@@ -16,7 +16,7 @@ import { ZeroAddress } from "ethers";
 import { ADDRESSES, computeDropCommit, contracts, parse, randomSalt } from "./chain";
 import { newOrderWallet } from "./wallets";
 import { fundBurner, forwarderAvailable } from "./relay";
-import { approveToken, gaslessCreateOrderERC20, mintStablecoin } from "./token";
+import { approveToken, gaslessCreateOrderERC20, stablecoinBalance } from "./token";
 import { OrderThread } from "./channel";
 import { distanceMeters, type MicroDeg } from "./geo";
 
@@ -242,18 +242,31 @@ export async function placeOrder(opts: PlaceOrderOpts) {
     // faucet fallback.
     say("Funding the private wallet through the shielded pool…");
     if (isToken) {
-      // Token order: the burner needs only a little gas (for the stablecoin
-      // mint); the order itself is GASLESS (Option C) — permit + forwarded
-      // creation, the relay pays. Escrow value is the stablecoin.
+      // Token order: the burner needs a little gas; the escrow value is the
+      // stablecoin. That stablecoin is REAL Asset Hub USDC, which has no mint —
+      // the burner used to self-mint MockUSDC here, which is why the demo always
+      // worked and why the amounts meant nothing. It must now already hold the
+      // escrow, so this fails closed rather than inventing money.
       await fundBurner(w.address, parse("0.5"));
-      say("Minting stablecoin escrow to the private wallet…");
-      await mintStablecoin(w, w.address, escrow);
-      if (forwarderAvailable()) {
-        return gaslessCreateOrderERC20(contracts(w).orders, token!, {
-          venueId, dropCommit: commit, orderValue: orderValueWei, tip: tipWei, maxFare: maxFareWei,
-        });
+      const held = await stablecoinBalance(w.address);
+      if (held < escrow) {
+        throw new Error(
+          `the private wallet holds ${held} of the ${escrow} needed. Real USDC cannot be minted — ` +
+          `fund this wallet (mainnet: the shielded-funding path) before placing a token order.`
+        );
       }
-      // No forwarder → the (KS-funded) burner pays its own gas directly.
+      if (forwarderAvailable()) {
+        try {
+          // Option C: permit + forwarded creation, relay pays the gas.
+          return await gaslessCreateOrderERC20(contracts(w).orders, token!, {
+            venueId, dropCommit: commit, orderValue: orderValueWei, tip: tipWei, maxFare: maxFareWei,
+          });
+        } catch {
+          // The real USDC precompile is a bare IERC20 with NO permit(), so the
+          // permit signature cannot be produced. Fall through to approve+direct.
+        }
+      }
+      // No forwarder, or no permit on this token → the burner pays its own gas.
       await approveToken(w, token!, ADDRESSES.orders, escrow);
       return contracts(w).orders.createOrderERC20(token!, venueId, commit, orderValueWei, tipWei, maxFareWei, 0, 0);
     }

@@ -30,7 +30,10 @@ const { chainStub, walletsStub, relayStub, tokenStub, threadStub } = vi.hoisted(
     forwarderAvailable: () => forwarder,
   },
   tokenStub: {
-    mintStablecoin: vi.fn(async () => {}),
+    // No mint: real USDC cannot be printed, so the burner must already hold the
+    // escrow. Default the stub to a balance that covers it; the fail-closed case
+    // is asserted separately below.
+    stablecoinBalance: vi.fn(async () => 10n ** 30n),
     approveToken: vi.fn(async () => {}),
     gaslessCreateOrderERC20: vi.fn(async () => ({ hash: "0xgasless" })),
   },
@@ -106,7 +109,7 @@ beforeEach(() => {
   opened = [];
   calls.length = 0;
   relayStub.fundBurner.mockClear();
-  tokenStub.mintStablecoin.mockClear();
+  tokenStub.stablecoinBalance.mockClear();
   tokenStub.approveToken.mockClear();
   tokenStub.gaslessCreateOrderERC20.mockClear();
   memoryLocalStorage();
@@ -391,7 +394,8 @@ describe("placing an order", () => {
     // Only a little gas — the escrow is the stablecoin, and the relay pays for
     // the order itself.
     expect(relayStub.fundBurner.mock.calls[0][1]).to.equal(5n * 10n ** 17n);
-    expect(tokenStub.mintStablecoin).toHaveBeenCalledOnce();
+    // The burner's balance is CHECKED, not minted — real USDC cannot be printed.
+    expect(tokenStub.stablecoinBalance).toHaveBeenCalledOnce();
     expect(tokenStub.approveToken, "approved despite going gasless").not.toHaveBeenCalled();
   });
 
@@ -408,15 +412,15 @@ describe("placing an order", () => {
 
   it("treats the zero address as native, not as a token", async () => {
     // An order struct read back from the chain carries address(0) for native.
-    // Taking that branch as a token order would try to mint a stablecoin that
-    // does not exist.
+    // Taking that branch as a token order would check a stablecoin balance that
+    // does not exist, and refuse the order.
     await placeOrder({
       venueId: 1n, orderValueWei: 1n, tipWei: 0n, maxFareWei: 0n,
       lat: 1, lon: 2, receipt: RECEIPT,
       token: "0x0000000000000000000000000000000000000000", act, say: () => {},
     });
     expect(calls[0].fn).to.equal("createOrder");
-    expect(tokenStub.mintStablecoin).not.toHaveBeenCalled();
+    expect(tokenStub.stablecoinBalance).not.toHaveBeenCalled();
   });
 
   it("lets a funding failure surface instead of ordering unfunded", async () => {

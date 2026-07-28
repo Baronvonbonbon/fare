@@ -92,6 +92,15 @@ export async function record(prov, { step, party, action, via = "direct", value 
     logs: rc.logs?.length ?? 0,
   };
   appendLedger(entry);
+  // A mined-but-REVERTED transaction is status 0. This used to print the same
+  // "✓" as a success and carry on, so a run in which every single call reverted
+  // still ended with "✅ complete" — the ledger recorded the truth and nobody
+  // read it. Fail loudly instead: an e2e that cannot tell success from failure
+  // is worse than no e2e.
+  if (rc.status !== 1) {
+    console.log(`   ✗ ${action} [${party}] tx ${hash} REVERTED (status ${rc.status}, gas ${gasUsed})`);
+    throw new Error(`${action} reverted on-chain (tx ${hash})`);
+  }
   console.log(
     `   ✓ ${action} [${party}] tx ${hash.slice(0, 12)}… status ${rc.status} gas ${gasUsed} fee ${entry.feePAS} PAS`
   );

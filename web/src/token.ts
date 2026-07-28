@@ -69,18 +69,16 @@ export function parseAsset(v: string, token?: string): bigint {
 }
 
 // ── testnet stablecoin faucet ────────────────────────────────────────────────
-// MockUSDC exposes an open `mint`, so a fresh per-order burner can self-mint the
-// stablecoin escrow it needs — the token analogue of the PAS gas faucet, with no
-// link to the customer's main wallet. On mainnet the real USDC has no such mint;
-// funding a burner privately is the shielded-funding path (C4, docs/SHIELDED-FUNDING.md).
-const MINT_ABI = ["function mint(address to, uint256 amount)"];
-
-/// Mint `amount` of the stablecoin to `to`, signed by `signer` (the burner).
-export async function mintStablecoin(signer: ethers.Signer, to: string, amount: bigint): Promise<void> {
-  const c = new Contract(ADDRESSES.stablecoin, MINT_ABI, signer);
-  const tx = await c.mint(to, amount);
-  await tx.wait();
-}
+// There is no `mint`. The escrow token is REAL Asset Hub USDC (asset 1337) seen
+// through its ERC-20 precompile, so a balance has to be bought, not printed —
+// PAS swaps to USDC on Asset Hub's own asset-conversion DEX
+// (scripts/swap-local-dex.mjs). The old MockUSDC had an open mint and a burner
+// self-minted its own escrow; that made the demo work and made the amounts
+// meaningless, and it is gone.
+//
+// Consequence for the PWA: a per-order burner cannot conjure USDC. It must be
+// funded, which on mainnet is the shielded-funding path (C4) and on testnet
+// means transferring from an account that swapped for some.
 
 /// Approve `spender` to pull `amount` of `token` from `signer`.
 export async function approveToken(

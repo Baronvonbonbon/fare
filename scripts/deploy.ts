@@ -126,11 +126,22 @@ async function main() {
   const locationVerifier = await deployOrReuse("locationVerifier", "FareLocationVerifier");
   const ratings = await deployOrReuse("ratings", "FareRatings", [forwarder]);
 
-  // Stablecoin escrow (C3): use a configured real stablecoin (mainnet: the
-  // bridged USDC/USDT precompile) if given, else deploy a MockUSDC so the
-  // testnet demo has an accepted escrow token out of the box.
+  // Stablecoin escrow (C3). Asset Hub USDC is asset 1337, seen from the EVM
+  // through its ERC-20 precompile — a REAL asset with a real price and a live
+  // PAS pool on asset-conversion. This used to fall back to deploying MockUSDC,
+  // an ERC-20 with an open `mint`; that put a token anyone can print into the
+  // escrow accounting, and made the relay's profitability guard meaningless for
+  // token orders because it values a rebate at a price the mock does not have.
+  // MockUSDC is now a TEST-ONLY fixture: local chains get it, live ones never do.
+  const REAL_USDC = "0x0000053900000000000000000000000001200000";
+  const isLocal = ["localhost", "hardhat"].includes(network.name);
   const stablecoin = process.env.STABLECOIN_ADDRESS
-    ?? (await deployOrReuse("stablecoin", "MockUSDC"));
+    ?? (isLocal
+      ? await deployOrReuse("stablecoin", "MockUSDC")
+      : REAL_USDC);
+  if (!isLocal && !process.env.STABLECOIN_ADDRESS) {
+    console.log(`  = stablecoin: real Asset Hub USDC ${REAL_USDC} (buy some: node scripts/swap-local-dex.mjs)`);
+  }
 
   // ── 2. Wiring ──────────────────────────────────────────────────────────
   console.log("\n2. Wiring");
