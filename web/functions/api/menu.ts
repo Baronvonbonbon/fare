@@ -6,7 +6,10 @@
 // gateway (no auth needed) — see web/src/menu.ts.
 //
 // Secret setup: Cloudflare Pages -> Settings -> Environment variables:
-//   IPFS_ADD_URL  = https://ipfs.datum.javcon.io/add   (the DATUM proxy /add)
+//   IPFS_ADD_URL  = <an authenticated IPFS add endpoint>
+//     This pointed at https://ipfs.datum.javcon.io/add until 2026-07-28, when
+//     the DATUM node was decommissioned — that host is gone. Use the Kubo
+//     service in venue-node/docker-compose.yml or a hosted pinning service.
 //   IPFS_API_KEY  = <the proxy's Bearer token>
 // Local dev: web/.dev.vars. Until set, /api/menu returns { configured:false }
 // and the client falls back to device-local storage.

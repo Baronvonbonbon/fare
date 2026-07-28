@@ -22,8 +22,8 @@ Ordered by what a reader should act on, not by discovery order.
 | 23 | Two state-matrix rows would have been refused before the guard they test | — | ✅ Fixed |
 | 24 | `regionsCovering` returned 3.6M cells near a pole, hanging the tab | **Medium** | ✅ Fixed |
 | 25 | New tests passed but broke `npm run build`, which CI gates on | Medium (process) | ✅ Fixed |
-| 2 | `/fund` can double-fund inside a 250 ms window | Low | ☐ Open |
-| 3 | Oversized request body returns 500, not 413 | Cosmetic | ☐ Open |
+| 2 | `/fund` can double-fund inside a 250 ms window | Low → **Medium** once the relay went public | ✅ Fixed |
+| 3 | Oversized request body returns 500, not 413 | Cosmetic | ✅ Fixed |
 | 4 | CI ran nothing but Slither, path-filtered to `contracts/**` | **High** (process) | ✅ Fixed |
 | 5 | `relay.mjs` could not be imported by a test | Medium (process) | ✅ Fixed |
 | 6 | `PINE_RPC` silently overrides `RELAY_RPC_URL` | Low (footgun) | 🟡 Neutralized in tests |
@@ -86,8 +86,8 @@ chain *would* have taken the write.
 
 ## 14. The faucet ops step was stale — **fixed by deleting the faucet**
 
-[REMAINING-ACTIONS.md](REMAINING-ACTIONS.md) §1 lists, as a required operational
-step:
+[REMAINING-ACTIONS.md](REMAINING-ACTIONS.md) §1 used to list, as a required
+operational step (it no longer does — the entry is struck through there now):
 
 > ☐ **Faucet secret** — set `DRIP_PRIVATE_KEY` (funded) in Cloudflare Pages env
 > so `/api/drip` funds burners on demand (the "one manual secret step"). Without
