@@ -372,6 +372,39 @@ async function tokenDecimals(token) {
 /// order token — value it in native via the price (RELAY_TOKEN_PRICE / a live
 /// asset-conversion quote). Returns null when a token order has no price → the
 /// caller must DECLINE (it can't prove the comp covers gas).
+/// An Asset Hub asset seen from the EVM is an ERC-20 PRECOMPILE whose address
+/// encodes the asset id in its first 4 bytes, then a 0x01200000 marker. That is
+/// what lets us ask asset-conversion for a price without being told the id.
+/// Returns null for an ordinary contract (a real ERC-20 has no pool here).
+function assetIdOf(token) {
+  const a = String(token).toLowerCase().replace(/^0x/, "");
+  if (a.length !== 40 || !a.endsWith("01200000")) return null;
+  if (a.slice(8, 32) !== "0".repeat(24)) return null;
+  const id = parseInt(a.slice(0, 8), 16);
+  return Number.isFinite(id) && id > 0 ? id : null;
+}
+
+// A quote is a WebSocket round trip to Asset Hub, so it must not happen per
+// request. Cache per asset for QUOTE_TTL_MS; the pool moves far slower than the
+// 25% margin this feeds.
+const QUOTE_TTL_MS = Number(process.env.RELAY_QUOTE_TTL_MS || 300_000);
+const _quotes = new Map(); // assetId → { at, price }
+
+async function livePrice(token, dec) {
+  const id = assetIdOf(token);
+  if (id === null) return null;
+  const hit = _quotes.get(id);
+  if (hit && Date.now() - hit.at < QUOTE_TTL_MS) return hit.price;
+  try {
+    const price = await assetConversionQuote(id, dec); // {num,den} native per whole token
+    _quotes.set(id, { at: Date.now(), price });
+    return price;
+  } catch (e) {
+    console.error(`[relay] asset-conversion quote failed for asset ${id}:`, e?.message ?? e);
+    return null;
+  }
+}
+
 async function relayCompForOrder(orderId) {
   if (!orders) return 0n;
   try {
@@ -379,7 +412,12 @@ async function relayCompForOrder(orderId) {
     const comp = rebateWei(o.fare, feeBps, rebBps) + BigInt(o.serviceFee ?? 0n); // rebate + flat service fee
     if (!o.token || o.token === ZERO) return comp; // native — same currency as gas
     const dec = await tokenDecimals(o.token);
-    return rebateInNative(comp, dec, NATIVE_DECIMALS, null); // null price → config RELAY_TOKEN_PRICE
+    // Prefer the LIVE asset-conversion price over a number pinned in .env: a
+    // stale RELAY_TOKEN_PRICE either declines settlements that pay fine, or
+    // approves ones that do not. Fall back to the config price, then to null
+    // (→ DECLINE) so the relay never guesses at coverage.
+    const quote = priceFraction() ? null : await livePrice(o.token, dec);
+    return rebateInNative(comp, dec, NATIVE_DECIMALS, quote);
   } catch { return 0n; }
 }
 async function withdrawFeeForAccount(account) {
@@ -992,7 +1030,7 @@ if (FEE_RECOVERY && FEE_ASSET_ID != null) setInterval(feeRecoveryTick, SWAP_POLL
 
 // Exported for tests: they listen on an ephemeral port themselves. Importing
 // this module must never bind PORT or the suite collides with a running relay.
-export { server, handler, relay, provider, clientKey, rateLimitKeys };
+export { server, handler, relay, provider, clientKey, rateLimitKeys, assetIdOf };
 
 if (IS_MAIN) server.listen(PORT, BIND, () => {
   console.log(`[relay] FARE venue relay on ${BIND}:${PORT}`);
