@@ -150,13 +150,33 @@ async function main() {
   }
   console.log(`   status ${await orders.statusOf(orderId)} (2=Assigned)`);
 
-  // ── 5. confirmPickup (dual-sig, relay submits) ─────────────────────────────
+  // Settlement goes through the RELAY'S HTTP ENDPOINT, not the relay's key
+  // directly. That distinction is the whole point: submitting with the key
+  // proves the calls work, but never asks the relay whether settling a TOKEN
+  // order pays for itself. The profitability guard values the USDC service fee
+  // in native (via the asset-conversion quote) and refuses below
+  // RELAY_MIN_MARGIN, and until this went through /submit that decision was
+  // completely untested — a 402 here is a real failure, not a warning.
+  const RELAY_URL = (process.env.RELAY_URL ?? "http://127.0.0.1:8788").replace(/\/$/, "");
+  const relayPost = async (route, body) => {
+    const r = await fetch(`${RELAY_URL}${route}`, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify(body, (_k, v) => (typeof v === "bigint" ? v.toString() : v)),
+    });
+    const json = await r.json().catch(() => ({}));
+    if (r.status !== 200) {
+      throw new Error(`relay ${route} → ${r.status} ${JSON.stringify(json)}`);
+    }
+    return json;
+  };
+
+  // ── 5. confirmPickup (dual-sig, relayed) ───────────────────────────────────
   const domain = { name: "FareSettlement", version: "1", chainId, verifyingContract: b.settlement };
   const settle = new ethers.Contract(b.settlement, [
     "function confirmPickup((uint256 orderId,uint8 phase,address actor,int32 lat,int32 lon,uint64 timestamp),bytes,(uint256 orderId,uint8 phase,address actor,int32 lat,int32 lon,uint64 timestamp),bytes)",
     "function confirmDropoffZK((uint256 orderId,uint8 phase,address actor,bytes32 posCommit,uint64 timestamp),bytes,bytes,uint256[5])",
     "function dropoffRadiusMeters() view returns(uint32)",
-  ], R);
+  ], prov); // reads only — settlement WRITES go through the relay's /submit
   if (!st.pickup) {
     console.log(`\n5. confirmPickup (driver+venue dual-sign, relay submits)`);
     const now = Number((await prov.getBlock("latest")).timestamp);
@@ -165,8 +185,8 @@ async function main() {
     const dAtt = { orderId, phase: 1, actor: D.address, lat: dC.lat, lon: dC.lon, timestamp: now };
     const vAtt = { orderId, phase: 1, actor: V.address, lat: VENUE.lat, lon: VENUE.lon, timestamp: now };
     const dSig = await D.signTypedData(domain, LOC, dAtt), vSig = await V.signTypedData(domain, LOC, vAtt);
-    const tx = await settle.confirmPickup(dAtt, dSig, vAtt, vSig, { gasLimit: 500_000_000n });
-    await rec(prov, { step: "S.pickup", party: "relay(venue-node)", action: "confirmPickup", hash: tx.hash });
+    const out = await relayPost("/submit", { method: "confirmPickup", args: [dAtt, dSig, vAtt, vSig] });
+    await rec(prov, { step: "S.pickup", party: "relay(venue-node)", action: "confirmPickup", hash: out.txHash });
     st.pickup = true; st.pickupCoarse = dC; saveSt(st);
   }
   console.log(`   status ${await orders.statusOf(orderId)} (3=PickedUp)`);
@@ -186,8 +206,12 @@ async function main() {
     const DC = { DriverCommitAttestation: [ { name: "orderId", type: "uint256" }, { name: "phase", type: "uint8" }, { name: "actor", type: "address" }, { name: "posCommit", type: "bytes32" }, { name: "timestamp", type: "uint64" } ] };
     const dAtt = { orderId, phase: 2, actor: D.address, posCommit: driverCommit, timestamp: now };
     const dSig = await D.signTypedData(domain, DC, dAtt);
-    const tx = await settle.confirmDropoffZK(dAtt, dSig, proofBytes, pub, { gasLimit: 500_000_000n });
-    await rec(prov, { step: "S.dropoff", party: "relay(venue-node)", action: "confirmDropoffZK", hash: tx.hash });
+    // THE economics assertion: this is the reward-bearing call, so the guard
+    // values the USDC service fee in native and compares it to the order's
+    // cumulative relayed gas x RELAY_MIN_MARGIN. A 402 means a token order does
+    // not pay for itself.
+    const out = await relayPost("/submit", { method: "confirmDropoffZK", args: [dAtt, dSig, proofBytes, pub] });
+    await rec(prov, { step: "S.dropoff", party: "relay(venue-node)", action: "confirmDropoffZK", hash: out.txHash });
     st.dropoff = true; saveSt(st);
   }
   console.log(`   status ${await orders.statusOf(orderId)} (4=Delivered)`);

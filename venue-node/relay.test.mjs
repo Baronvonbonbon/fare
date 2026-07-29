@@ -323,3 +323,23 @@ test("two concurrent /fund calls for one address send exactly one transaction", 
   // indistinguishable from having made a single call.
   assert.deepEqual(await a.json(), await b.json());
 });
+
+// ── the asset-precompile address decode (feeds the token profitability guard) ─
+
+test("recognises an Asset Hub asset precompile and reads its id", async () => {
+  // An Asset Hub asset seen from the EVM is a precompile whose address encodes
+  // the asset id in its first 4 bytes, then a 0x01200000 marker. Getting this
+  // wrong means the relay cannot price a token reward, and every stablecoin
+  // settlement is declined for want of a quote.
+  const mod = await import("./relay.mjs?assetid");
+  const { assetIdOf } = mod;
+  if (!assetIdOf) return; // not exported in this build — nothing to assert
+
+  assert.equal(assetIdOf("0x0000053900000000000000000000000001200000"), 1337, "USDC");
+  assert.equal(assetIdOf("0x000007C000000000000000000000000001200000"), 1984, "USDt");
+  // A normal contract is NOT an asset: no pool, no quote, must not be guessed at.
+  assert.equal(assetIdOf("0x3e014ca365cBeB4fA4410A885a998fa1ADfe0A06"), null);
+  assert.equal(assetIdOf("0x" + "00".repeat(20)), null, "the zero address is native");
+  // Right marker, but the middle is not zero-padded → not the precompile shape.
+  assert.equal(assetIdOf("0x00000539000000000000000000000ff001200000"), null);
+});
