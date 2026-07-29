@@ -16,7 +16,7 @@ import path from "path";
 import { WITHDRAW_WASM, loadWithdrawZkey } from "./zkey.mjs";
 import {
   ROOT, provider, book, env, loadState, saveState, record, waitTx, leanGas, sleep,
-  KS_POOL, fmt, eth,
+  KS_POOL, fmt, eth, runScript,
 } from "./e2e-lib.mjs";
 
 // Sealed bids are the only bid path. A fixed salt is fine for a scripted run:
@@ -325,8 +325,7 @@ async function main() {
   console.log(`\n✅ run complete. orderId=${st.run.orderId}. Ledger: artifacts/e2e-live/ledger.json`);
 }
 
-main().catch((e) => {
+runScript(main, (e) => {
   console.error("\nRUN FAILED:", e?.shortMessage ?? e?.message ?? e);
   console.error(e?.stack?.split("\n").slice(0, 4).join("\n"));
-  process.exit(1);
 });

@@ -396,7 +396,11 @@ async function main() {
   console.log(`\n   report e2e-runs/relay-lab/costs.json\n`);
 }
 
-main().catch((e) => {
+// Leave when the work is done. ethers' provider keeps a block poller running, so
+// a finished run would otherwise sit there looking unfinished — in CI, until the
+// job timed out. Reports above are written synchronously, so there is nothing
+// pending to lose. (e2e-lib's runScript does the same for the shield scripts.)
+main().then(() => process.exit(0)).catch((e) => {
   console.error("\n❌", e?.shortMessage ?? e?.reason ?? e?.message ?? e);
   fs.mkdirSync(OUT, { recursive: true });
   fs.writeFileSync(path.join(OUT, "costs-partial.json"), JSON.stringify({ error: String(e?.message ?? e), ledger: ledger?.report?.() ?? null }, null, 2));

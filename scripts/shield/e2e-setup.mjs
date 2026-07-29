@@ -10,7 +10,7 @@ import { ethers } from "ethers";
 import fs from "fs";
 import path from "path";
 import {
-  ROOT, provider, book, env, loadState, saveState, record, leanGas, fmt, eth,
+  ROOT, provider, book, env, loadState, saveState, record, leanGas, fmt, eth, runScript,
 } from "./e2e-lib.mjs";
 
 const VENUE_LAT = 37_774_900; // San Francisco
@@ -119,7 +119,6 @@ async function main() {
   console.log(`\n✅ setup complete. venueId=${st.venueId} relay=${R} burner=${st.wallets.burner.address}`);
 }
 
-main().catch((e) => {
+runScript(main, (e) => {
   console.error("SETUP FAILED:", e?.shortMessage ?? e?.message ?? e);
-  process.exit(1);
 });

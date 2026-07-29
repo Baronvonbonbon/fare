@@ -15,7 +15,7 @@ import * as snarkjs from "snarkjs";
 import fs from "fs";
 import path from "path";
 import { WITHDRAW_WASM, loadWithdrawZkey } from "./shield/zkey.mjs";
-import { ROOT, provider, book, env, loadState, waitTx, leanGas, GAS_PRICE_WEI, KS_POOL, fmt, eth } from "./shield/e2e-lib.mjs";
+import { ROOT, provider, book, env, loadState, waitTx, leanGas, GAS_PRICE_WEI, KS_POOL, fmt, eth, runScript } from "./shield/e2e-lib.mjs";
 
 // Sealed bids are the only bid path. A fixed salt is fine for a scripted run:
 // in production the driver picks it and it travels to the customer off-chain.
@@ -202,4 +202,7 @@ async function main() {
   }
   console.log(`\n✅ COMBINED privacy+stablecoin e2e complete. orderId=${st.orderId}. Ledger: artifacts/e2e-combined/ledger.json`);
 }
-main().catch((e) => { console.error("\nFAILED:", e?.shortMessage ?? e?.message ?? e); console.error(e?.stack?.split("\n").slice(0, 3).join("\n")); process.exit(1); });
+runScript(main, (e) => {
+  console.error("\nFAILED:", e?.shortMessage ?? e?.message ?? e);
+  console.error(e?.stack?.split("\n").slice(0, 3).join("\n"));
+});

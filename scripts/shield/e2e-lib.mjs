@@ -27,8 +27,36 @@ export function env(k) {
   }
 }
 
+// Every provider ethers hands out starts a block poller, and that timer keeps
+// the event loop alive forever. A script whose main() resolved would therefore
+// sit there looking like it was still working until something killed it — in CI,
+// until the job timed out. Track them so `shutdown()` can stop them.
+const _providers = new Set();
+
 export function provider() {
-  return new ethers.JsonRpcProvider(RPC, undefined, { batchMaxCount: 1, staticNetwork: true });
+  const p = new ethers.JsonRpcProvider(RPC, undefined, { batchMaxCount: 1, staticNetwork: true });
+  _providers.add(p);
+  return p;
+}
+
+/// Stop the pollers so the process can exit on its own.
+export function shutdown() {
+  for (const p of _providers) { try { p.destroy(); } catch { /* already gone */ } }
+  _providers.clear();
+}
+
+/// Standard tail for a live script: run `main`, then leave — successfully, and
+/// without waiting on a poller nobody is reading. `onError` keeps whatever
+/// bespoke failure handling a script already had (writing a partial report, and
+/// so on) and runs BEFORE the exit.
+export function runScript(main, onError) {
+  main()
+    .then(() => { shutdown(); process.exit(0); })
+    .catch(async (e) => {
+      try { await onError?.(e); } catch { /* reporting must not mask the failure */ }
+      shutdown();
+      process.exit(1);
+    });
 }
 
 export function book() {

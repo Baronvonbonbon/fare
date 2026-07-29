@@ -140,7 +140,11 @@ function run(bin, args, { cwd, check = true } = {}) {
   });
 }
 
-main().catch((e) => {
+// Leave when the work is done. ethers' provider keeps a block poller running, so
+// a finished run would otherwise sit there looking unfinished — in CI, until the
+// job timed out. Reports above are written synchronously, so there is nothing
+// pending to lose. (e2e-lib's runScript does the same for the shield scripts.)
+main().then(() => process.exit(0)).catch((e) => {
   console.error("\n❌", e?.message ?? e);
   process.exit(1);
 });
