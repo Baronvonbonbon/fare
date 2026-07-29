@@ -70,6 +70,22 @@ export const makeNote = (valueWei: bigint, asset: bigint = NATIVE): Note => ({
 /// missing field to native is safe because that is what every note written
 /// before multi-asset support was one.
 export const assetOf = (n: Note): bigint => BigInt(n.asset ?? NATIVE);
+
+/// The pool's ERC-20 precompile address for an Asset Hub asset id, as the pool
+/// itself derives it: `(assetId << 128) | (0x0120 << 16)`.
+///
+/// THIS, not the asset id, is what a note commits to. The pool keys its escrow
+/// ledger by ADDRESS (`escrow[precompile] += amount` on deposit) and
+/// `proxy_withdraw` reads the circuit's asset signal back as one
+/// (`address(uint160(pubSignals[7]))`). Commit the id instead and the withdrawal
+/// looks up `escrow[address(1337)]`, finds zero, and reverts "Insufficient
+/// balance" — with the money sitting safely under the address key. The DEPOSIT
+/// CALL still takes the id; only the commitment carries the address.
+export const precompileFor = (assetId: bigint): bigint => {
+  if (assetId === NATIVE) return NATIVE;
+  if (assetId >= 1n << 64n) throw new Error("assetId too large (pool requires < 2^64)");
+  return (assetId << 128n) | (0x0120n << 16n);
+};
 export const commitmentOf = (n: Note): bigint =>
   poseidon2([poseidon2([BigInt(n.value), assetOf(n)]), poseidon2([BigInt(n.nullifier), BigInt(n.secret)])]);
 export const nullifierHashOf = (n: Note): bigint => poseidon1([BigInt(n.nullifier)]);
@@ -125,7 +141,8 @@ export async function depositAssetAndSnapshot(
   const poolW = new Contract(poolAddr, KS_POOL_ABI, signer);
   const poolR = new Contract(poolAddr, KS_POOL_ABI, provider);
   const index = Number(await poolR.treeSize());
-  const note = makeNote(amount, assetId);
+  // The note commits to the PRECOMPILE ADDRESS; the call takes the ASSET ID.
+  const note = makeNote(amount, precompileFor(assetId));
   const tx = await poolW.depositAsset(assetId, amount, b32(commitmentOf(note)), { gasLimit });
   const receipt = await tx.wait();
   const leftSnapshot: Record<number, string> = {};
