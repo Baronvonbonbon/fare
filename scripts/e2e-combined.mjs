@@ -72,7 +72,8 @@ async function main() {
   const burner = new ethers.Wallet(st.burner.privateKey, prov);
   console.log(`combined run — burner ${burner.address}  venueId ${e2e.venueId}`);
 
-  const USDC = new ethers.Contract(b.stablecoin, ["function mint(address,uint256)", "function approve(address,uint256) returns(bool)", "function balanceOf(address) view returns(uint256)"], main);
+  // No mint: the escrow token is REAL Asset Hub USDC via its ERC-20 precompile.
+  const USDC = new ethers.Contract(b.stablecoin, ["function approve(address,uint256) returns(bool)", "function balanceOf(address) view returns(uint256)"], main);
   const orders = new ethers.Contract(b.orders, [
     "function createOrderERC20(address,uint64,bytes32,uint96,uint96,uint96,uint64,uint64) returns(uint256)",
     "function bidHashOf(uint256,address,uint96,bytes32) pure returns (bytes32)", "function commitBid(uint256,bytes32,bytes32)", "function acceptSealedBid(uint256,address,uint96,bytes32) payable", "function acceptSealedBidERC20(uint256,address,uint96,bytes32)",
@@ -107,8 +108,8 @@ async function main() {
     const input = { withdrawnValue: note.value.toString(), treeDepth: "128", context: context.toString(), root: root.toString(), asset: "0", existingValue: note.value.toString(), existingNullifier: note.nullifier.toString(), existingSecret: note.secret.toString(), newNullifier: change.nullifier.toString(), newSecret: change.secret.toString(), siblings, leafIndex: idx.toString() };
     const { proof, publicSignals } = await snarkjs.groth16.fullProve(input, WITHDRAW_WASM, loadWithdrawZkey());
     const pB = [[proof.pi_b[0][1], proof.pi_b[0][0]], [proof.pi_b[1][1], proof.pi_b[1][0]]];
-    const tx = await ks.connect(R).proxy_withdraw([proof.pi_a[0], proof.pi_a[1]], pB, [proof.pi_c[0], proof.pi_c[1]], publicSignals, burner.address, { gasLimit: 8_000_000n, nonce: await prov.getTransactionCount(R.address) });
-    await rec(prov, { step: "K.withdraw", party: "relay(venue-node)", action: "KS.proxy_withdraw→burner", hash: tx.hash });
+    const tx = await ks.connect(V).proxy_withdraw([proof.pi_a[0], proof.pi_a[1]], pB, [proof.pi_c[0], proof.pi_c[1]], publicSignals, burner.address, { gasLimit: 3_000_000n, nonce: await prov.getTransactionCount(V.address, "latest") });
+    await rec(prov, { step: "K.withdraw", party: "venue(gas payer)", action: "KS.proxy_withdraw→burner", hash: tx.hash });
     console.log(`   burner PAS: ${fmt(await prov.getBalance(burner.address))} (shielded gas, unlinked to main)`);
     st.ksWithdraw = tx.hash; saveC(st);
   }
@@ -128,11 +129,11 @@ async function main() {
       `main holds ${fmt6(held)} USDC, needs ${fmt6(NEED_USDC)} — there is no mint. ` +
       `Buy some: WANT_USDC=${Math.ceil(Number(NEED_USDC) / 1e6) + 5} node scripts/swap-local-dex.mjs`);
     const ku = await ksShieldedFund({
-      pool: KS_POOL, provider: prov, funder: main, submitter: R, recipient: burner.address,
+      pool: KS_POOL, provider: prov, funder: main, submitter: V, recipient: burner.address,
       amount: NEED_USDC, assetId: 1337, poseidon2, snarkjs, wasm: WITHDRAW_WASM, zkey: loadWithdrawZkey(),
     });
     await rec(prov, { step: "C.usdcDeposit", party: "customer-main", action: "KS.depositAsset(USDC)", hash: ku.depositHash, tokenValue: NEED_USDC });
-    await rec(prov, { step: "C.usdcWithdraw", party: "relay(venue-node)", action: "KS.proxy_withdraw→burner(USDC)", hash: ku.withdrawHash, tokenValue: NEED_USDC });
+    await rec(prov, { step: "C.usdcWithdraw", party: "venue(gas payer)", action: "KS.proxy_withdraw→burner(USDC)", hash: ku.withdrawHash, tokenValue: NEED_USDC });
   // NOT MaxUint256: the real USDC precompile narrows the amount to pallet-assets'
   // u128, so an unlimited approval reverts with "Balance conversion failed".
   // Approve what this run actually needs, with headroom.
