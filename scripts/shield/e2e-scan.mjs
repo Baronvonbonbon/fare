@@ -8,7 +8,7 @@
 import { ethers } from "ethers";
 import fs from "fs";
 import path from "path";
-import { ROOT, provider, loadState, loadLedger, OUT } from "./e2e-lib.mjs";
+import { ROOT, provider, loadState, loadLedger, OUT, runScript } from "./e2e-lib.mjs";
 
 // int32 two's-complement, 8 hex digits (how a raw lat/lon rides in calldata).
 function int32Hex(v) {
@@ -130,4 +130,4 @@ async function main() {
   console.log(`scan.json written.`);
 }
 
-main().catch((e) => { console.error("SCAN FAILED:", e?.message ?? e); process.exit(1); });
+runScript(main, (e) => { console.error("SCAN FAILED:", e?.message ?? e); });

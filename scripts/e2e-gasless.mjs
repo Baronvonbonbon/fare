@@ -10,7 +10,7 @@ import { poseidon2, poseidon3 } from "poseidon-lite";
 import * as snarkjs from "snarkjs";
 import fs from "fs";
 import path from "path";
-import { ROOT, provider, book, env, loadState, waitTx, leanGas, GAS_PRICE_WEI, fmt } from "./shield/e2e-lib.mjs";
+import { ROOT, provider, book, env, loadState, waitTx, leanGas, GAS_PRICE_WEI, fmt, runScript } from "./shield/e2e-lib.mjs";
 
 // Sealed bids are the only bid path. A fixed salt is fine for a scripted run:
 // in production the driver picks it and it travels to the customer off-chain.
@@ -199,4 +199,7 @@ async function main() {
   await assertZeroGas("end");
   console.log(`\n✅ GASLESS ORDER e2e complete on the upgraded FareOrders. customer paid 0 PAS gas end-to-end; relay executed the forwarded permit-order. orderId=${orderId}. Ledger: e2e-runs/e2e-gasless/ledger.json`);
 }
-main().catch((e) => { console.error("\nFAILED:", e?.shortMessage ?? e?.message ?? e); console.error(e?.stack?.split("\n").slice(0, 3).join("\n")); process.exit(1); });
+runScript(main, (e) => {
+  console.error("\nFAILED:", e?.shortMessage ?? e?.message ?? e);
+  console.error(e?.stack?.split("\n").slice(0, 3).join("\n"));
+});

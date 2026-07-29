@@ -12,7 +12,7 @@ import * as snarkjs from "snarkjs";
 import fs from "fs";
 import path from "path";
 import {
-  ROOT, provider, book, env, loadState, waitTx, leanGas, GAS_PRICE_WEI, fmt, eth,
+  ROOT, provider, book, env, loadState, waitTx, leanGas, GAS_PRICE_WEI, fmt, eth, runScript,
 } from "./shield/e2e-lib.mjs";
 
 // Sealed bids are the only bid path. A fixed salt is fine for a scripted run:
@@ -206,4 +206,7 @@ async function main() {
 }
 const fmt6 = (x) => (Number(x) / 1e6).toString();
 
-main().catch((e) => { console.error("\nFAILED:", e?.shortMessage ?? e?.message ?? e); console.error(e?.stack?.split("\n").slice(0, 3).join("\n")); process.exit(1); });
+runScript(main, (e) => {
+  console.error("\nFAILED:", e?.shortMessage ?? e?.message ?? e);
+  console.error(e?.stack?.split("\n").slice(0, 3).join("\n"));
+});
