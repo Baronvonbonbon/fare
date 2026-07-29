@@ -20,6 +20,11 @@ import { Contract, keccak256, solidityPacked, zeroPadValue, toBeHex, toBigInt, r
 
 export const KS_POOL_ABI = [
   "function depositNative(bytes32 commitment) payable",
+  // Multi-asset deposit. The FIRST argument is the Asset Hub ASSET ID (1337 for
+  // USDC), NOT the token address — passing an address reverts "AssetId too
+  // large". The Deposit event then reports the ERC-20 precompile ADDRESS, so the
+  // two directions use different encodings; do not assume they match.
+  "function depositAsset(uint256 asset, uint256 value, bytes32 commitment)",
   "function proxy_withdraw(uint[2] pA, uint[2][2] pB, uint[2] pC, uint[8] pubSignals, address recipient)",
   "function currentRoot() view returns (uint256)",
   "function treeSize() view returns (uint256)",
@@ -37,7 +42,12 @@ const NATIVE = 0n;
 export interface Note {
   nullifier: string; // decimal string (field element)
   secret: string;
-  value: string; // wei
+  value: string; // smallest units of `asset`
+  /// Asset Hub asset id, as a decimal string. "0" = native PAS. Kusama Shield is
+  /// a MULTI-ASSET pool: the asset is bound into the commitment and is a public
+  /// input to the withdraw circuit, so a note is only spendable as the asset it
+  /// was deposited as. Omitted means native, so old persisted notes still load.
+  asset?: string;
 }
 /// A spendable note plus everything needed to rebuild its Merkle path later
 /// without the genesis leaf or a full-history scan. Persisted device-local.
@@ -51,11 +61,33 @@ export interface NoteRecord extends Note {
 // ── commitment scheme (KS commitment.circom) ─────────────────────────────────
 const b32 = (x: bigint): string => zeroPadValue(toBeHex(x), 32);
 const randField = (): bigint => toBigInt(randomBytes(31)) % BN254_R;
-export const makeNote = (valueWei: bigint): Note => ({
+export const makeNote = (valueWei: bigint, asset: bigint = NATIVE): Note => ({
   nullifier: randField().toString(), secret: randField().toString(), value: valueWei.toString(),
+  asset: asset.toString(),
 });
+/// `asset` is part of the commitment preimage, so getting it wrong produces a
+/// note the circuit will never accept — the value is simply stuck. Defaulting a
+/// missing field to native is safe because that is what every note written
+/// before multi-asset support was one.
+export const assetOf = (n: Note): bigint => BigInt(n.asset ?? NATIVE);
+
+/// The pool's ERC-20 precompile address for an Asset Hub asset id, as the pool
+/// itself derives it: `(assetId << 128) | (0x0120 << 16)`.
+///
+/// THIS, not the asset id, is what a note commits to. The pool keys its escrow
+/// ledger by ADDRESS (`escrow[precompile] += amount` on deposit) and
+/// `proxy_withdraw` reads the circuit's asset signal back as one
+/// (`address(uint160(pubSignals[7]))`). Commit the id instead and the withdrawal
+/// looks up `escrow[address(1337)]`, finds zero, and reverts "Insufficient
+/// balance" — with the money sitting safely under the address key. The DEPOSIT
+/// CALL still takes the id; only the commitment carries the address.
+export const precompileFor = (assetId: bigint): bigint => {
+  if (assetId === NATIVE) return NATIVE;
+  if (assetId >= 1n << 64n) throw new Error("assetId too large (pool requires < 2^64)");
+  return (assetId << 128n) | (0x0120n << 16n);
+};
 export const commitmentOf = (n: Note): bigint =>
-  poseidon2([poseidon2([BigInt(n.value), NATIVE]), poseidon2([BigInt(n.nullifier), BigInt(n.secret)])]);
+  poseidon2([poseidon2([BigInt(n.value), assetOf(n)]), poseidon2([BigInt(n.nullifier), BigInt(n.secret)])]);
 export const nullifierHashOf = (n: Note): bigint => poseidon1([BigInt(n.nullifier)]);
 export const contextFor = (recipient: string): bigint =>
   toBigInt(keccak256(solidityPacked(["address"], [recipient]))) % BN254_R;
@@ -89,6 +121,32 @@ export async function depositAndSnapshot(
   // AHEAD of the deposit whenever a block lands in between — the later scan then
   // starts past its own commitment and the note looks lost. Step back one block
   // for good measure, since the scan is bounded either way.
+  const minedAt = receipt?.blockNumber ?? tx.blockNumber ?? (await provider.getBlockNumber());
+  return { record: { ...note, index, leftSnapshot, depositBlock: Math.max(0, Number(minedAt) - 1) }, txHash: tx.hash };
+}
+
+/// Deposit `amount` of an Asset Hub ASSET (e.g. USDC, asset 1337) into the pool.
+/// The caller must have approved the pool for `amount` first — the pool pulls
+/// with transferFrom.
+///
+/// This is the shielded path for a stablecoin. Kusama Shield is a multi-asset
+/// pool, so USDC does not need a swap to PAS or a separate pool: the asset is
+/// bound into the commitment and carried as a public input through the withdraw
+/// proof, so the note spends as USDC.
+export async function depositAssetAndSnapshot(
+  poolAddr: string, signer: Signer, provider: Provider,
+  assetId: bigint, amount: bigint, gasLimit: bigint
+): Promise<{ record: NoteRecord; txHash: string }> {
+  if (assetId === NATIVE) throw new Error("use depositAndSnapshot for native");
+  const poolW = new Contract(poolAddr, KS_POOL_ABI, signer);
+  const poolR = new Contract(poolAddr, KS_POOL_ABI, provider);
+  const index = Number(await poolR.treeSize());
+  // The note commits to the PRECOMPILE ADDRESS; the call takes the ASSET ID.
+  const note = makeNote(amount, precompileFor(assetId));
+  const tx = await poolW.depositAsset(assetId, amount, b32(commitmentOf(note)), { gasLimit });
+  const receipt = await tx.wait();
+  const leftSnapshot: Record<number, string> = {};
+  for (let lv = 0; lv < 128; lv++) if (bit(index, lv)) leftSnapshot[lv] = (await poolR.sideNodes(lv)).toString();
   const minedAt = receipt?.blockNumber ?? tx.blockNumber ?? (await provider.getBlockNumber());
   return { record: { ...note, index, leftSnapshot, depositBlock: Math.max(0, Number(minedAt) - 1) }, txHash: tx.hash };
 }
@@ -248,10 +306,11 @@ export async function buildWithdrawal(
 ): Promise<WithdrawalProof> {
   if (withdrawnValueWei > BigInt(record.value)) throw new Error("withdraw exceeds note value");
   const { siblings, root } = await reconstructPath(provider, poolAddr, record);
-  const change = makeNote(BigInt(record.value) - withdrawnValueWei);
+  // Change stays in the SAME asset — a note cannot change denomination mid-spend.
+  const change = makeNote(BigInt(record.value) - withdrawnValueWei, assetOf(record));
   const input = {
     withdrawnValue: withdrawnValueWei.toString(), treeDepth: "128", context: contextFor(recipient).toString(),
-    root, asset: NATIVE.toString(), existingValue: record.value,
+    root, asset: assetOf(record).toString(), existingValue: record.value,
     existingNullifier: record.nullifier, existingSecret: record.secret,
     newNullifier: change.nullifier, newSecret: change.secret,
     siblings, leafIndex: record.index.toString(),

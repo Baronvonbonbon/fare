@@ -152,3 +152,121 @@ export async function leanGas(method, args, overrides = {}) {
 
 export const fmt = (wei) => ethers.formatEther(wei);
 export const eth = (s) => ethers.parseEther(s);
+
+// ── Kusama Shield funding: deposit → prove → proxy_withdraw ──────────────────
+// One helper for BOTH native and asset funding, because the two differ only in
+// which deposit call is made and which value the note commits to — and getting
+// that second part wrong is silent (see below).
+//
+// A burner funded this way has NO on-chain edge to whoever funded it: the
+// deposit names the funder and a commitment, the withdrawal names a recipient
+// and a nullifier, and nothing links the two. Transferring to a burner instead
+// — which the e2e scripts used to do — hands that link to any observer for free.
+
+/// The pool's ERC-20 precompile address for an Asset Hub asset id, exactly as
+/// FixedIlopPhase2Paseo_v7's `getPrecompileAddress` derives it.
+///
+/// THE TRAP: `depositAsset(assetId, …)` takes the ASSET ID, but the pool credits
+/// `escrow[precompileAddress]` and `proxy_withdraw` reads the proof's asset
+/// signal straight back as an address. So the NOTE must commit to this ADDRESS.
+/// Commit the id and the withdrawal looks up an escrow key that was never
+/// credited, reverting "Insufficient balance" while the money sits safely under
+/// the address key — an error that names the symptom and hides the cause.
+export const ksPrecompileFor = (assetId) => {
+  const id = BigInt(assetId);
+  if (id === 0n) return 0n; // native
+  if (id >= 1n << 64n) throw new Error("assetId too large (pool requires < 2^64)");
+  return (id << 128n) | (0x0120n << 16n);
+};
+
+const BN254_R = 21888242871839275222246405745257275088548364400416034343698204186575808495617n;
+const ksRand = () => ethers.toBigInt(ethers.randomBytes(31)) % BN254_R;
+const ksBit = (n, lv) => ((BigInt(n) >> BigInt(lv)) & 1n) === 1n;
+
+const KS_FUND_ABI = [
+  "function depositNative(bytes32 commitment) payable",
+  // First arg is the ASSET ID, not the address — see ksPrecompileFor.
+  "function depositAsset(uint256 assetId, uint256 amount, bytes32 commitment)",
+  "function proxy_withdraw(uint[2],uint[2][2],uint[2],uint[8],address)",
+  "function currentRoot() view returns (uint256)",
+  "function treeSize() view returns (uint256)",
+  "function sideNodes(uint256) view returns (uint256)",
+];
+
+/// Shield `amount` from `funder` and deliver it to `recipient`, with `submitter`
+/// (a relay) paying for the withdrawal so the recipient needs no prior balance.
+///
+/// `assetId` 0 = native PAS; otherwise an Asset Hub asset (1337 = USDC), which
+/// the funder must already hold — the pool pulls it with transferFrom, so this
+/// approves first.
+///
+/// Uses last-leaf path reconstruction: we just inserted, so our leaf is the
+/// rightmost and its siblings are exactly the current sideNodes. If another
+/// deposit races in between, the root check below fails loudly rather than
+/// producing a proof against a tree that has moved.
+export async function ksShieldedFund({
+  pool, provider, funder, submitter, recipient, amount, assetId = 0,
+  poseidon2, snarkjs, wasm, zkey, depositGas = 2_000_000n, withdrawGas = 3_000_000n, log = () => {},
+}) {
+  const asset = ksPrecompileFor(assetId);
+  const value = BigInt(amount);
+  const note = { nullifier: ksRand(), secret: ksRand(), value };
+  const commitmentOf = (n) =>
+    poseidon2([poseidon2([n.value, asset]), poseidon2([n.nullifier, n.secret])]);
+  const b32 = (x) => "0x" + x.toString(16).padStart(64, "0");
+
+  const ksW = new ethers.Contract(pool, KS_FUND_ABI, funder);
+  const ksR = new ethers.Contract(pool, KS_FUND_ABI, provider);
+
+  let depositTx;
+  if (asset === 0n) {
+    depositTx = await ksW.depositNative(b32(commitmentOf(note)), {
+      value, gasLimit: depositGas, nonce: await provider.getTransactionCount(funder.address, "latest"),
+    });
+  } else {
+    const token = ethers.getAddress("0x" + asset.toString(16).padStart(40, "0"));
+    const erc = new ethers.Contract(token,
+      ["function approve(address,uint256) returns (bool)", "function allowance(address,address) view returns (uint256)"], funder);
+    if ((await erc.allowance(funder.address, pool)) < value) {
+      // NOT MaxUint256: the asset precompile narrows to u128 and reverts
+      // "Balance conversion failed" on an unlimited approval.
+      // Explicit "latest" nonce: ethers' automatic "pending" nonce makes Paseo
+      // answer "could not coalesce error".
+      await (await erc.approve(pool, value, {
+        gasLimit: 5_000_000n, nonce: await provider.getTransactionCount(funder.address, "latest"),
+      })).wait();
+    }
+    depositTx = await ksW.depositAsset(assetId, value, b32(commitmentOf(note)), {
+      gasLimit: depositGas, nonce: await provider.getTransactionCount(funder.address, "latest"),
+    });
+  }
+  await depositTx.wait();
+  log(`KS deposit ${depositTx.hash}`);
+
+  const idx = Number(await ksR.treeSize()) - 1;
+  const siblings = [];
+  for (let lv = 0; lv < 128; lv++) siblings.push(ksBit(idx, lv) ? (await ksR.sideNodes(lv)).toString() : "0");
+  let node = commitmentOf(note);
+  for (let lv = 0; lv < 128; lv++) if (ksBit(idx, lv)) node = poseidon2([BigInt(siblings[lv]), node]);
+  const root = await ksR.currentRoot();
+  if (node !== root) throw new Error("KS: our leaf is not the last one (deposit race) — retry");
+
+  const change = { nullifier: ksRand(), secret: ksRand(), value: 0n };
+  const context = ethers.toBigInt(ethers.keccak256(ethers.solidityPacked(["address"], [recipient]))) % BN254_R;
+  const { proof, publicSignals } = await snarkjs.groth16.fullProve({
+    withdrawnValue: value.toString(), treeDepth: "128", context: context.toString(),
+    root: root.toString(), asset: asset.toString(), existingValue: value.toString(),
+    existingNullifier: note.nullifier.toString(), existingSecret: note.secret.toString(),
+    newNullifier: change.nullifier.toString(), newSecret: change.secret.toString(),
+    siblings, leafIndex: idx.toString(),
+  }, wasm, zkey);
+
+  const pB = [[proof.pi_b[0][1], proof.pi_b[0][0]], [proof.pi_b[1][1], proof.pi_b[1][0]]];
+  const withdrawTx = await new ethers.Contract(pool, KS_FUND_ABI, submitter).proxy_withdraw(
+    [proof.pi_a[0], proof.pi_a[1]], pB, [proof.pi_c[0], proof.pi_c[1]], publicSignals, recipient,
+    { gasLimit: withdrawGas, nonce: await provider.getTransactionCount(submitter.address, "latest") }
+  );
+  await withdrawTx.wait();
+  log(`KS proxy_withdraw ${withdrawTx.hash} → ${recipient}`);
+  return { depositHash: depositTx.hash, withdrawHash: withdrawTx.hash, leafIndex: idx, asset };
+}

@@ -1,9 +1,9 @@
 // Combined privacy + stablecoin e2e on Paseo:
 //   1. KS shields the burner's GAS  — main deposits PAS → relay proxy_withdraws
 //      to a fresh burner (unlinked to main).
-//   2. USDC to the burner           — open MockUSDC mint (the testnet "shared
-//      faucet" analog for the escrow value; mainnet would need a USDC-shielding
-//      path — the honest gap).
+//   2. USDC to the burner           — ALSO shielded through KS (asset 1337).
+//      This was "the honest gap" while the pool was believed PAS-only; it is
+//      multi-asset, so the escrow value hides exactly like the gas does.
 //   3. Burner runs a USDC-escrowed order (createOrderERC20 → acceptSealedBidERC20),
 //      relay settles gaslessly (dual-sig pickup + ZK dropoff — no coords on-chain),
 //      payouts in USDC, then the burner shielded-returns its leftover PAS gas.
@@ -15,7 +15,7 @@ import * as snarkjs from "snarkjs";
 import fs from "fs";
 import path from "path";
 import { WITHDRAW_WASM, loadWithdrawZkey } from "./shield/zkey.mjs";
-import { ROOT, provider, book, env, loadState, waitTx, leanGas, GAS_PRICE_WEI, KS_POOL, fmt, eth, runScript } from "./shield/e2e-lib.mjs";
+import { ROOT, provider, book, env, loadState, waitTx, leanGas, GAS_PRICE_WEI, KS_POOL, fmt, eth, runScript, ksShieldedFund } from "./shield/e2e-lib.mjs";
 
 // Sealed bids are the only bid path. A fixed salt is fine for a scripted run:
 // in production the driver picks it and it travels to the customer off-chain.
@@ -72,7 +72,8 @@ async function main() {
   const burner = new ethers.Wallet(st.burner.privateKey, prov);
   console.log(`combined run — burner ${burner.address}  venueId ${e2e.venueId}`);
 
-  const USDC = new ethers.Contract(b.stablecoin, ["function mint(address,uint256)", "function approve(address,uint256) returns(bool)", "function balanceOf(address) view returns(uint256)"], main);
+  // No mint: the escrow token is REAL Asset Hub USDC via its ERC-20 precompile.
+  const USDC = new ethers.Contract(b.stablecoin, ["function approve(address,uint256) returns(bool)", "function balanceOf(address) view returns(uint256)"], main);
   const orders = new ethers.Contract(b.orders, [
     "function createOrderERC20(address,uint64,bytes32,uint96,uint96,uint96,uint64,uint64) returns(uint256)",
     "function bidHashOf(uint256,address,uint96,bytes32) pure returns (bytes32)", "function commitBid(uint256,bytes32,bytes32)", "function acceptSealedBid(uint256,address,uint96,bytes32) payable", "function acceptSealedBidERC20(uint256,address,uint96,bytes32)",
@@ -107,22 +108,36 @@ async function main() {
     const input = { withdrawnValue: note.value.toString(), treeDepth: "128", context: context.toString(), root: root.toString(), asset: "0", existingValue: note.value.toString(), existingNullifier: note.nullifier.toString(), existingSecret: note.secret.toString(), newNullifier: change.nullifier.toString(), newSecret: change.secret.toString(), siblings, leafIndex: idx.toString() };
     const { proof, publicSignals } = await snarkjs.groth16.fullProve(input, WITHDRAW_WASM, loadWithdrawZkey());
     const pB = [[proof.pi_b[0][1], proof.pi_b[0][0]], [proof.pi_b[1][1], proof.pi_b[1][0]]];
-    const tx = await ks.connect(R).proxy_withdraw([proof.pi_a[0], proof.pi_a[1]], pB, [proof.pi_c[0], proof.pi_c[1]], publicSignals, burner.address, { gasLimit: 8_000_000n, nonce: await prov.getTransactionCount(R.address) });
-    await rec(prov, { step: "K.withdraw", party: "relay(venue-node)", action: "KS.proxy_withdraw→burner", hash: tx.hash });
+    const tx = await ks.connect(V).proxy_withdraw([proof.pi_a[0], proof.pi_a[1]], pB, [proof.pi_c[0], proof.pi_c[1]], publicSignals, burner.address, { gasLimit: 3_000_000n, nonce: await prov.getTransactionCount(V.address, "latest") });
+    await rec(prov, { step: "K.withdraw", party: "venue(gas payer)", action: "KS.proxy_withdraw→burner", hash: tx.hash });
     console.log(`   burner PAS: ${fmt(await prov.getBalance(burner.address))} (shielded gas, unlinked to main)`);
     st.ksWithdraw = tx.hash; saveC(st);
   }
 
-  // ── 2. USDC to the burner (open mint — testnet faucet analog for escrow value)
+  // ── 2. USDC to the burner — SHIELDED, like the gas ─────────────────────────
+  // This used to mint MockUSDC to the burner, and the header called the missing
+  // alternative "the honest gap": a PAS-only pool could not shield the escrow
+  // value, so the USDC traced straight back to main and the order was only
+  // half-private. Kusama Shield turns out to be MULTI-ASSET, so the gap was
+  // never real — the escrow shields exactly as the gas does, with the note
+  // committing to the asset's precompile ADDRESS (see ksPrecompileFor).
+  const NEED_USDC = ORDER_VALUE + TIP + FARE + usdc(5);
   if (!st.minted) {
-    console.log(`\n2. mint 100 USDC → burner (testnet faucet analog) + approve orders`);
-    const mt = await USDC.mint(burner.address, usdc(100), { gasLimit: 5_000_000n, nonce: await prov.getTransactionCount(main.address) });
-    await rec(prov, { step: "C.mint", party: "faucet(mint)", action: "mint-USDC→burner", hash: mt.hash, tokenValue: usdc(100) });
+    console.log(`\n2. KS shield ${fmt6(NEED_USDC)} USDC → burner (asset 1337, unlinked) + approve orders`);
+    const held = await USDC.balanceOf(main.address);
+    if (held < NEED_USDC) throw new Error(
+      `main holds ${fmt6(held)} USDC, needs ${fmt6(NEED_USDC)} — there is no mint. ` +
+      `Buy some: WANT_USDC=${Math.ceil(Number(NEED_USDC) / 1e6) + 5} node scripts/swap-local-dex.mjs`);
+    const ku = await ksShieldedFund({
+      pool: KS_POOL, provider: prov, funder: main, submitter: V, recipient: burner.address,
+      amount: NEED_USDC, assetId: 1337, poseidon2, snarkjs, wasm: WITHDRAW_WASM, zkey: loadWithdrawZkey(),
+    });
+    await rec(prov, { step: "C.usdcDeposit", party: "customer-main", action: "KS.depositAsset(USDC)", hash: ku.depositHash, tokenValue: NEED_USDC });
+    await rec(prov, { step: "C.usdcWithdraw", party: "venue(gas payer)", action: "KS.proxy_withdraw→burner(USDC)", hash: ku.withdrawHash, tokenValue: NEED_USDC });
   // NOT MaxUint256: the real USDC precompile narrows the amount to pallet-assets'
   // u128, so an unlimited approval reverts with "Balance conversion failed".
   // Approve what this run actually needs, with headroom.
-    const APPROVE = ORDER_VALUE + TIP + FARE + usdc(5);
-    const ap = await USDC.connect(burner).approve(b.orders, APPROVE, { gasLimit: await leanGas(USDC.connect(burner).approve, [b.orders, APPROVE]) });
+    const ap = await USDC.connect(burner).approve(b.orders, NEED_USDC, { gasLimit: await leanGas(USDC.connect(burner).approve, [b.orders, NEED_USDC]) });
     await rec(prov, { step: "C.approve", party: "customer-burner", action: "USDC.approve(orders)", hash: ap.hash });
     st.minted = true; saveC(st);
   }

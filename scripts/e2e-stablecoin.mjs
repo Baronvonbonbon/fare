@@ -1,7 +1,8 @@
 // Live stablecoin (C3) e2e on Paseo — the full delivery lifecycle escrowed and
 // settled ENTIRELY in REAL Asset Hub USDC (asset 1337, via its ERC-20
 // precompile), the ERC-20 path:
-//   swap-sourced USDC + approve → createOrderERC20 → commitBid → acceptSealedBidERC20 → confirmPickup
+//   KS-shielded gas + KS-shielded USDC → approve → createOrderERC20 → commitBid →
+//   acceptSealedBidERC20 → confirmPickup
 //   → confirmDropoffZK → withdrawToken payouts.
 // Reuses the registered venue (id 3) + driver from the native e2e; a fresh
 // customer holds USDC (escrow) + PAS (gas). Settlement is submitted by the
@@ -9,10 +10,12 @@
 import { ethers } from "ethers";
 import { poseidon2, poseidon3 } from "poseidon-lite";
 import * as snarkjs from "snarkjs";
+import { WITHDRAW_WASM, loadWithdrawZkey } from "./shield/zkey.mjs";
 import fs from "fs";
 import path from "path";
 import {
   ROOT, provider, book, env, loadState, waitTx, leanGas, GAS_PRICE_WEI, fmt, eth, runScript,
+  KS_POOL, ksShieldedFund,
 } from "./shield/e2e-lib.mjs";
 
 // Sealed bids are the only bid path. A fixed salt is fine for a scripted run:
@@ -83,14 +86,19 @@ async function main() {
   ], prov);
   const vault = new ethers.Contract(b.vault, ["function tokenBalanceOf(address,address) view returns(uint256)", "function withdrawToken(address)"], prov);
 
-  // ── 1. Fund customer: PAS (gas) + REAL USDC, sourced by SWAP ───────────────
-  // This used to `mint` MockUSDC — an ERC-20 with an open mint, i.e. printing
-  // yourself the money the demo then escrows. Real USDC has no mint and no
-  // faucet: the deployer buys it on Asset Hub's own asset-conversion DEX
-  // (scripts/swap-local-dex.mjs) and transfers a working balance here.
+  // ── 1. Fund the customer burner THROUGH KUSAMA SHIELD ─────────────────────
+  // This used to be two direct transfers from the deployer — 30 PAS and the
+  // USDC — which handed every observer the one edge the per-order burner exists
+  // to destroy. A funded-by-transfer burner is not a burner; it is the funder
+  // wearing a different address.
+  //
+  // Both legs now go through the shielded pool. KS is multi-asset, so the USDC
+  // escrow shields exactly like the gas does: deposit names the funder and a
+  // commitment, withdrawal names the burner and a nullifier, and nothing ties
+  // them together. The relay submits the withdrawals, so the burner needs no
+  // prior balance to receive its first one.
   const NEED = ORDER_VALUE + TIP + FARE + usdc(5); // + headroom for the service fee
   if (!st.funded) {
-    console.log(`\n1. Fund customer — PAS gas + transfer ${fmt6(NEED)} real USDC + approve orders`);
     const held = await USDC.balanceOf(deployer.address);
     if (held < NEED) {
       throw new Error(
@@ -98,16 +106,29 @@ async function main() {
         `buy some first:  WANT_USDC=${Math.ceil(Number(NEED) / 1e6) + 5} node scripts/swap-local-dex.mjs`
       );
     }
-    let nonce = await prov.getTransactionCount(deployer.address);
-    const t1 = await deployer.sendTransaction({ to: C.address, value: eth("30"), gasLimit: 200_000n, nonce: nonce++ });
-    await rec(prov, { step: "S.fund", party: "infra", action: "fund-customer-gas", hash: t1.hash });
-    const t2 = await USDC.transfer(C.address, NEED, { gasLimit: 5_000_000n, nonce: nonce++ });
-    await rec(prov, { step: "S.fundUSDC", party: "infra", action: "transfer-real-USDC→customer", hash: t2.hash, tokenValue: NEED });
-  // NOT MaxUint256: the real USDC precompile narrows the amount to pallet-assets'
-  // u128, so an unlimited approval reverts with "Balance conversion failed".
-  // Approve what this run actually needs, with headroom.
-    const APPROVE = NEED;
-    const ua = await USDC.connect(C).approve(b.orders, APPROVE, { gasLimit: await leanGas(USDC.connect(C).approve, [b.orders, APPROVE]) });
+    // The submitter is the VENUE wallet, deliberately NOT the relay's key: the
+    // relay service is running with that key and caches its own nonce, so a
+    // script signing with it in parallel desynchronises the service and every
+    // later /submit fails with "could not coalesce error". Who submits a
+    // proxy_withdraw is public but creates NO link — the recipient is bound
+    // inside the proof — so the only thing that matters is that it is not the
+    // funder, and that it is an account that already exists and is funded.
+    const ks = { pool: KS_POOL, provider: prov, funder: deployer, submitter: V, recipient: C.address,
+                 poseidon2, snarkjs, wasm: WITHDRAW_WASM, zkey: loadWithdrawZkey() };
+
+    console.log(`\n1a. KS shield GAS → burner (${fmt(eth("30"))} PAS, unlinked)`);
+    const kg = await ksShieldedFund({ ...ks, amount: eth("30"), assetId: 0 });
+    await rec(prov, { step: "S.ksGasDeposit", party: "customer-main", action: "KS.depositNative", hash: kg.depositHash });
+    await rec(prov, { step: "S.ksGasWithdraw", party: "ks-submitter", action: "KS.proxy_withdraw→burner(PAS)", hash: kg.withdrawHash });
+
+    console.log(`\n1b. KS shield USDC ESCROW → burner (${fmt6(NEED)} USDC, asset 1337, unlinked)`);
+    const ku = await ksShieldedFund({ ...ks, amount: NEED, assetId: 1337 });
+    await rec(prov, { step: "S.ksUsdcDeposit", party: "customer-main", action: "KS.depositAsset(USDC)", hash: ku.depositHash, tokenValue: NEED });
+    await rec(prov, { step: "S.ksUsdcWithdraw", party: "ks-submitter", action: "KS.proxy_withdraw→burner(USDC)", hash: ku.withdrawHash, tokenValue: NEED });
+
+    // NOT MaxUint256: the asset precompile narrows to u128 and reverts
+    // "Balance conversion failed" on an unlimited approval.
+    const ua = await USDC.connect(C).approve(b.orders, NEED, { gasLimit: await leanGas(USDC.connect(C).approve, [b.orders, NEED]) });
     await rec(prov, { step: "S.approve", party: "customer", action: "USDC.approve(orders)", hash: ua.hash });
     st.funded = true; saveSt(st);
   }
