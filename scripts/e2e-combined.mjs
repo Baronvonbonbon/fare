@@ -1,9 +1,9 @@
 // Combined privacy + stablecoin e2e on Paseo:
 //   1. KS shields the burner's GAS  — main deposits PAS → relay proxy_withdraws
 //      to a fresh burner (unlinked to main).
-//   2. USDC to the burner           — open MockUSDC mint (the testnet "shared
-//      faucet" analog for the escrow value; mainnet would need a USDC-shielding
-//      path — the honest gap).
+//   2. USDC to the burner           — ALSO shielded through KS (asset 1337).
+//      This was "the honest gap" while the pool was believed PAS-only; it is
+//      multi-asset, so the escrow value hides exactly like the gas does.
 //   3. Burner runs a USDC-escrowed order (createOrderERC20 → acceptSealedBidERC20),
 //      relay settles gaslessly (dual-sig pickup + ZK dropoff — no coords on-chain),
 //      payouts in USDC, then the burner shielded-returns its leftover PAS gas.
@@ -15,7 +15,7 @@ import * as snarkjs from "snarkjs";
 import fs from "fs";
 import path from "path";
 import { WITHDRAW_WASM, loadWithdrawZkey } from "./shield/zkey.mjs";
-import { ROOT, provider, book, env, loadState, waitTx, leanGas, GAS_PRICE_WEI, KS_POOL, fmt, eth, runScript } from "./shield/e2e-lib.mjs";
+import { ROOT, provider, book, env, loadState, waitTx, leanGas, GAS_PRICE_WEI, KS_POOL, fmt, eth, runScript, ksShieldedFund } from "./shield/e2e-lib.mjs";
 
 // Sealed bids are the only bid path. A fixed salt is fine for a scripted run:
 // in production the driver picks it and it travels to the customer off-chain.
@@ -113,16 +113,30 @@ async function main() {
     st.ksWithdraw = tx.hash; saveC(st);
   }
 
-  // ── 2. USDC to the burner (open mint — testnet faucet analog for escrow value)
+  // ── 2. USDC to the burner — SHIELDED, like the gas ─────────────────────────
+  // This used to mint MockUSDC to the burner, and the header called the missing
+  // alternative "the honest gap": a PAS-only pool could not shield the escrow
+  // value, so the USDC traced straight back to main and the order was only
+  // half-private. Kusama Shield turns out to be MULTI-ASSET, so the gap was
+  // never real — the escrow shields exactly as the gas does, with the note
+  // committing to the asset's precompile ADDRESS (see ksPrecompileFor).
+  const NEED_USDC = ORDER_VALUE + TIP + FARE + usdc(5);
   if (!st.minted) {
-    console.log(`\n2. mint 100 USDC → burner (testnet faucet analog) + approve orders`);
-    const mt = await USDC.mint(burner.address, usdc(100), { gasLimit: 5_000_000n, nonce: await prov.getTransactionCount(main.address) });
-    await rec(prov, { step: "C.mint", party: "faucet(mint)", action: "mint-USDC→burner", hash: mt.hash, tokenValue: usdc(100) });
+    console.log(`\n2. KS shield ${fmt6(NEED_USDC)} USDC → burner (asset 1337, unlinked) + approve orders`);
+    const held = await USDC.balanceOf(main.address);
+    if (held < NEED_USDC) throw new Error(
+      `main holds ${fmt6(held)} USDC, needs ${fmt6(NEED_USDC)} — there is no mint. ` +
+      `Buy some: WANT_USDC=${Math.ceil(Number(NEED_USDC) / 1e6) + 5} node scripts/swap-local-dex.mjs`);
+    const ku = await ksShieldedFund({
+      pool: KS_POOL, provider: prov, funder: main, submitter: R, recipient: burner.address,
+      amount: NEED_USDC, assetId: 1337, poseidon2, snarkjs, wasm: WITHDRAW_WASM, zkey: loadWithdrawZkey(),
+    });
+    await rec(prov, { step: "C.usdcDeposit", party: "customer-main", action: "KS.depositAsset(USDC)", hash: ku.depositHash, tokenValue: NEED_USDC });
+    await rec(prov, { step: "C.usdcWithdraw", party: "relay(venue-node)", action: "KS.proxy_withdraw→burner(USDC)", hash: ku.withdrawHash, tokenValue: NEED_USDC });
   // NOT MaxUint256: the real USDC precompile narrows the amount to pallet-assets'
   // u128, so an unlimited approval reverts with "Balance conversion failed".
   // Approve what this run actually needs, with headroom.
-    const APPROVE = ORDER_VALUE + TIP + FARE + usdc(5);
-    const ap = await USDC.connect(burner).approve(b.orders, APPROVE, { gasLimit: await leanGas(USDC.connect(burner).approve, [b.orders, APPROVE]) });
+    const ap = await USDC.connect(burner).approve(b.orders, NEED_USDC, { gasLimit: await leanGas(USDC.connect(burner).approve, [b.orders, NEED_USDC]) });
     await rec(prov, { step: "C.approve", party: "customer-burner", action: "USDC.approve(orders)", hash: ap.hash });
     st.minted = true; saveC(st);
   }
