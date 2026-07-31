@@ -287,10 +287,30 @@ All three serve from the same Bulletin CID under the same `.dot` name. Note the 
 out naturally: the driver and customer are mobile, the venue counter and the ops consoles are
 desk-bound, and they were already separate views in `App.tsx`.
 
-**Still open, but much narrower:** which device APIs reach a Product inside the mobile runtime.
-FARE needs the Geolocation API (`web/src/geo.ts`, every attestation) and camera capture
-(`web/src/photoflow.ts` `compressImage`). Confirming the *runtime* is not the same as confirming
-those two APIs — verify before Phase 1 exits.
+**Device APIs — measured on a Pixel 10 Pro XL, Android 16, 2026-07-31.**
+
+The Product runs in an **Android WebView** (`…Build/CP1A.260505.005; wv…`), which decides how the
+rest of this reads.
+
+| API | Result |
+|---|---|
+| **Camera** (`getUserMedia`, `facingMode: environment`) | ✅ **Works.** Captured 12.3 KiB, `compressImage` → 3.2 KiB in 952 ms, EXIF stripped by the canvas re-encode |
+| **Web Crypto** (`sealPhoto`, AES-256-GCM) | ✅ 3.2 KiB sealed in 1 ms |
+| **secp256k1 EIP-712** (sign + `verifyTypedData` recover) | ✅ 2 ms, recovery exact — **§4.1 confirmed in the real runtime** |
+| **Geolocation** | ❌ `User denied Geolocation` — cause not yet established |
+
+Camera working is the one that mattered most: it was the "driver flow is dead without it" risk,
+and it is now closed.
+
+**Geolocation is the open item, and the WebView detail is why it is not a simple retry.** An
+Android WebView only receives location if the *host app* holds the OS permission **and** answers
+`onGeolocationPermissionsShowPrompt`. A denial therefore has two very different causes — the user
+refused a dialog, or no dialog was ever shown because the host never wired the callback. The first
+is a settings fix; the second is a **platform gap that blocks every location-dependent Product**,
+FARE included. The probe now reports `navigator.permissions.query()` state alongside the failure to
+separate them: `state: "prompt"` together with a denial means the host never asked.
+
+Until that resolves, treat the driver surface as **unproven**, not broken.
 
 **This does not change §4.1.** The Polkadot App still signs sr25519, so attestation signing still
 stays on app-local secp256k1 keys. What it *does* change is the reasoning: the argument is now
@@ -451,8 +471,10 @@ content-addressed bundle, and an identity layer it did not have.
      measure before relying on it: the actual quota (`checkAuthorization` →
      `remainingTransactions` / `remainingBytes` / `expiration`) and whether one authorized
      submitter can carry venue and driver writes on users' behalf (§4.6).
-   - **S2** ✅ **Resolved — Products run inside the mobile Polkadot App** (§4.7). Narrower
-     follow-up: confirm the Geolocation API and camera capture reach a Product in that runtime.
+   - **S2** ✅ **Resolved — Products run inside the mobile Polkadot App**, in an Android WebView
+     (§4.7). Camera, Web Crypto, and secp256k1 EIP-712 signing all confirmed working on-device.
+     **Geolocation returned `User denied` and is the one unresolved dependency** — see §4.7 for
+     why that may be a host gap rather than a user refusal.
    - **S3** Per-order `derivationIndex` statement-store allowance (gates §4.3)
    - **S4** CASH/pUSD custody by a `pallet-revive` contract (gates §4.5)
    - **S5** Host signer + `pallet_revive::map_account` → can the host account submit a FARE tx at
