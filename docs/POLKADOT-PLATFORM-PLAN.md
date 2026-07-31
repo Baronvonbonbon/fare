@@ -237,7 +237,7 @@ keep personhood off the customer path, and it might let customers publish to the
 without the re-linkage that blocks §4.3.
 
 Unknown, and the difference matters entirely: a *stable* alias changes nothing, a *fresh-per-proof*
-alias changes both sections. `tools/device-probe` reports whatever the runtime returns — treat that
+alias changes both sections. `tools/kite` reports whatever the runtime returns — treat that
 output as the input to this decision, not as a settled answer.
 
 ### 4.5 CASH transfer restrictions vs. contract escrow — unresolved
@@ -441,7 +441,7 @@ content-addressed bundle, and an identity layer it did not have.
 ### Phase 0 — Land the plan and clear the blockers
 1. ✅ This document, cross-linked from `README.md` §Docs, `docs/PHOTOS.md` §5 (the Bulletin row),
    `docs/MESSAGING.md` §2 (P3), and `docs/ROADMAP.md`.
-2. **Spikes, in this order — each gates real work.** `tools/device-probe` is built and answers
+2. **Spikes, in this order — each gates real work.** `tools/kite` is built and answers
    S1, S3, and the §4.7 device-API follow-up; run it on the phone and paste the report here.
 
    - **S1** ✅ **Resolved — we are authorized.** `ascendyendor00.dot`, product account

@@ -1,4 +1,6 @@
-# FARE device probe
+# kite
+
+Flown to see which way the wind blows.
 
 Answers the questions blocking [`docs/POLKADOT-PLATFORM-PLAN.md`](../../docs/POLKADOT-PLATFORM-PLAN.md)
 Phase 1 and Phase 2 — with evidence from the actual device, not from docs.
@@ -7,8 +9,8 @@ Two halves:
 
 | | Runs on | Answers |
 |---|---|---|
-| **Browser probe** (`src/`) | The phone, inside the Polkadot App | §4.7 device APIs, §4.1 signing split, Phase 2 Bulletin round-trip |
-| **Allowance probe** (`allowance-probe.mjs`) | A workstation, QR-paired to the phone | **S1** Bulletin allowance, **S3** Statement Store allowance, per-order account derivation |
+| **Browser half** (`src/`) | The phone, inside the Polkadot App | §4.7 device APIs, §4.1 signing split, Phase 2 Bulletin round-trip |
+| **Allowance half** (`allowance-probe.mjs`) | A workstation, QR-paired to the phone | **S1** Bulletin allowance, **S3** Statement Store allowance, per-order account derivation |
 
 It is a **rehearsal, not a mock**: the browser probe imports `web/src/geo.ts`,
 `web/src/photoflow.ts`, and `web/src/photo.ts` directly, so a pass means FARE's real
@@ -49,18 +51,24 @@ runtimes) it renders the report inline instead.
 
 ```bash
 npm run build
-pad ./dist <name>.dot --env devnet --mnemonic "$MNEMONIC"
+pad ./dist kite.dot --env devnet --mnemonic "$MNEMONIC"
 ```
 
-Use a **throwaway name**. `pad` overwrites the target's DotNS `contenthash`, so publishing to a
-name you use for anything else takes it over until you republish.
+`kite.dot` is deliberately uninformative — the address is public, and a name like `fareprobe.dot`
+announces what is being tested and for whom before anything has been decided. It matches the
+`createApp({ name: "kite" })` product id and the `--product` default, so product accounts, local
+storage namespace, and the published name all agree.
+
+Keep it a throwaway: `pad` overwrites the target's DotNS `contenthash`, so publishing to a name
+used for anything else takes it over until you republish. Do **not** point this at
+`ascendyendor00.dot`.
 
 ---
 
 ## Allowance probe
 
 ```bash
-node allowance-probe.mjs [--product fare-device-probe] [--index 1]
+node allowance-probe.mjs [--product kite] [--index 1]
 ```
 
 Prints a pairing QR, waits for the Polkadot App to scan it, then reads:

@@ -61,7 +61,7 @@ const runtime: Check = {
   why: "Confirms Products really do run inside the mobile Polkadot App, and that the Host API is reachable from here (plan §4.7).",
   async run(ctx) {
     const inContainer = isInsideContainerSync();
-    const app = await createApp({ name: "fare-device-probe" });
+    const app = await createApp({ name: "kite" });
     ctx.app = app;
 
     let accounts = "none (wallet.connect failed)";
@@ -203,7 +203,7 @@ const seal: Check = {
   title: "Seal under a crypto-shred key",
   why: "web/src/photo.ts. The fresh random AES-256-GCM key is what makes expiry guaranteed rather than best-effort — storage never sees plaintext.",
   async run(ctx) {
-    const bytes = ctx.jpeg ?? enc.encode(`fare-device-probe placeholder ${Date.now()}`);
+    const bytes = ctx.jpeg ?? enc.encode(`kite placeholder ${Date.now()}`);
     const usingPlaceholder = !ctx.jpeg;
     try {
       const key = newPhotoKey();

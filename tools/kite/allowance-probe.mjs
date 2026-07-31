@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Allowance + QR-pairing probe — the Node half of the device probe.
+// Allowance + QR-pairing — the Node half of kite.
 //
 // @parity/product-sdk-terminal is explicitly the "CLI/terminal apps" surface:
 // it pairs to the mobile Polkadot App over a QR code and gives you a signer
@@ -12,7 +12,7 @@
 //   2. It is the replacement for DEPLOYER_PRIVATE_KEY in scripts/deploy.ts and
 //      the upgrade-*.ts scripts, which currently read a raw key from .env.
 //
-// Usage:  node allowance-probe.mjs [--product fare-device-probe] [--index 1]
+// Usage:  node allowance-probe.mjs [--product kite] [--index 1]
 //
 // Scan the printed QR with the Polkadot App. Nothing is written on-chain — this
 // only reads allowance state and derives public keys.
@@ -33,7 +33,7 @@ const arg = (flag, fallback) => {
   return i !== -1 && process.argv[i + 1] ? process.argv[i + 1] : fallback;
 };
 
-const PRODUCT_ID = arg("--product", "fare-device-probe");
+const PRODUCT_ID = arg("--product", "kite");
 const ALT_INDEX = Number(arg("--index", "1"));
 const PAIR_TIMEOUT_MS = 180_000;
 

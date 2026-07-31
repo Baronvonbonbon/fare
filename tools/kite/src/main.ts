@@ -23,7 +23,7 @@ function renderSummary() {
   const skip = done.filter((r) => r.status === "skip").length;
   summary.innerHTML =
     done.length === 0
-      ? `<b>FARE device probe</b><span class="muted">${CHECKS.length} checks — tap Run all, or run them one at a time.</span>`
+      ? `<b>kite</b><span class="muted">${CHECKS.length} checks — tap Run all, or run them one at a time.</span>`
       : `<b>${pass}/${CHECKS.length} passed</b><span class="muted">${fail} failed · ${skip} skipped</span>`;
 }
 
@@ -100,7 +100,7 @@ copy.className = "copy";
 copy.textContent = "Copy report";
 copy.addEventListener("click", async () => {
   const lines = [
-    `FARE device probe — ${new Date().toISOString()}`,
+    `kite — ${new Date().toISOString()}`,
     navigator.userAgent,
     "",
     ...CHECKS.map((c) => {

@@ -1,9 +1,9 @@
 {
-  "name": "fare-device-probe",
+  "name": "kite",
   "private": true,
   "version": "0.1.0",
   "type": "module",
-  "description": "Device-capability + Bulletin round-trip probe for FARE as a Polkadot Product",
+  "description": "kite — flown to see which way the wind blows",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
