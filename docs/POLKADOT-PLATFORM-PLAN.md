@@ -297,20 +297,41 @@ rest of this reads.
 | **Camera** (`getUserMedia`, `facingMode: environment`) | ✅ **Works.** Captured 12.3 KiB, `compressImage` → 3.2 KiB in 952 ms, EXIF stripped by the canvas re-encode |
 | **Web Crypto** (`sealPhoto`, AES-256-GCM) | ✅ 3.2 KiB sealed in 1 ms |
 | **secp256k1 EIP-712** (sign + `verifyTypedData` recover) | ✅ 2 ms, recovery exact — **§4.1 confirmed in the real runtime** |
-| **Geolocation** | ❌ `User denied Geolocation` — cause not yet established |
+| **Host container + `createApp`** | ✅ `isInsideContainerSync: true`, account returned, cloud storage available |
+| **Geolocation** | ❌ **Blocked by the host — see below** |
+| Ring VRF anonymous alias | ⚠️ `getAnonymousAlias()` returns **`null`** in this build |
 
 Camera working is the one that mattered most: it was the "driver flow is dead without it" risk,
-and it is now closed.
+and it is closed.
 
-**Geolocation is the open item, and the WebView detail is why it is not a simple retry.** An
-Android WebView only receives location if the *host app* holds the OS permission **and** answers
-`onGeolocationPermissionsShowPrompt`. A denial therefore has two very different causes — the user
-refused a dialog, or no dialog was ever shown because the host never wired the callback. The first
-is a settings fix; the second is a **platform gap that blocks every location-dependent Product**,
-FARE included. The probe now reports `navigator.permissions.query()` state alongside the failure to
-separate them: `state: "prompt"` together with a denial means the host never asked.
+#### Geolocation is a platform gap, not a user refusal — **the one blocker left**
 
-Until that resolves, treat the driver surface as **unproven**, not broken.
+An Android WebView only receives location if the *host app* holds the OS permission **and** answers
+`onGeolocationPermissionsShowPrompt`. The probe reports the Permissions API state next to the
+failure to tell those apart, and the answer is unambiguous:
+
+```
+Geolocation failed: User denied Geolocation
+permission state : prompt
+```
+
+**`prompt` means the permission was never decided** — no dialog was shown, nothing was stored. Yet
+the request came back denied. That is the signature of a host that does not answer the WebView
+permission callback: the WebView asks, nobody responds, the request fails closed. A user refusal
+would have left the state `denied`.
+
+This blocks **every location-dependent Product**, not just FARE — and for FARE it blocks the entire
+settlement path, since both `confirmPickup` and `confirmDropoffZK` are built on a device GPS fix.
+Nothing in the plan routes around it: the ZK proximity circuit needs real coordinates as a private
+witness, so there is no degraded mode that still proves delivery.
+
+**Raise this with Parity as a platform bug** (Part 8). Until it is fixed the driver surface is
+**blocked**, and Phase 1 cannot exit. Everything else on the device works.
+
+#### The Ring VRF alias is not available yet
+
+`getAnonymousAlias()` returns `null` in this build, so §4.4b stays hypothetical — plan §4.3 and
+§4.4 as written, and do not bank on an unlinkable alias arriving.
 
 **This does not change §4.1.** The Polkadot App still signs sr25519, so attestation signing still
 stays on app-local secp256k1 keys. What it *does* change is the reasoning: the argument is now
@@ -473,8 +494,8 @@ content-addressed bundle, and an identity layer it did not have.
      submitter can carry venue and driver writes on users' behalf (§4.6).
    - **S2** ✅ **Resolved — Products run inside the mobile Polkadot App**, in an Android WebView
      (§4.7). Camera, Web Crypto, and secp256k1 EIP-712 signing all confirmed working on-device.
-     **Geolocation returned `User denied` and is the one unresolved dependency** — see §4.7 for
-     why that may be a host gap rather than a user refusal.
+     **Geolocation is blocked by the host** (`permission state: prompt` alongside a denial = the
+     callback is never answered) — a platform bug, and the one thing stopping Phase 1. See §4.7.
    - **S3** Per-order `derivationIndex` statement-store allowance (gates §4.3)
    - **S4** CASH/pUSD custody by a `pallet-revive` contract (gates §4.5)
    - **S5** Host signer + `pallet_revive::map_account` → can the host account submit a FARE tx at
@@ -579,6 +600,14 @@ content-addressed bundle, and an identity layer it did not have.
    blobs? *(gates Phase 3 — see §4.8)*
 8. What privacy primitives are landing with the Products Devnet, and will any of them be a
    developer-facing API? *(see Part 9)*
+9. **Geolocation is unreachable from a Product on Android.** `navigator.geolocation` requests fail
+   with `User denied` while `navigator.permissions.query({name:"geolocation"})` still reports
+   `prompt` — no dialog is shown, so the WebView's `onGeolocationPermissionsShowPrompt` callback
+   appears to go unanswered. Reproduced on a Pixel 10 Pro XL, Android 16, Polkadot App WebView.
+   Camera via `getUserMedia` works in the same runtime, so this is specific to location. **This
+   blocks every location-dependent Product.** *(the one blocker on Phase 1 — see §4.7)*
+10. `getAnonymousAlias()` returns `null` — is the Ring VRF alias unimplemented in this build, or
+    gated on something? And is it stable per user, or fresh per call? *(decides §4.4b)*
 
 ---
 
