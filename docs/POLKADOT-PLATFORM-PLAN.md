@@ -255,6 +255,98 @@ All three are served from the same Bulletin CID under the same `.dot` name. The 
 what makes the driver surface viable regardless of how the mobile runtime question resolves — and
 it is worth confirming with Parity early rather than designing around a guess.
 
+### 4.8 Execution target: EVM compatibility mode vs. native PolkaVM — **spiked, it works**
+
+`hardhat.config.ts` compiles with stock `solc` 0.8.24 to **EVM bytecode** and relies on
+pallet-revive's *compatibility mode* (the EVM interpreter). Native PolkaVM means compiling with
+**`resolc`** (solc frontend → Yul → LLVM → RISC-V), which is a build-target change, not a rewrite.
+
+**Spike result — all twelve contracts compile under `resolc` v1.4.0 and every blob fits.**
+pallet-revive's limits are **256 KB per code blob** and 1 MB memory per contract; `resolc` defaults
+to `-Oz`:
+
+| Contract | EVM bytes | PVM `-Oz` | ratio | % of 256 KB |
+|---|---|---|---|---|
+| `FareOrders` | 15,735 | 128,668 | 8.2× | **49.1%** |
+| `FareVault` | 11,408 | 102,449 | 9.0× | 39.1% |
+| `FareSettlement` | 9,366 | 85,613 | 9.1× | 32.7% |
+| `FareVenues` | 7,445 | 60,822 | 8.2× | 23.2% |
+| `FareDrivers` | 7,661 | 57,677 | 7.5× | 22.0% |
+| `FareForwarder` | 3,730 | 44,397 | 11.9× | 16.9% |
+| `FareDisputes` | 5,171 | 44,080 | 8.5× | 16.8% |
+| `FareLocationVerifier` | 3,937 | 39,440 | 10.0× | 15.0% |
+| `FareShieldVerifier` | 3,777 | 38,080 | 10.1× | 14.5% |
+| `FareRatings` | 3,465 | 26,626 | 7.7× | 10.2% |
+| `FareGovernanceRouter` | 2,184 | 19,623 | 9.0× | 7.5% |
+| `FarePauseRegistry` | 1,481 | 12,310 | 8.3× | 4.7% |
+
+Reproduce (resolc from `paritytech/revive` releases, solc from the hardhat cache):
+
+```bash
+resolc --bin -O z --evm-version cancun --base-path . \
+       --include-path node_modules contracts/FareOrders.sol
+```
+
+**Findings:**
+
+1. **`--evm-version cancun` is mandatory.** Without it, `FareVault`, `FareSettlement`, and
+   `FareForwarder` fail with `DeclarationError: Function "mcopy" not found` — OpenZeppelin 5.0.2's
+   `utils/Bytes.sol` uses the cancun `mcopy` opcode. The repo already sets `evmVersion: "cancun"`
+   for solc; the resolc target must carry it too, and it is not the default.
+2. **`FareOrders` at 49% of the blob limit is the number to watch.** `-O3` pushes it to 194,153
+   bytes (74%). Adding the personhood gate and CASH support to `FareOrders` eats into that. Treat
+   blob size as a CI gate the same way `gas-snapshot.json` gates gas.
+3. **`ecrecover` survives the frontend.** `FareSettlement` and `FareForwarder` — both of which
+   recover EIP-712 signatures through OpenZeppelin's `ECDSA` — compile clean. Runtime behaviour
+   still needs confirming on a revive dev node, but the §4.1 design is not blocked at compile time.
+4. **Size relief is not the argument.** `FareOrders` is 15,735 bytes of EVM bytecode — 64% of
+   EIP-170. Nothing is currently squeezed.
+
+**The real driver is CDM.** The platform docs describe the contract workflow as "build a contract
+into PolkaVM bytecode → deploy it to Asset Hub → register it under `@org/name`." If CDM will not
+register EVM-bytecode contracts, then Phase 3 — which retires the hand-maintained `web/src/abi.ts`
+— *requires* resolc. That is a question for Parity (§8), not an assumption.
+
+**The cost to name:** the 279-contract test suite runs on hardhat's EVM, so the artifact FARE
+tests already differs from the one Paseo interprets. A resolc deploy target widens that gap unless
+the test target also moves to a revive dev node. Also unvalidated under resolc: `viaIR`, the
+`0x06/0x07/0x08` BN254 precompile addresses, the Poseidon precompile, `PaseoSafeSender`'s
+denomination workaround, and the nonce-polling deploy path in `scripts/deploy.ts`.
+
+**Recommendation:** carry resolc as a **second build target** behind a flag, gated on the CDM
+answer. Add a blob-size CI check alongside `gas-snapshot.json`. Do not switch the test target until
+there is a reason beyond tidiness.
+
+### 4.9 The best Statement Store use is the order board and the auction, not chat
+
+Chat is the obvious mapping (§4.2) but the smallest win. Two better ones follow from an asymmetry
+worth stating plainly: **drivers are publicly identified on-chain by design** — `FareDrivers`
+holds their registration, stake, delivered/failed counts, and `FareRatings` their score — while
+**customers are deliberately not**. So the persistent-identity problem in §4.3 is a real regression
+on the customer side and *costless* on the driver side.
+
+- **Order-board fanout.** `docs/ROADMAP.md` R1 still lists "Event-driven refresh (currently
+  polling)" as open. A Statement Store **Channel** per geo-region cell, published by
+  `venue-node/push.mjs` — which already watches exactly these chain events — closes it. Because
+  the *node* publishes rather than the customer, there is no customer linkage at all. Payload is an
+  orderId, a region, and a few numbers: far inside the 512-byte limit, and last-write-wins is the
+  right semantics for "what's open in this cell right now."
+- **The sealed-bid auction moves off-chain.** Today `placeBid` is one transaction per driver: N
+  bids, one of which matters. Drivers publish sealed commitments to a Channel keyed
+  `bid/<driver>` under `topic2 = orderId` (LWW is exactly "my current bid"); the customer
+  subscribes, picks a winner, and only `acceptSealedBid` touches the chain. Gas per order goes
+  **O(N) → O(1)**. `docs/ROADMAP.md` R3 already wants this ("the auction can move to a p2p gossip
+  layer with only winning-bid commitment on-chain").
+
+  Two things this needs: on-chain `placeBid` stays as the fallback path, because Statement Store
+  delivery is best-effort; and the customer must verify a bid came from a *registered* driver,
+  which requires binding the driver's sr25519 People-chain account to their H160 in `FareDrivers`
+  (via `map_account`, or a signed field in `metadataURI`).
+
+**Both are gated on S3** — nothing here is built until the per-order allowance question resolves,
+because S3's answer determines whether customer-side threads can move too, and it is cheaper to
+design the transport once than twice.
+
 ---
 
 ## Part 5 — Target architecture
@@ -312,6 +404,8 @@ content-addressed bundle, and an identity layer it did not have.
    - **S4** CASH/pUSD custody by a `pallet-revive` contract (gates §4.5)
    - **S5** Host signer + `pallet_revive::map_account` → can the host account submit a FARE tx at
      all? Confirms §4.1's split.
+   - **S6** ✅ **Done — `resolc` compiles all twelve contracts and every blob fits** (§4.8). What
+     remains is the CDM question: does registration accept EVM bytecode, or is resolc mandatory?
 
 ### Phase 1 — Ship as a Product (no behaviour change)
 - Add `@parity/product-sdk` + `@polkadot-apps/host-detect`; introduce a `host` capability layer in
@@ -333,6 +427,9 @@ content-addressed bundle, and an identity layer it did not have.
   delete the part-splitting in `scripts/setup-shieldnote.mjs`.
 
 ### Phase 3 — Contracts through CDM
+- **Prerequisite:** resolve whether CDM accepts EVM bytecode (§4.8). If not, add the `resolc`
+  build target first — the spike shows it compiles clean, so this is a toolchain task, not a
+  contract rewrite. Add a 256 KB blob-size CI gate alongside `gas-snapshot.json`.
 - `cdm` build/deploy/register the ten contracts as `@fare/*`; publish ABIs to Bulletin.
 - Replace `web/src/abi.ts` with generated typed helpers; migrate call sites in `chain.ts`,
   `orderflow.ts`, `relay.ts`, `shield*.ts`, and `web/src/ops/*`.
@@ -394,3 +491,39 @@ content-addressed bundle, and an identity layer it did not have.
    sr25519-verification precompile on Asset Hub? *(would simplify §4.1 substantially)*
 6. Is Bulletin the intended long-term home for the Kusama Shield pool, and does that change the
    integration in `web/src/shieldpool.ts`?
+7. Does CDM registration accept EVM bytecode, or must contracts be `resolc`-compiled PolkaVM
+   blobs? *(gates Phase 3 — see §4.8)*
+8. What privacy primitives are landing with the Products Devnet, and will any of them be a
+   developer-facing API? *(see Part 9)*
+
+---
+
+## Part 9 — Privacy tooling in the ecosystem: what exists, and does any of it beat what FARE has?
+
+Surveyed because FARE's differentiator is privacy and it would be foolish to hand-roll something
+the platform is about to ship. **Conclusion: nothing supersedes the current design, and the
+Kusama Shield bet looks correct.**
+
+| Option | What it is | Verdict for FARE |
+|---|---|---|
+| **Kusama Shield** | Shipped v1, v2 in progress. Permissionless — no prescreening, one-block finality, an explicit alternative to the Privacy-Pools screening model. Already integrated in `web/src/shieldpool.ts` and validated end-to-end on Paseo (`docs/SHIELDED-POOL-INTEGRATION.md`). | **Keep — this is the ecosystem's privacy primitive.** FARE is an early integrator, and the findings in `docs/KUSAMA-SHIELD-FINDINGS.md` (Issues 1–4) are upstream contributions |
+| **Polkadot Products Devnet privacy features** | Launched July 2026 with the Community Foundation; Polkadot is publicly teasing "real privacy closer to you." | **Track, don't wait.** Marketing signal, no developer-facing API documented yet. Question 8 above |
+| **CASH / Coinage** | Balance-model devnet dollar on People Chain, mirrored to Asset Hub. | **Not private.** Amounts and addresses are plain. Fine as a settlement rail (§4.5), useless as a privacy layer |
+| **Statement Store** | sr25519-signed gossip. | **Anti-private for customers** (§4.3) — it introduces persistent identity where FARE deliberately has none |
+| **Personhood / People Chain** | Per-app alias, unlinkable across apps. | **Privacy-preserving across apps, linkable within FARE.** Useful as a driver/venue Sybil gate only (§4.4) |
+| **Confidential/anonymous transfer pallets** | A treasury proposal for homomorphic-encryption balances plus ZK state-transition proofs. | **Stale — the proposal is ~3 years old** with no shipped pallet. Not a plan input |
+| **Manta, Phala** | Ecosystem privacy and confidential-compute parachains. | **Wrong shape.** Separate chains; FARE settles on Asset Hub and would inherit XCM latency and a second trust domain for no gain |
+
+Two findings worth carrying forward:
+
+1. **Parity's own ZK feasibility study for a shielded pool on Kusama Asset Hub concluded the
+   anonymity set is the hard problem, not the technology.** That is verbatim the conclusion in
+   `docs/KUSAMA-SHIELD-FINDINGS.md` ("real privacy requires a large anonymity set +
+   time-decorrelation… pool cold-start, not FARE's code problem"). FARE's own analysis is
+   corroborated by the platform's — so the remaining privacy work is *adoption and timing*, not
+   cryptography. The decorrelation work already in `venue-node` (shieldkeeper + decorrelation
+   tests) is the right investment; a bigger circuit is not.
+2. **PolkaVM's Poseidon work is what makes Asset Hub competitive for ZK apps** — and FARE already
+   depends on the Poseidon precompile at `0x1d165f6f…`. This is a second, independent reason the
+   §4.8 native-PolkaVM path is worth carrying: FARE's hot paths are exactly the ones that work is
+   aimed at.
