@@ -262,8 +262,29 @@ deliberately does not renew photo CIDs past the dispute window. Less infra, same
 and the crypto-shred guarantee in `photo.ts` is unaffected.
 
 Operational dependency to flag: **Bulletin write authorization is granted, not purchased**
-(`authorize_account`, Root or People Chain via XCM). Self-serve venue onboarding needs an
-authorization grant per account or a shared submitter. Plan for the shared submitter.
+(`authorize_account`, Root or People Chain via XCM).
+
+**Correction from the device work — the shared-submitter plan may be unnecessary.** A Product does
+not receive a quota out of band; it *asks for one itself*, through the wallet:
+
+```ts
+new SignerManager({ dappName, onConnect: async (_acct, { requestResourceAllocation }) =>
+  requestResourceAllocation([{ tag: "BulletInAllowance", value: undefined }]) })
+```
+
+`AllocatableResource` covers `BulletInAllowance`, `StatementStoreAllowance`, `AutoSigning`, and
+`SmartContractAllowance`. Each grant allocates a **slot account**, and `onExisting: "Increase"`
+adds further slots. Two consequences:
+
+- Venues and drivers can hold their **own** Bulletin quota, requested at onboarding with one
+  approval tap. The venue node need not submit on their behalf, which removes the trust
+  concentration the shared-submitter design implied. Its remaining storage job is renewal.
+- **Slot accounts are the likely answer to S3.** If a per-order derivation index can hold its own
+  `StatementStoreAllowance` slot, per-order statement identities are real and §4.3's blocker on
+  moving order threads off the relay lifts.
+
+This also explains a symptom worth remembering: an upload from a Product with no allowance
+**stalls rather than erroring**, because there is no quota record to fail against.
 
 ### 4.7 Where does the driver surface run — **resolved: inside the mobile Polkadot App**
 
