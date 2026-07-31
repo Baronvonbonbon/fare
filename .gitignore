@@ -8,8 +8,6 @@ coverage.json
 deployed-addresses.localhost.json
 web/node_modules/
 web/dist/
-tools/kite/node_modules/
-tools/kite/dist/
 # Cloudflare Pages Functions local secrets — NEVER commit (drip faucet key)
 .dev.vars
 web/.dev.vars
