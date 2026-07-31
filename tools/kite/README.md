@@ -49,15 +49,25 @@ runtimes) it renders the report inline instead.
 
 ### Publishing
 
-```bash
-npm run build
-pad ./dist kite.dot --env devnet --mnemonic "$MNEMONIC"
+The published label lives in [`product.mjs`](product.mjs) and nowhere else:
+
+```
+gutrfgfyuejtoijvywrcxjqyfwixipuk.dot
 ```
 
-`kite.dot` is deliberately uninformative — the address is public, and a name like `fareprobe.dot`
-announces what is being tested and for whom before anything has been decided. It matches the
-`createApp({ name: "kite" })` product id and the `--product` default, so product accounts, local
-storage namespace, and the published name all agree.
+```bash
+npm run build
+pad ./dist "$(node -p "require('./product.mjs').DOT_NAME" 2>/dev/null || echo gutrfgfyuejtoijvywrcxjqyfwixipuk.dot)" \
+    --env devnet --mnemonic "$MNEMONIC"
+```
+
+Random on purpose. A `.dot` address is public; `fareprobe.dot` would announce what is being tested
+and for whom before a single answer is in. This announces nothing.
+
+`PRODUCT_ID` must stay equal to the label — the host derives product accounts and the
+local-storage namespace from it, and allowances are looked up per product. If the two drift, the
+allowance half checks an identity that never published anything and reports a confident "no". That
+is why both read from `product.mjs` rather than repeating the string.
 
 Keep it a throwaway: `pad` overwrites the target's DotNS `contenthash`, so publishing to a name
 used for anything else takes it over until you republish. Do **not** point this at

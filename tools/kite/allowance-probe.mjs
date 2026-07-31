@@ -12,7 +12,7 @@
 //   2. It is the replacement for DEPLOYER_PRIVATE_KEY in scripts/deploy.ts and
 //      the upgrade-*.ts scripts, which currently read a raw key from .env.
 //
-// Usage:  node allowance-probe.mjs [--product kite] [--index 1]
+// Usage:  node allowance-probe.mjs [--index 1]        (product id from product.mjs)
 //
 // Scan the printed QR with the Polkadot App. Nothing is written on-chain — this
 // only reads allowance state and derives public keys.
@@ -28,12 +28,14 @@ import {
   sessionRootPublicKey,
 } from "@parity/product-sdk-terminal";
 
+import { PRODUCT_ID as DEFAULT_PRODUCT } from "./product.mjs";
+
 const arg = (flag, fallback) => {
   const i = process.argv.indexOf(flag);
   return i !== -1 && process.argv[i + 1] ? process.argv[i + 1] : fallback;
 };
 
-const PRODUCT_ID = arg("--product", "kite");
+const PRODUCT_ID = arg("--product", DEFAULT_PRODUCT);
 const ALT_INDEX = Number(arg("--index", "1"));
 const PAIR_TIMEOUT_MS = 180_000;
 

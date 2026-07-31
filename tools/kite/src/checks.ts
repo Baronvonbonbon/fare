@@ -13,6 +13,7 @@ import { getPosition, snapToGrid, fmtCoord, toMicroDeg } from "../../../web/src/
 import { compressImage } from "../../../web/src/photoflow";
 import { newPhotoKey, sealPhoto, openPhoto } from "../../../web/src/photo";
 import deployed from "../../../web/src/deployed-addresses.json";
+import { PRODUCT_ID } from "../product.mjs";
 
 export type Status = "pass" | "fail" | "skip";
 export interface Outcome {
@@ -61,7 +62,7 @@ const runtime: Check = {
   why: "Confirms Products really do run inside the mobile Polkadot App, and that the Host API is reachable from here (plan §4.7).",
   async run(ctx) {
     const inContainer = isInsideContainerSync();
-    const app = await createApp({ name: "kite" });
+    const app = await createApp({ name: PRODUCT_ID });
     ctx.app = app;
 
     let accounts = "none (wallet.connect failed)";
