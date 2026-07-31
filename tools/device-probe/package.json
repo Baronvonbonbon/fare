@@ -1,0 +1,21 @@
+{
+  "name": "fare-device-probe",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Device-capability + Bulletin round-trip probe for FARE as a Polkadot Product",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@parity/product-sdk": "^0.20.0",
+    "@parity/product-sdk-terminal": "^0.7.0",
+    "ethers": "^6.13.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0",
+    "vite": "^5.2.0"
+  }
+}

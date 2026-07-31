@@ -89,7 +89,8 @@ AES-GCM), `channel.ts` (order-scoped transport, relay pool), `photo.ts`/`photofl
 | **CDM** | Build → deploy to Asset Hub → register `@org/name`; ABI metadata on Bulletin, `ContractRegistry` on-chain; `cdm install` emits typed TS | — |
 | **dev-dot.li gateway** | Client-side resolver; renders any published Product in a normal browser | No Host API → no host signer |
 | **Platform chat/calls** | Statement Store signalling + Bulletin for encrypted media; WebRTC with platform-issued TURN creds | Calls are **mobile-only today** |
-| **t3rminal / t3rminal-lite** | Reference Next.js app for wallet connect + tx submission — a pattern to copy, not a service to consume | — |
+| **`@parity/product-sdk-terminal`** | **QR-code login and signing for CLI/terminal apps via mobile wallet pairing.** Signing for surfaces that are *not* hosted Products | Pairing is per-session; not a Product runtime |
+| **t3rminal-lite** | Reference Next.js app for wallet connect + tx submission — a pattern to copy | — |
 
 ---
 
@@ -136,6 +137,12 @@ AES-GCM), `channel.ts` (order-scoped transport, relay pool), `photo.ts`/`photofl
 
 **ADOPT — new capability FARE doesn't have:**
 
+- **QR-paired signing for the non-Product surfaces** via `@parity/product-sdk-terminal`. Two
+  targets, both currently holding key material they should not: `scripts/deploy.ts` and the
+  `upgrade-*.ts` scripts read a raw `DEPLOYER_PRIVATE_KEY` from `.env`, and the ops consoles in
+  `web/src/ops/` (Disputes, Governance, Pause, Upgrade) need an injected wallet. Pairing them to
+  the mobile App by QR takes the deployer key off disk — a concrete rung on the decentralisation
+  ladder in `docs/ARCHITECTURE.md`, and it reuses the QR plumbing already in `web/src/qr.tsx`.
 - **Proof-of-personhood** via the Asset Hub precompile — as a Sybil gate on `FareDrivers.register`
   and `FareVenues.registerVenue`. See §4.4.
 - **CASH (pUSD)** as the demo settlement asset. `FareOrders` is already token-agnostic (the C3
@@ -164,6 +171,11 @@ Consequence to state plainly: **the Polkadot App is not the signer for the GPS c
 signing modal appears for funding, registration, and order creation — not for the doorstep handoff.
 That is the correct outcome anyway (a driver at a door cannot round-trip to a phone modal per
 attestation), but it must be a stated design decision, not an accident.
+
+**Independent corroboration.** `@parity/product-sdk-terminal`'s own type declarations state that
+**`AutoSigning` returns `NotAvailable` on both Android and iOS wallets.** So every host-routed
+signature needs a user tap regardless of the sr25519 problem. Two separate reasons now point at
+the same answer: attestations sign with app-local keys.
 
 **Refinement:** derive burners from the product-scoped account rather than raw randomness.
 `ProductAccountId = (dotNsIdentifier, derivationIndex)` is deterministic and reproducible across
@@ -211,6 +223,22 @@ FARE**. Gating order creation on it would give every order a common identifier.
 parties whose reputation, stake, and ratings are already public on-chain, and where Sybil
 resistance is worth real money (it hardens the sealed-bid auction against bid-flooding and makes
 `FareDisputes` arbitration meaningful). **Never** on the customer/order path.
+
+### 4.4b Ring VRF anonymous aliases — worth investigating before finalising §4.3/§4.4
+
+The SDK's `WalletApi` exposes two container-only methods the docs never mention:
+`getAnonymousAlias(): string | null` ("anonymous alias via Ring VRF") and
+`createProof(message): Promise<Uint8Array>`.
+
+If a Ring VRF alias can be produced *per action* rather than being a stable per-user handle, it is
+a materially better primitive than either option this plan currently weighs: it would give
+Sybil-resistant driver registration **without** the stable-within-FARE linkage that forces §4.4 to
+keep personhood off the customer path, and it might let customers publish to the Statement Store
+without the re-linkage that blocks §4.3.
+
+Unknown, and the difference matters entirely: a *stable* alias changes nothing, a *fresh-per-proof*
+alias changes both sections. `tools/device-probe` reports whatever the runtime returns — treat that
+output as the input to this decision, not as a settled answer.
 
 ### 4.5 CASH transfer restrictions vs. contract escrow — unresolved
 
@@ -413,9 +441,14 @@ content-addressed bundle, and an identity layer it did not have.
 ### Phase 0 — Land the plan and clear the blockers
 1. ✅ This document, cross-linked from `README.md` §Docs, `docs/PHOTOS.md` §5 (the Bulletin row),
    `docs/MESSAGING.md` §2 (P3), and `docs/ROADMAP.md`.
-2. **Spikes, in this order — each gates real work:**
-   - **S1** Bulletin write authorization: can we get an authorized account on Paseo, and what
-     quota? (gates everything storage)
+2. **Spikes, in this order — each gates real work.** `tools/device-probe` is built and answers
+   S1, S3, and the §4.7 device-API follow-up; run it on the phone and paste the report here.
+
+   - **S1** ✅ **Resolved — we are authorized.** `ascendyendor00.dot`, product account
+     `baronvonbonbon.01`, live on this device. Phase 2 storage work is unblocked. Still to
+     measure before relying on it: the actual quota (`checkAuthorization` →
+     `remainingTransactions` / `remainingBytes` / `expiration`) and whether one authorized
+     submitter can carry venue and driver writes on users' behalf (§4.6).
    - **S2** ✅ **Resolved — Products run inside the mobile Polkadot App** (§4.7). Narrower
      follow-up: confirm the Geolocation API and camera capture reach a Product in that runtime.
    - **S3** Per-order `derivationIndex` statement-store allowance (gates §4.3)
@@ -428,6 +461,11 @@ content-addressed bundle, and an identity layer it did not have.
 ### Phase 1 — Ship as a Product (no behaviour change)
 - Add `@parity/product-sdk` + `@polkadot-apps/host-detect`; introduce a `host` capability layer in
   `web/src/chain.ts` alongside the existing three node modes.
+- **Trim PAPI descriptors before publishing.** A trivial SDK app builds to **6.7 MB** (2.2 MB
+  gzipped, 35 files) — almost all of it chain metadata, with Kusama, Polkadot, and devnet Asset Hub
+  bundled alongside the Paseo descriptors FARE actually uses. `pad` chunks at ~2 MiB against a
+  ~8 MiB per-transaction limit and **chunked uploads are non-atomic** (a failure mid-way still
+  consumes authorization), so an untrimmed bundle is both slower and riskier to publish.
 - Register `fare.dot` (DotNS), publish with `pad ./web/dist fare.dot --env devnet --publish`.
 - Keep every existing service running. Success = the current app, unchanged, loads from Bulletin
   under `fare.dot` in the mobile Polkadot App, in Desktop, and at `fare.dev-dot.li`.
