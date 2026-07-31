@@ -66,6 +66,13 @@ split as venue-hosted RPC.
 3. **P3 — Durable / censorship-resistant.** Pin threads to IPFS (reuse the menu
    path) for durability, and/or adopt a P2P substrate (libp2p pubsub / XMTP) so
    there's no single relay to censor.
+   → **P3 is now specified against Polkadot's own primitives** in
+   [POLKADOT-PLATFORM-PLAN.md](POLKADOT-PLATFORM-PLAN.md) §4.2/§4.3: Statement Store
+   carries `hello`/`loc`/presence and CID announcements, Bulletin carries the sealed
+   `chat`/`photo` bodies, and the relay stays as offline backfill. Note the privacy
+   caveat — Statement Store submissions are signed by a *persistent* People-chain
+   account, which would re-link orders unless per-order derived accounts can hold
+   their own allowance (spike S3).
 
 ### Privacy recommendations (transport)
 - **Content is safe by construction** (E2E). The exposure is **metadata**:

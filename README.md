@@ -129,6 +129,7 @@ session-scoped to transactions submitted through Pine.
 - [docs/PRIVACY.md](docs/PRIVACY.md) — on-chain location privacy: what's exposed, the risks, mitigations, the mainnet gate
 - [docs/ROADMAP.md](docs/ROADMAP.md) — path from MVP to a formal, complete product
 - [docs/DEMO-LAUNCH.md](docs/DEMO-LAUNCH.md) — demo-launch plan: pilot next steps, mobile client path, merchant readiness, Parity/W3F infra
+- [docs/POLKADOT-PLATFORM-PLAN.md](docs/POLKADOT-PLATFORM-PLAN.md) — service map + migration plan for shipping FARE as a Polkadot Product (Bulletin, Statement Store, DotNS, CDM, personhood, CASH)
 
 ## Provenance
 
