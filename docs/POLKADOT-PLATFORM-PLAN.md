@@ -11,7 +11,7 @@ Web Push, DA scoring) and Cloudflare Functions + KV supply the rest (menu proxy,
 photo store).
 
 Every one of those off-chain services was built because Polkadot had no answer for it. That has
-changed. The Polkadot App platform (Polkadot Desktop + Polkadot App mobile signer + `product-sdk`)
+changed. The Polkadot App platform (the mobile Polkadot App, Polkadot Desktop, and `product-sdk`)
 now ships first-party equivalents for most of FARE's non-differentiating infrastructure: Bulletin
 Chain for content-addressed storage, the Statement Store for real-time signalling, DotNS for
 naming, `pad` for app delivery, CDM for contract registration, People Chain for identity and
@@ -76,8 +76,8 @@ AES-GCM), `channel.ts` (order-scoped transport, relay pool), `photo.ts`/`photofl
 
 | Primitive | What it is | Hard limits that matter to FARE |
 |---|---|---|
-| **Polkadot App** (mobile) | Key custody + signing device. Identity on People Chain. | Signs **sr25519**, not secp256k1 |
-| **Polkadot Desktop** | Host runtime where a Product executes. Never holds the key. | Products render in sandboxed iframes |
+| **Polkadot App** (mobile) | Key custody, signing, **and the Product runtime** — Products run inside it (§4.7). Identity on People Chain. | Signs **sr25519**, not secp256k1 |
+| **Polkadot Desktop** | Host runtime for desk-bound Products. Never holds the key — pairs to the App. | Products render in sandboxed iframes |
 | **`product-sdk`** | `chain-client`, `signer`, `cloud-storage`, `statement-store`, `local-storage` (+ `@polkadot-apps/*`: `contracts`, `address`, `keys`, `crypto`, `tx`, `host-detect`) | — |
 | **Bulletin Chain** (para 1010) | Content-addressed store. Blake2b-256 → CIDv1. Permissionless reads. | ~8 MiB/tx; auto-chunks >2 MiB into DAG-PB manifest; **~2-week TTL, must `renew`**; writes need an **authorization quota granted by an authorizer**, not bought; chunked uploads are **non-atomic** |
 | **Statement Store** (People Chain pallet) | sr25519-signed gossip pub/sub. Topics + `topic2`, Channels (last-write-wins). | **512-byte payload**, **~30 s default TTL**, best-effort — no retry, no ack, no ordering, no history |
@@ -131,7 +131,7 @@ AES-GCM), `channel.ts` (order-scoped transport, relay pool), `photo.ts`/`photofl
 |---|---|---|
 | `channel.ts` over `/api/msg` + venue `/msg` | Statement Store for `hello`/`loc`/presence; Bulletin for durable `chat`/`photo` bodies | 512 B + 30 s TTL + no history cannot carry store-and-forward chat alone (§4.2) |
 | `push.mjs` VAPID Web Push | Statement Store channels for foreground/live signals | Statement Store has no background wake-up. Push stays for "a bid landed while the app is closed" |
-| Hosted eth-rpc / pine / in-browser smoldot (`chain.ts`, `rpcpool.ts`) | `chain-client` (host-routed) | Host path when running in Desktop; existing node picker everywhere else |
+| Hosted eth-rpc / pine / in-browser smoldot (`chain.ts`, `rpcpool.ts`) | `chain-client` (host-routed) | Host path wherever the Host API is present (App or Desktop); existing node picker everywhere else |
 | `deployed-addresses.json` + `FareGovernanceRouter` | CDM `ContractRegistry` | Router remains the *upgrade authority*; CDM adds name→address discovery and published ABIs |
 
 **ADOPT — new capability FARE doesn't have:**
@@ -237,23 +237,40 @@ Operational dependency to flag: **Bulletin write authorization is granted, not p
 (`authorize_account`, Root or People Chain via XCM). Self-serve venue onboarding needs an
 authorization grant per account or a shared submitter. Plan for the shared submitter.
 
-### 4.7 Where does the driver surface actually run?
+### 4.7 Where does the driver surface run — **resolved: inside the mobile Polkadot App**
 
-Polkadot Desktop is the Product runtime; the docs describe calls as mobile-only and do not
-establish that Products run inside the mobile app. A delivery driver is on a phone, on the road,
-needing `getUserMedia` and the Geolocation API.
+**Products run inside the mobile Polkadot App.** `dev-dot.li` is the general web portal, not the
+mobile path. Confirmed by the project owner; this closes spike S2.
+
+This is the single best piece of news in the plan, because the driver is the hard surface — on a
+phone, on the road, needing `getUserMedia` and the Geolocation API. FARE does not need a
+gateway workaround to reach them, and on mobile the runtime and the key custody are the *same
+device*, so a signing prompt is a local modal rather than a Desktop↔phone round-trip.
 
 **Recommendation — one build, three runtimes**, gated by `@polkadot-apps/host-detect`:
 
-| Runtime | Signer | Storage / transport |
-|---|---|---|
-| Polkadot Desktop (Host API present) | `product-sdk` signer → Polkadot App | Host-routed chain-client, cloud-storage, statement-store |
-| `fare.dev-dot.li` in mobile Chrome/Safari | App-local burners + relay onboarding (today's path) | Direct Bulletin/Statement Store clients, or relay fallback |
-| Standalone PWA (unchanged) | Injected wallet or burners | Existing Cloudflare/venue-node path |
+| Runtime | Role | Signer | Storage / transport |
+|---|---|---|---|
+| **Polkadot App (mobile)** | **The driver surface, and the customer surface** | Host signer, key on-device | Host-routed chain-client, cloud-storage, statement-store |
+| Polkadot Desktop | Venue counter + the ops console (`web/src/ops/`) | Host signer → paired Polkadot App | Same host-routed services |
+| `fare.dev-dot.li` / standalone PWA | Fallback and demo | Injected wallet or burners | Existing Cloudflare/venue-node path |
 
-All three are served from the same Bulletin CID under the same `.dot` name. The gateway path is
-what makes the driver surface viable regardless of how the mobile runtime question resolves — and
-it is worth confirming with Parity early rather than designing around a guess.
+All three serve from the same Bulletin CID under the same `.dot` name. Note the role split falls
+out naturally: the driver and customer are mobile, the venue counter and the ops consoles are
+desk-bound, and they were already separate views in `App.tsx`.
+
+**Still open, but much narrower:** which device APIs reach a Product inside the mobile runtime.
+FARE needs the Geolocation API (`web/src/geo.ts`, every attestation) and camera capture
+(`web/src/photoflow.ts` `compressImage`). Confirming the *runtime* is not the same as confirming
+those two APIs — verify before Phase 1 exits.
+
+**This does not change §4.1.** The Polkadot App still signs sr25519, so attestation signing still
+stays on app-local secp256k1 keys. What it *does* change is the reasoning: the argument is now
+purely cryptographic, not ergonomic. An earlier draft of this document justified the split partly
+on "a driver at a door cannot round-trip to a phone modal per attestation" — with the Product
+running on the phone that ergonomic objection is gone, and only the `ecrecover` incompatibility
+remains. Should a sr25519-verification precompile ever land on Asset Hub (§8 q5), the host signer
+becomes a genuine option for attestations and this decision is worth revisiting.
 
 ### 4.8 Execution target: EVM compatibility mode vs. native PolkaVM — **spiked, it works**
 
@@ -355,8 +372,9 @@ design the transport once than twice.
                       fare.dot  (DotNS, contenthash → Bulletin CID)
                             │
             ┌───────────────┼───────────────────┐
-   Polkadot Desktop    fare.dev-dot.li     standalone PWA
-   (Host API)          (mobile browser)    (unchanged)
+   Polkadot App        Polkadot Desktop    dev-dot.li / PWA
+   (mobile: driver     (venue counter,     (fallback, demo)
+    + customer)         ops console)
             │               │                   │
             └──────── host-detect ──────────────┘
                             │
@@ -398,8 +416,8 @@ content-addressed bundle, and an identity layer it did not have.
 2. **Spikes, in this order — each gates real work:**
    - **S1** Bulletin write authorization: can we get an authorized account on Paseo, and what
      quota? (gates everything storage)
-   - **S2** Mobile Product runtime: do Products run in the mobile app, or is `dev-dot.li` the
-     driver path? (gates §4.7)
+   - **S2** ✅ **Resolved — Products run inside the mobile Polkadot App** (§4.7). Narrower
+     follow-up: confirm the Geolocation API and camera capture reach a Product in that runtime.
    - **S3** Per-order `derivationIndex` statement-store allowance (gates §4.3)
    - **S4** CASH/pUSD custody by a `pallet-revive` contract (gates §4.5)
    - **S5** Host signer + `pallet_revive::map_account` → can the host account submit a FARE tx at
@@ -412,7 +430,7 @@ content-addressed bundle, and an identity layer it did not have.
   `web/src/chain.ts` alongside the existing three node modes.
 - Register `fare.dot` (DotNS), publish with `pad ./web/dist fare.dot --env devnet --publish`.
 - Keep every existing service running. Success = the current app, unchanged, loads from Bulletin
-  under `fare.dot` in Desktop and at `fare.dev-dot.li`.
+  under `fare.dot` in the mobile Polkadot App, in Desktop, and at `fare.dev-dot.li`.
 
 ### Phase 2 — Storage migration (highest value, lowest risk)
 - **Photos first** — `web/src/photoflow.ts` `storeSealed` → `cloudStorage.upload`; customer read
@@ -461,8 +479,10 @@ content-addressed bundle, and an identity layer it did not have.
 - **Per phase:** the existing gates must stay green — `npx hardhat test`, `cd web && npx vitest
   run --coverage` (38% floor in `web/vite.config.ts`), `cd venue-node && node --test`, plus
   `slither.yml` and the `gas-snapshot.json` ±5% CI gate.
-- **Phase 1:** `pad` publish succeeds; app loads in Desktop and at `fare.dev-dot.li`; `host-detect`
-  correctly reports host-present vs. host-absent in both.
+- **Phase 1:** `pad` publish succeeds; app loads in the mobile Polkadot App, in Desktop, and at
+  `fare.dev-dot.li`; `host-detect` correctly reports host-present vs. host-absent in each. Confirm
+  the Geolocation API and camera capture work inside the mobile runtime — the driver flow is dead
+  without them.
 - **Phase 2:** extend `scripts/e2e-combined.mjs` to assert a photo round-trips through Bulletin —
   upload → CID → `computeCid` match → customer decrypt via `openPhoto`. Assert a menu CID resolves
   with Kubo stopped. Assert a non-renewed photo CID is unreachable after TTL (or simulate).
@@ -474,15 +494,17 @@ content-addressed bundle, and an identity layer it did not have.
 - **Phase 5:** contract tests for the personhood gate incl. the rejection path; confirm no
   personhood call exists on any customer/order code path (grep gate in CI).
 - **End-to-end demo:** a full delivery — create → sealed bid → accept → cosigned pickup → ZK
-  dropoff → photo → rate → vault withdraw — run entirely from `fare.dot` in Polkadot Desktop, with
+  dropoff → photo → rate → vault withdraw — driver and customer on `fare.dot` in the mobile
+  Polkadot App, venue on Desktop, with
   Kubo and the Cloudflare Functions stopped.
 
 ---
 
 ## Part 8 — Open questions to put to Parity
 
-1. Do Products run inside the mobile Polkadot App, or is `dev-dot.li` the only mobile path? What
-   device APIs (camera, geolocation, background) reach a Product? *(S2 — biggest product risk)*
+1. ~~Do Products run inside the mobile Polkadot App?~~ **Answered: yes** (§4.7). Remaining: do the
+   Geolocation API, camera capture, and background execution reach a Product in that runtime?
+   FARE needs the first two on every delivery.
 2. Bulletin authorization on Paseo: how is it obtained, what quota, and can a Product act as a
    shared authorized submitter for its users? *(S1)*
 3. Can a per-Product `derivationIndex` account hold its own statement-store allowance? *(S3)*
