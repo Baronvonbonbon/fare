@@ -1,4 +1,5 @@
 node_modules/
+artifacts-pvm/
 cache/
 artifacts/
 typechain-types/

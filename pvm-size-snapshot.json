@@ -1,0 +1,14 @@
+{
+  "FareOrders": 128668,
+  "FareVault": 102449,
+  "FareSettlement": 85613,
+  "FareVenues": 60822,
+  "FareDrivers": 57677,
+  "FareForwarder": 44397,
+  "FareDisputes": 44080,
+  "FareLocationVerifier": 39440,
+  "FareShieldVerifier": 38080,
+  "FareRatings": 26626,
+  "FareGovernanceRouter": 19623,
+  "FarePauseRegistry": 12310
+}

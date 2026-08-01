@@ -5,16 +5,18 @@
   "license": "GPL-3.0-or-later",
   "scripts": {
     "build": "hardhat compile",
-    "test": "hardhat test",
+    "build:pvm": "node scripts/build-pvm.mjs",
+    "ci:pvm-size": "node scripts/ci/pvm-size-gate.mjs",
     "coverage": "NODE_OPTIONS=--max-old-space-size=6144 hardhat coverage && node scripts/ci/coverage-floor.mjs coverage/coverage-summary.json coverage-floor.json",
-    "node": "hardhat node",
     "deploy:local": "hardhat run scripts/deploy.ts --network localhost",
     "deploy:paseo": "hardhat run scripts/deploy.ts --network polkadotTestnet",
+    "node": "hardhat node",
+    "probe:coverage": "node scripts/shield/coverage-swap.mjs",
     "seed:local": "hardhat run scripts/seed.ts --network localhost",
     "seed:paseo": "hardhat run scripts/seed-paseo.ts --network polkadotTestnet",
-    "zk:setup": "node scripts/setup-zk.mjs",
-    "probe:coverage": "node scripts/shield/coverage-swap.mjs",
-    "size": "hardhat size-contracts"
+    "size": "hardhat size-contracts",
+    "test": "hardhat test",
+    "zk:setup": "node scripts/setup-zk.mjs"
   },
   "devDependencies": {
     "@nomicfoundation/hardhat-toolbox": "^5.0.0",

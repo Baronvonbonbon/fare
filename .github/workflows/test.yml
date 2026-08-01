@@ -47,6 +47,50 @@ jobs:
       - name: Test
         run: npx hardhat test
 
+  # The contracts ship as EVM bytecode and Paseo runs them under pallet-revive's
+  # compatibility mode. This job builds the SECOND target — native PolkaVM via
+  # resolc — and gates the blob sizes. It exists to keep the native path
+  # honest: it is a prerequisite for CDM registration, and compatibility mode is
+  # a migration ramp rather than somewhere to live indefinitely.
+  #
+  # PVM blobs run ~8-10x the EVM bytecode, so headroom against pallet-revive's
+  # 256 KiB limit disappears faster than it does under EIP-170. FareOrders is
+  # already at ~49%. See docs/POLKADOT-PLATFORM-PLAN.md §4.8.
+  pvm:
+    name: contracts (resolc / PolkaVM size gate)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install deps
+        run: npm ci
+
+      # build-pvm.mjs reuses hardhat's cached solc so both targets share one
+      # frontend version; compiling once populates that cache.
+      - name: Populate the solc cache
+        run: npx hardhat compile
+
+      - name: Install resolc
+        env:
+          RESOLC_VERSION: v1.4.0
+        run: |
+          curl -sSLf -o /usr/local/bin/resolc \
+            "https://github.com/paritytech/revive/releases/download/${RESOLC_VERSION}/resolc-x86_64-unknown-linux-musl"
+          chmod +x /usr/local/bin/resolc
+          resolc --version
+
+      - name: Build PolkaVM bytecode
+        run: npm run build:pvm
+
+      - name: Enforce blob-size gate
+        run: npm run ci:pvm-size
+
   # Contract coverage with a committed floor (E2). Its own job: instrumentation
   # roughly quadruples the suite's runtime, and the contracts gate above should
   # stay fast enough to be worth waiting for.

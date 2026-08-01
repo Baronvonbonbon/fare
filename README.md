@@ -12,6 +12,12 @@ on pallet-revive, deployed to the **Paseo** testnet. Toolchain, deploy
 workarounds, and safety patterns are carried over from the
 [DATUM](../datum) alpha-core line.
 
+The shipped bytecode is EVM, executed under pallet-revive's *compatibility
+mode*. A second build target compiles the same sources to **native PolkaVM**
+with `resolc` — `npm run build:pvm`, gated in CI against pallet-revive's 256 KiB
+blob limit (`pvm-size-snapshot.json`). All twelve contracts build and fit;
+`FareOrders` is the tightest at 49%.
+
 ## How a delivery works
 
 ```
