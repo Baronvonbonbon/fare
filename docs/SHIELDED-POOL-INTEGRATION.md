@@ -265,3 +265,32 @@ pointer only governs where new ones go.
 
 **Still not fixed upstream:** the 16-entry known-roots window (Issue 4). The relay's
 retry-on-`"Unknown root"` workaround stays.
+
+
+## PoseidonPolkaVM — already in use, no change needed (2026-08-01)
+
+The release advertises **PoseidonPolkaVM at 17.7× cheaper gas than Solidity**, which looked like a
+free win for `FareVault`'s 16-level note tree. It isn't a win, because FARE has been using it since
+the shielded-payout work landed. Checked rather than assumed:
+
+| | |
+|---|---|
+| `deployed-addresses.json` → `poseidon` | `0x1d165f6fE5A30422E0E2140e91C8A9B800380637` |
+| Live `FareVault.shieldPoseidon()` | `0x1d165f6fE5A30422E0E2140e91C8A9B800380637` |
+| The SDK's `poseidonPrecompile` for Paseo | `0x1d165f6fE5A30422E0E2140e91C8A9B800380637` |
+
+Same address all three. And the Poseidon deployments the SDK references across networks
+(`0x1d165f6f…` Paseo, `0x4faE22c0…`, `0x3d92Af83…`) all share one bytecode hash
+(`0x75f3e47d…`) — one build, deployed per network.
+
+Measured on Paseo, `hash(uint256[2])` costs **3,406 gas**. That is consistent with the claim:
+3,406 × 17.7 ≈ 60,300, which is the range a Solidity Poseidon-T3 lands in. The 17.7× is relative
+to a Solidity implementation FARE never used.
+
+Two things follow. **`FareVault` needs no change** — and it could not take one anyway, since
+`setShieldPoseidon` is deliberately one-shot (`require(address(shieldPoseidon) == address(0))`,
+because a tree initialised against one hasher and used with another would silently produce
+unverifiable roots). And the note tree is already on the cheapest hasher available, so a gas
+reduction there has to come from the tree structure or the surrounding Solidity, not the hash.
+
+*Recorded so nobody re-investigates this.*
