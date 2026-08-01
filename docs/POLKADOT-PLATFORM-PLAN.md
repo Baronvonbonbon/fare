@@ -508,7 +508,17 @@ content-addressed bundle, and an identity layer it did not have.
    anonymous DotNS label, so that testing FARE's dependencies does not announce FARE; run it on
    the phone and paste the report here.
 
-   - **S1** ✅ **Resolved — we are authorized.** `ascendyendor00.dot`, product account
+   - **S1** ⚠️ **Half-resolved, and Phase 2 is blocked.** A Product *can* obtain a Bulletin
+     quota — `requestResourceAllocation([{ tag: "BulletinAllowance" }])` returns `["Allocated"]`
+     after one approval tap on the phone, confirming §4.6's correction. But **`cloudStorage.upload()`
+     then hangs indefinitely** — a 25-byte payload stalled for 180 s with the allowance granted,
+     the App rebuilt, an account selected, and the right chain environment accepted. No error, no
+     rejection, no prompt. Reported as
+     [products-devnet-issues#7](https://github.com/Polkadot-Community-Foundation/products-devnet-issues/issues/7).
+     **Until Bulletin writes work from a Product, Phase 2 cannot start** — photos, menus, and the
+     ZK artifacts all depend on that one call. The `dev-dot.li` gateway is not a fallback: it
+     carries no Bulletin chain at all.
+   - **S1(a)** ✅ **We are authorized at the account level.** `ascendyendor00.dot`, product account
      `baronvonbonbon.01`, live on this device. Phase 2 storage work is unblocked. Still to
      measure before relying on it: the actual quota (`checkAuthorization` →
      `remainingTransactions` / `remainingBytes` / `expiration`) and whether one authorized
