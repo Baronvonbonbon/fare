@@ -27,7 +27,8 @@ Solidity).
 
 | Contract | Address | Notes |
 |---|---|---|
-| Pool `FixedIlopPhase2Paseo_v7` | `0x7d5a496bD61b631025A828d9049f6A68e007e0dC` | native PAS, ~230 leaves, 48 real withdrawals — actively used |
+| Pool `FixedIlopPhase2Paseo_v7` | `0x7d5a496bD61b631025A828d9049f6A68e007e0dC` | **superseded 2026-08-01** — see the migration note below |
+| Pool (canonical v7) | `0x3068490C79708D0725E3D4Aa9C35Da708f09071e` | what FARE points at now |
 | Verifier (Groth16) | `0x354f7353F6770b015376c386A3bF4760A7773E16` | 8 public signals |
 | PoseidonT3 precompile | `0x1d165f6fE5A30422E0E2140e91C8A9B800380637` | `hash(uint256[2])`, selector `0x561558fe` |
 
@@ -217,3 +218,79 @@ Artifacts: `web/public/shield/withdraw_v7.{wasm,zkey.part*}`. Deps: `ethers`,
 - [SHIELDED-FUNDING.md](SHIELDED-FUNDING.md) — the C4 design + `ShieldedFunder` seam
 - [PRODUCT-INTEGRATION-PLAN.md](PRODUCT-INTEGRATION-PLAN.md) — C4 in the backlog
 - Kusama Shield: `codeberg.org/KusamaShield` · `kusamashield.codeberg.page`
+
+
+---
+
+## Migration to the canonical v7 pool (2026-08-01)
+
+The [Kusama Shield release](https://forum.polkadot.network/t/kusama-shield-new-release/18301)
+standardised Paseo on `0x3068490C79708D0725E3D4Aa9C35Da708f09071e`. The pool FARE had been
+using, `0x7d5a496b…`, **appears nowhere in the new SDK** — Issue 2 in
+[KUSAMA-SHIELD-FINDINGS.md](KUSAMA-SHIELD-FINDINGS.md) (docs address ≠ working deployment)
+resolved in favour of the other address, leaving ours orphaned.
+
+**The swap is drop-in.** Verified before changing anything:
+
+- **The circuit is byte-identical.** The SDK ships `withdraw_phase2_fixed_v7.wasm` and
+  `withdraw_phase2_fixed_v7_0001.zkey`; both hash the same as the artifacts already in
+  `web/public/shield/` (`ba4cd3ec…caae2a` and `30e82f85…3f71e8`). No re-proving, no new
+  trusted setup, no change to the 8-signal layout.
+- **The interface is identical.** Both deployments expose exactly the selectors FARE calls —
+  `depositNative(bytes32)`, `proxy_withdraw(uint256[2],uint256[2][2],uint256[2],uint256[8],address)`,
+  and `treeSize()`.
+- **`proxyWithdrawV7()` in the SDK is a thin wrapper over `proxy_withdraw`** — the
+  sender-unlinkability work (a forwarder deployed per withdrawal) lives inside the contract, so
+  FARE already takes that path by calling `proxy_withdraw`. No client change was needed for it.
+- **The same PoseidonT3 precompile** (`0x1d165f6f…`) backs both.
+
+**What it cost.** The anonymity set drops from 331 leaves to 94. Both numbers are far too small
+to provide real privacy on a testnet, and both this document and Parity's own feasibility study
+conclude the anonymity set — not the cryptography — is the hard problem. Being on the deployment
+upstream actually supports matters more before mainnet.
+
+**On-chain component.** `FareVault` holds the pool address in storage, so this was not purely a
+client change:
+
+```
+FareVault.setShieldPool(0x3068490C…)
+tx 0xff96b84c5a6f34c3d0e0afac9ced474cff532ebf952f104ad9122b1bc3bfdc35
+```
+
+Safe to flip because `nextNoteIndex` was `1` — no shielded notes had been inserted into the
+vault's tree, so nothing was mid-flight. **Any future migration must re-check that**: switching
+the pointer with notes outstanding would send them somewhere their commitments do not exist.
+Notes already deposited in the old KS pool remain withdrawable directly from it; the vault
+pointer only governs where new ones go.
+
+**Still not fixed upstream:** the 16-entry known-roots window (Issue 4). The relay's
+retry-on-`"Unknown root"` workaround stays.
+
+
+## PoseidonPolkaVM — already in use, no change needed (2026-08-01)
+
+The release advertises **PoseidonPolkaVM at 17.7× cheaper gas than Solidity**, which looked like a
+free win for `FareVault`'s 16-level note tree. It isn't a win, because FARE has been using it since
+the shielded-payout work landed. Checked rather than assumed:
+
+| | |
+|---|---|
+| `deployed-addresses.json` → `poseidon` | `0x1d165f6fE5A30422E0E2140e91C8A9B800380637` |
+| Live `FareVault.shieldPoseidon()` | `0x1d165f6fE5A30422E0E2140e91C8A9B800380637` |
+| The SDK's `poseidonPrecompile` for Paseo | `0x1d165f6fE5A30422E0E2140e91C8A9B800380637` |
+
+Same address all three. And the Poseidon deployments the SDK references across networks
+(`0x1d165f6f…` Paseo, `0x4faE22c0…`, `0x3d92Af83…`) all share one bytecode hash
+(`0x75f3e47d…`) — one build, deployed per network.
+
+Measured on Paseo, `hash(uint256[2])` costs **3,406 gas**. That is consistent with the claim:
+3,406 × 17.7 ≈ 60,300, which is the range a Solidity Poseidon-T3 lands in. The 17.7× is relative
+to a Solidity implementation FARE never used.
+
+Two things follow. **`FareVault` needs no change** — and it could not take one anyway, since
+`setShieldPoseidon` is deliberately one-shot (`require(address(shieldPoseidon) == address(0))`,
+because a tree initialised against one hasher and used with another would silently produce
+unverifiable roots). And the note tree is already on the cheapest hasher available, so a gas
+reduction there has to come from the tree structure or the surrounding Solidity, not the hash.
+
+*Recorded so nobody re-investigates this.*

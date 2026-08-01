@@ -28,7 +28,7 @@ const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "..")
 const ks = await import(pathToFileURL(path.join(ROOT, "web/src/shieldpool.ts")).href);
 
 const RPC = process.env.TESTNET_RPC ?? "https://eth-rpc-testnet.polkadot.io/";
-const POOL = process.env.SHIELD_POOL ?? "0x7d5a496bD61b631025A828d9049f6A68e007e0dC";
+const POOL = process.env.SHIELD_POOL ?? "0x3068490C79708D0725E3D4Aa9C35Da708f09071e";
 // Paseo's PVM-native Poseidon — the thing that makes on-chain Merkle affordable.
 const POSEIDON = process.env.POSEIDON ?? "0x1d165f6fE5A30422E0E2140e91C8A9B800380637";
 const NOTES = Number(process.env.NOTES ?? 4);

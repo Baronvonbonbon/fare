@@ -46,7 +46,7 @@ const LEDGER = path.join(OUT, "ledger.json");
 const RPC = env("TESTNET_RPC") || "https://eth-rpc-testnet.polkadot.io/";
 const AH_WSS = process.env.AH_WSS || "wss://asset-hub-paseo-rpc.n.dwellir.com";
 const RELAY_URL = (process.env.RELAY_URL || "http://127.0.0.1:8788").replace(/\/$/, "");
-const KS_POOL = process.env.SHIELD_POOL || "0x7d5a496bD61b631025A828d9049f6A68e007e0dC";
+const KS_POOL = process.env.SHIELD_POOL || "0x3068490C79708D0725E3D4Aa9C35Da708f09071e";
 const USDC_1337 = "0x0000053900000000000000000000000001200000";
 const GAS_PRICE_WEI = 1_000_000_000_000n; // 1000 gwei on Paseo AH
 

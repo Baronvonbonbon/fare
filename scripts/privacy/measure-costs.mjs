@@ -28,7 +28,7 @@ const ks = await import(pathToFileURL(path.join(ROOT, "web/src/shieldpool.ts")).
 
 const RPC = process.env.TESTNET_RPC ?? "https://eth-rpc-testnet.polkadot.io/";
 const BOOK = JSON.parse(fs.readFileSync(path.join(ROOT, "deployed-addresses.json"), "utf8"));
-const POOL = "0x7d5a496bD61b631025A828d9049f6A68e007e0dC";
+const POOL = "0x3068490C79708D0725E3D4Aa9C35Da708f09071e";
 const OUT = path.join(ROOT, "e2e-runs", "relay-lab");
 const RELAYS = JSON.parse(fs.readFileSync(path.join(OUT, "relays.json"), "utf8"));
 const url = (id) => `http://127.0.0.1:${RELAYS.find((r) => r.id === id).port}`;

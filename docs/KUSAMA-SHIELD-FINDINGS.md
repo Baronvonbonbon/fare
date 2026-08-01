@@ -1,5 +1,11 @@
 # Kusama Shield — integration findings & questions
 
+> **Superseded in part (2026-08-01).** FARE has migrated to the canonical v7 pool
+> `0x3068490C79708D0725E3D4Aa9C35Da708f09071e`; the addresses below record what was
+> originally tested. **Issue 2 is resolved** — upstream standardised on the other address.
+> **Issue 4 (16-entry root window) is not fixed** and the workaround stands. See the
+> migration note in [SHIELDED-POOL-INTEGRATION.md](SHIELDED-POOL-INTEGRATION.md).
+
 *From an external integrator (the FARE team). We integrated private wallet
 funding against your Paseo Asset Hub pool and got it working end-to-end. Two
 things blocked a general-purpose integration; we think both are easy fixes on

@@ -72,7 +72,7 @@ const RATE_MAX = Number(process.env.RATE_MAX || 20); // requests / IP / window
 //     Requires SHIELD_FEE_PAS > 0. Fee must clear gas × margin. Trust note: in
 //     fee mode the relay briefly holds the withdrawal, so it must be forwarded —
 //     a stronger trust assumption than sponsor mode (documented in the README).
-const SHIELD_POOL = process.env.SHIELD_POOL || "0x7d5a496bD61b631025A828d9049f6A68e007e0dC";
+const SHIELD_POOL = process.env.SHIELD_POOL || "0x3068490C79708D0725E3D4Aa9C35Da708f09071e";
 const SHIELD_FEE = parseEther(process.env.SHIELD_FEE_PAS || "0"); // relayer fee (fee mode)
 const GAS_SHIELD = 8_000_000n; // proxy_withdraw is a Groth16 verify + tree insert
 const GAS_FORWARD_PAS = 100_000n; // plain transfer of the net to the burner
