@@ -454,6 +454,32 @@ on the customer side and *costless* on the driver side.
 because S3's answer determines whether customer-side threads can move too, and it is cheaper to
 design the transport once than twice.
 
+**Attempted 2026-08-01, and it changed two assumptions.**
+
+- **The Statement Store is *not* independently reachable — it is blocked behind the same host as
+  Bulletin.** `@parity/product-sdk-statement-store` is host-only: `connect({ mode: "local" })`
+  changes who *signs*, not the transport, and outside a container it fails with `Host statement
+  store unavailable. Ensure you are running inside a host container.` So §4.9 is not the
+  work-around to a broken host that it looked like; it shares the blocker.
+- **Statements are signed by the Product's allowance account, not the user's identity.** From the
+  SDK's own types: in host mode "proof creation is delegated to the host via the RFC-10 sponsored
+  path (`createProofAuthorized`) — the host signs with the product's allowance account, so
+  `accountId` is no longer required." **This materially softens §4.3.** The linkage a statement
+  creates is *product-scoped*, not user-scoped: it does not tie an order to the customer's People
+  Chain identity, only to FARE. Still linkable across orders within FARE, so per-order identities
+  remain the goal — but the privacy regression is smaller than §4.3 assumed, and the objection is
+  no longer fatal on its own.
+
+The lower-level `@novasamatech/statement-store` does expose a direct WS path and an explicit
+`NoAllowanceError`, so the S3 test is constructible — but both published People Chain endpoints
+(`wss://paseo-people-next-rpc.polkadot.io`, `wss://pop3-testnet.parity-lab.parity.io/people`) were
+silent when tried, so it could not be run. **S3 stays open.**
+
+Confirmed empirically while trying: `MAX_STATEMENT_SIZE = 512` bytes and `DEFAULT_TTL_SECONDS = 30`
+— the numbers Part 2 quotes from the docs are real. Slot-account primitives
+(`createSlotAccountProver`, `deriveSlotAccountPublicKey`) exist at that layer, consistent with the
+slot model in §4.6.
+
 ---
 
 ## Part 5 — Target architecture
