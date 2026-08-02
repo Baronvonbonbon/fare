@@ -177,6 +177,18 @@ attestation), but it must be a stated design decision, not an accident.
 signature needs a user tap regardless of the sr25519 problem. Two separate reasons now point at
 the same answer: attestations sign with app-local keys.
 
+**Confirmed on-chain (S5).** `scripts/substrate-native-spike.mjs` measured this against Paseo:
+a substrate origin dispatches `revive.call` cleanly and reads ABI returns exactly, with no
+contract changes — so the split works. It also surfaced the part this section understated. The
+host account is not merely *a different signing scheme* for the same user; `ReviveApi_address`
+derives its H160 from the `AccountId32`, so it is **a different `msg.sender` entirely**.
+Everything FARE keys by `msg.sender` — `venuesByOperator`, `drivers[address]`, `orders.customer`,
+`FareVault.balanceOf` — belongs to that new address. Adopting the host account is therefore a
+**per-role cutover, not a gradual dual path**: run both clients against one deployment and a
+driver's stake and reputation fork irreconcilably. And `mapAccount` is not optional plumbing —
+an unmapped origin cannot even read (see S5(b)), so it lands in the onboarding flow with a
+deposit attached. Full findings: [SUBSTRATE-NATIVE-SPIKE.md](SUBSTRATE-NATIVE-SPIKE.md).
+
 **Refinement:** derive burners from the product-scoped account rather than raw randomness.
 `ProductAccountId = (dotNsIdentifier, derivationIndex)` is deterministic and reproducible across
 sessions, so a per-order `derivationIndex` gives recoverable burners without a seed backup — a
@@ -555,8 +567,27 @@ content-addressed bundle, and an identity layer it did not have.
      callback is never answered) — a platform bug, and the one thing stopping Phase 1. See §4.7.
    - **S3** Per-order `derivationIndex` statement-store allowance (gates §4.3)
    - **S4** CASH/pUSD custody by a `pallet-revive` contract (gates §4.5)
-   - **S5** Host signer + `pallet_revive::map_account` → can the host account submit a FARE tx at
-     all? Confirms §4.1's split.
+   - **S5** ✅ **Mechanism confirmed on-chain, and it costs more than §4.1 assumed.** Measured
+     against Paseo Asset Hub (spec `2004002`) by `scripts/substrate-native-spike.mjs` —
+     full writeup in [SUBSTRATE-NATIVE-SPIKE.md](SUBSTRATE-NATIVE-SPIKE.md). A substrate
+     origin round-trips ABI **reads** exactly through `ReviveApi_call` (`statusOf`, the
+     16-field `orders` struct) and **dispatches writes** through `revive.call` (a
+     `commitBid` dry-run executed cleanly). **No contract changes needed.** Two findings
+     change the design:
+     **(a)** a mapped substrate account acts as an H160 derived from its `AccountId32`,
+     *unrelated* to any secp256k1 key — so the host account is **a different user** than
+     today's ethers client for the same human. §4.1's split is confirmed, but the cutover
+     must be per-role and deliberate, or a driver's stake and reputation fork across two
+     addresses with no way to merge them. Argues for cutting over **during** the pilot.
+     **(b) There is no anonymous read.** An *unmapped* origin cannot perform even a view
+     call (`revive.AccountUnmapped`), while `discoverOrders`, `syncAddressesFromRouter` and
+     the venue board all read before any wallet connects. Fix is `ReviveApi_getStorage` for
+     the hot reads or a well-known mapped read account — and **onboarding gains a
+     deposit-bearing `mapAccount` step**, which `sponsorOnboarding`
+     ([RELAY-SPONSORSHIP.md](RELAY-SPONSORSHIP.md)) is the natural place to absorb.
+     **Still open:** the spike used a raw substrate keypair, not the Polkadot App host
+     signer, so whether the App will submit a `revive.call` extrinsic (and pay the mapping
+     deposit) on a Product's behalf is a device question, not a chain one.
    - **S6** ✅ **Done — `resolc` compiles all twelve contracts and every blob fits** (§4.8). What
      remains is the CDM question: does registration accept EVM bytecode, or is resolc mandatory?
 
