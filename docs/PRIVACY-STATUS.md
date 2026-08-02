@@ -27,6 +27,8 @@ direction (TEST-PLAN B3).
 | Funding those burners | Shielded through Kusama Shield — the funding edge that would otherwise re-link a burner to the main wallet |
 | Drop location | ZK proximity proof: no coordinate ever enters calldata, storage, or an event |
 | Order contents and chat | End-to-end encrypted, per-order keys |
+| Name, phone, buzzer code, delivery instructions | Committed and revealed like a driver's profile (`web/src/regmeta.ts`), and never on-chain. A burner has no registry slot, so the commitment rides the order thread's `hello` **signed by the order wallet** — a relay that rewrites it is ignored rather than able to make an honest reveal fail. The plaintext goes only to the assigned driver. |
+| What the venue is cooking | The line items are sealed to the venue's hot signer under an ephemeral key (`web/src/ticket.ts`), so the relay carrying them learns nothing and the envelope names no sender. The venue checks the total against the escrowed `orderValue`, so the binding needs no on-chain commitment. |
 
 | Open | Why it matters |
 |---|---|
@@ -47,7 +49,7 @@ Drivers were the most exposed party a month ago and are now the most improved.
 |---|---|
 | The keeper's divertible buffer | **Removed.** The three-transaction ticket path (`queueShieldCredit` → `sealShieldBatch` → `depositShieldBatch`) and `setShieldKeeper` are gone from the vault. Its anonymity set was only the seal size, and the keeper held the account↔commitment pairing, so it could substitute its own commitments — dormant only because nobody was authorized, and one owner call from being live. The ZK note path needs no keeper and is permissionless. |
 | Revenue graph | Payouts enter the shielded pool. With the ZK path the anonymity set is every unspent note **of the same bucket**, not a batch — the bucket is a public signal of the spend, so denominations partition the crowd (measured in `test/anonymity-set.test.ts`). |
-| Name, vehicle, plate, contact | On-chain is `keccak256(profile)`; the details are revealed only to the order counterparty and refused unless they hash to that commitment |
+| Name, vehicle, plate, contact | On-chain is `keccak256(profile)`; the details are revealed only to the order counterparty and refused unless they hash to that commitment. The "Save public" button that wrote a plaintext `demo://` profile instead is **gone** — a privacy default undoable in one tap is a default, not a property. |
 | Losing bids | Sealed: only a hash is committed, and a relay submits it, so the chain never sees who bid or how much |
 | The open-bid escape hatch | **Removed.** `placeBid`/`withdrawBid`/`acceptBid`/`acceptBidERC20` and the public bid mapping are gone from the contract, not merely un-offered by the UI. Sealed bids were additive at first, which made the guarantee a default a driver could opt out of; there is now no second path to opt into. Asserted by absence in `test/expected-leaks.test.ts`. |
 | Pickup coordinates | Coarsened to ~33 m and no longer emitted |
@@ -63,6 +65,7 @@ Drivers were the most exposed party a month ago and are now the most improved.
 | Closed | How |
 |---|---|
 | Payout destination | The same shielded paths drivers use |
+| Counter phone and pickup instructions | Committed in the menu JSON (which `metadataURI` already anchors, and only the operator can set) and revealed over the order thread to the assigned driver. The menu stays public; these are not in it. |
 
 | Open | Why it matters |
 |---|---|

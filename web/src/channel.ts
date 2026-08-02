@@ -25,12 +25,18 @@ export function topicOf(orderId: string | bigint): string {
 export interface Envelope {
   from: string;
   seq: number;
-  kind: "hello" | "chat" | "loc" | "photo" | "profile" | "capsule";
+  kind: "hello" | "chat" | "loc" | "photo" | "profile" | "capsule" | "ticket";
   ts: number;
   pub?: string;
   iv?: string;
   ct?: string;
   data?: unknown;
+  /// A `hello` may carry the sender's profile commitment (regmeta.ts) for a role
+  /// with no on-chain slot to hold one — the customer. `commitSig` signs it with
+  /// the same key `pub` names, so a relay can't swap the commitment and make an
+  /// honest profile reveal fail verification.
+  commit?: string;
+  commitSig?: string;
 }
 
 /// Endpoints to try, in order: the shared KV relay, then discovered venue relays.
@@ -111,6 +117,38 @@ export async function fetchCapsules(
     .map((e) => ({ from: e.from, capsule: { epk: e.pub!, iv: e.iv!, ct: e.ct! } }));
 }
 
+/// Drop an order ticket (the line items, sealed to the venue's hot signer — see
+/// ticket.ts) on the order's thread. Standalone rather than an `OrderThread`
+/// method because the venue is a THIRD party: the thread's shared key is derived
+/// between the customer and the driver, and widening it to three would change
+/// the crypto every other kind depends on. The ticket brings its own ephemeral
+/// key instead, so it rides the same mailbox without touching that.
+export async function postTicket(
+  orderId: string | bigint, sealed: { epk: string; iv: string; ct: string }
+): Promise<boolean> {
+  return post(topicOf(orderId), {
+    from: "", // anonymous by construction: the seal carries the only key that matters
+    seq: 0,
+    kind: "ticket",
+    ts: Date.now(),
+    pub: sealed.epk,
+    iv: sealed.iv,
+    ct: sealed.ct,
+  });
+}
+
+/// Every ticket posted on an order's thread. Unauthenticated by design — the
+/// venue decides what is real by decrypting it and checking the total against
+/// the escrow (ticket.ts `fetchTicket`).
+export async function fetchTickets(
+  orderId: string | bigint
+): Promise<{ epk: string; iv: string; ct: string }[]> {
+  const thread = await fetchThread(topicOf(orderId));
+  return thread
+    .filter((e) => e.kind === "ticket" && e.pub && e.iv && e.ct)
+    .map((e) => ({ epk: e.pub!, iv: e.iv!, ct: e.ct! }));
+}
+
 /// The sealed chat envelopes on an order's thread, for an arbiter opening a
 /// dispute with a capsule key.
 export async function fetchSealedChat(
@@ -126,6 +164,7 @@ export async function fetchSealedChat(
 export class OrderThread {
   private topic: string;
   private peerPub: string | null = null;
+  private peerCommit: string | null = null;
   private seq = 0;
   private seen = new Set<string>();
 
@@ -145,13 +184,34 @@ export class OrderThread {
     this.topic = topicOf(orderId);
   }
 
-  /// Announce our pubkey so the peer can derive the shared key.
-  async open(): Promise<void> {
-    await post(this.topic, { from: this.myAddr, seq: -1, kind: "hello", ts: Date.now(), pub: pubKeyOf(this.myPriv) });
+  /// Announce our pubkey so the peer can derive the shared key, optionally
+  /// carrying our profile commitment (regmeta.ts) for roles that have nowhere
+  /// on-chain to publish one.
+  ///
+  /// The commitment is SIGNED. The pubkey is self-authenticating — `poll` accepts
+  /// it only if it derives to the expected on-chain address — but a commitment
+  /// is just a string in an envelope the relay can rewrite, and a rewritten one
+  /// makes every honest reveal fail verification. Signing it closes that.
+  async open(commit?: string): Promise<void> {
+    const env: Envelope = {
+      from: this.myAddr, seq: -1, kind: "hello", ts: Date.now(), pub: pubKeyOf(this.myPriv),
+    };
+    if (commit) {
+      env.commit = commit;
+      env.commitSig = await new ethers.Wallet(this.myPriv).signMessage(commit);
+    }
+    await post(this.topic, env);
   }
 
   get ready(): boolean {
     return this.peerPub !== null;
+  }
+
+  /// The peer's profile commitment, once an authenticated `hello` has carried
+  /// one. Null until then — and null is not "no commitment", it is "not yet
+  /// known", so callers must not treat a revealed profile as verified on it.
+  get peerCommitment(): string | null {
+    return this.peerCommit;
   }
 
   /// Seal + send a chat line. Requires the peer to have announced (re-announces
@@ -231,16 +291,21 @@ export class OrderThread {
 
     // Pass 1: adopt the peer's pubkey, but only if it derives to their on-chain
     // address — this authenticates the key exchange and blocks impersonation.
-    if (!this.peerPub) {
+    // A commitment on the same hello is adopted only if its signature recovers
+    // to that same address.
+    if (!this.peerPub || !this.peerCommit) {
       for (const e of thread) {
         if (e.kind !== "hello" || !e.pub) continue;
         try {
-          if (ethers.computeAddress(e.pub).toLowerCase() === this.peerAddr.toLowerCase()) {
-            this.peerPub = e.pub;
-            break;
+          if (ethers.computeAddress(e.pub).toLowerCase() !== this.peerAddr.toLowerCase()) continue;
+          this.peerPub ??= e.pub;
+          if (!this.peerCommit && e.commit && e.commitSig) {
+            const signer = ethers.verifyMessage(e.commit, e.commitSig);
+            if (signer.toLowerCase() === this.peerAddr.toLowerCase()) this.peerCommit = e.commit;
           }
+          if (this.peerPub && this.peerCommit) break;
         } catch {
-          /* malformed pub */
+          /* malformed pub or signature */
         }
       }
     }

@@ -51,13 +51,18 @@ import {
 } from "./wallets";
 import { isAddress, ZeroAddress } from "ethers";
 import { OrderThread, fetchCapsules, type ChatMsg, type LocUpdate } from "./channel";
+import { pubKeyOf } from "./msg";
+import { fetchTicket, ticketTotalWei, type ReceivedTicket } from "./ticket";
+import { kitchenBoard, advancePrep, prunePrep, chime, type KitchenTicket } from "./kitchen";
 import { newPhotoKey, sealPhoto, openPhoto } from "./photo";
 import { notify, notifyPermission, enableNotifications, type NotifyPermission } from "./notify";
 import { pushConfigured, pushSubscribed, subscribePush, syncWatched } from "./push";
-import { compressImage, storeSealed, fetchSealed, photoObjectUrl } from "./photoflow";
+import { compressImage, compressToBlob, storeSealed, fetchSealed, photoObjectUrl } from "./photoflow";
 import {
-  Menu, MenuItem, Cart, fetchMenu, cartTotal, cartCount,
-  emptyMenu, newItemId, publishMenu, hasMenuURI,
+  Menu, MenuItem, MenuCategory, Cart, fetchMenu, cartTotal, cartCount,
+  emptyMenu, newItemId, publishMenu, publishImage, hasMenuURI, imageUrl,
+  addToCart, setLineQty, resolveCart, selectionError, menuCategories,
+  itemsInCategory, isOpenAt, MENU_VERSION, type ModifierGroup, type WeekHours,
 } from "./menu";
 import { proveProximity, positionCommit } from "./zk";
 import { sponsorGas, relaySettle, relayForward, relayWithdraw, ensureGas, activeRelayUrl, sponsorOnboarding, fundBurner, forwarderAvailable } from "./relay";
@@ -72,7 +77,8 @@ import {
 } from "./sealedbid";
 import {
   commitProfile, isCommitted, describeProfile, saveSelfProfile, loadSelfProfile,
-  profilePayload, verifyPayload, type DriverProfile,
+  profilePayload, verifyPayload,
+  type DriverProfile, type CustomerProfile, type VenueProfile, type Profile, type ProfileRole,
 } from "./regmeta";
 import { escrowCapsule, evidenceURI } from "./disclosure";
 import { usePasUsd, cachedRate, fiatOf, pasToUsd, formatUsd } from "./pricing";
@@ -345,8 +351,18 @@ export default function App() {
       const v = venues.find((x: VenueRow) => String(x.id) === String(o.venueId));
       if (v) for (const r of regionsCovering({ lat: v.lat, lon: v.lon }, 1)) set.add(r);
     }
+    // My own venues' cells, whether or not they have orders yet — otherwise a
+    // counter tablet gets no push for its FIRST order, which is the one it most
+    // needs and the only one nobody is watching for.
+    const me = session?.address?.toLowerCase();
+    if (me) {
+      for (const v of venues as VenueRow[]) {
+        if (v.operator.toLowerCase() !== me && v.signer.toLowerCase() !== me) continue;
+        for (const r of regionsCovering({ lat: v.lat, lon: v.lon }, 1)) set.add(r);
+      }
+    }
     return [...set];
-  }, [myLoc, radiusKm, orders, venues]);
+  }, [myLoc, radiusKm, orders, venues, session]);
 
   // Keep the SW's watched-order set (local filter) + push regions fresh.
   useEffect(() => {
@@ -943,6 +959,7 @@ function CustomerView({ session, orders, venues, act, busy, signed, say, myLoc, 
   return (
     <>
       <CreateOrder {...{ session, venues, act, busy, say, myLoc, locateMe }} />
+      <div className="card"><CustomerProfileCard /></div>
       <div className="section-note">
         my orders
         <span className="hint" style={{ display: "block", fontWeight: 400 }}>
@@ -977,42 +994,283 @@ function CustomerView({ session, orders, venues, act, busy, signed, say, myLoc, 
   );
 }
 
-function MenuCart({ menu, cart, setCart, rate }: { menu: Menu; cart: Cart; setCart: (c: Cart) => void; rate: number }) {
-  const add = (id: string, d: number) => {
-    const q = Math.max(0, (cart[id] ?? 0) + d);
-    const next = { ...cart };
-    if (q === 0) delete next[id];
-    else next[id] = q;
-    setCart(next);
+/// One dish. Items with options open a chooser before they can be added, because
+/// "Pad Thai" and "Pad Thai, large, extra peanuts" are different things to cook
+/// and different prices — adding one blind would guess on the customer's behalf.
+function MenuItemRow({ item, cart, setCart, rate, say }: {
+  item: MenuItem; cart: Cart; setCart: (c: Cart) => void; rate: number; say: (m: string, e?: boolean) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [choices, setChoices] = useState<string[]>([]);
+  const hasOptions = !!item.options?.length;
+  const inCart = cart.filter((l) => l.itemId === item.id).reduce((n, l) => n + l.qty, 0);
+
+  const priceFiat = (() => {
+    try { return fiatOf(parse(item.price || "0"), rate); } catch { return ""; }
+  })();
+
+  const toggle = (groupId: string, choiceId: string, single: boolean) =>
+    setChoices((prev) => {
+      const group = item.options!.find((g) => g.id === groupId)!;
+      const ids = new Set(group.choices.map((c) => c.id));
+      if (prev.includes(choiceId)) return prev.filter((c) => c !== choiceId);
+      // A single-select group replaces rather than accumulates.
+      return [...(single ? prev.filter((c) => !ids.has(c)) : prev), choiceId];
+    });
+
+  const commit = () => {
+    const err = selectionError(item, choices);
+    if (err) return say(err, true);
+    setCart(addToCart(cart, item.id, choices));
+    setChoices([]);
+    setOpen(false);
   };
-  const avail = menu.items.filter((i) => i.available !== false);
-  const itemFiat = (price: string) => {
-    try { return fiatOf(parse(price || "0"), rate); } catch { return ""; }
-  };
+
+  return (
+    <div className="kv" style={{ alignItems: "flex-start" }}>
+      <span className="k" style={{ display: "flex", gap: 8, alignItems: "flex-start" }}>
+        {item.image && (
+          <img src={imageUrl(item.image)} alt="" loading="lazy"
+            style={{ width: 48, height: 48, objectFit: "cover", borderRadius: 6, flex: "0 0 auto" }} />
+        )}
+        <span>
+          {item.name}
+          {item.desc ? <span className="hint"> · {item.desc}</span> : null}
+          {hasOptions && <span className="hint"> · options</span>}
+        </span>
+      </span>
+      <span className="v">
+        <span className="amount">{priceFiat || `${item.price} PAS`} </span>
+        {priceFiat && <span className="hint">{item.price} PAS </span>}
+        {inCart > 0 && <span className="mono"> ×{inCart} </span>}
+        <button className="btn small" type="button"
+          onClick={() => (hasOptions ? setOpen((o) => !o) : setCart(addToCart(cart, item.id, [])))}>
+          {hasOptions ? (open ? "close" : "choose") : "+"}
+        </button>
+        {open && hasOptions && (
+          <div className="payload" style={{ marginTop: 6 }}>
+            {item.options!.map((g) => {
+              const single = (g.max ?? g.choices.length) === 1;
+              return (
+                <div key={g.id}>
+                  <span className="hint">{g.name}{g.required || (g.min ?? 0) > 0 ? " (required)" : ""}</span>
+                  {g.choices.map((c) => (
+                    <label key={c.id} className="kv" style={{ cursor: "pointer" }}>
+                      <span className="k">
+                        <input type={single ? "radio" : "checkbox"} name={`${item.id}-${g.id}`}
+                          checked={choices.includes(c.id)} onChange={() => toggle(g.id, c.id, single)} />{" "}
+                        {c.name}
+                      </span>
+                      <span className="v hint">{Number(c.priceDelta) ? `+${c.priceDelta} PAS` : "—"}</span>
+                    </label>
+                  ))}
+                </div>
+              );
+            })}
+            <div className="btn-row" style={{ marginTop: 6 }}>
+              <button className="btn small" type="button" onClick={commit}>Add to cart</button>
+            </div>
+          </div>
+        )}
+      </span>
+    </div>
+  );
+}
+
+function MenuCart({ menu, cart, setCart, rate, say }: {
+  menu: Menu; cart: Cart; setCart: (c: Cart) => void; rate: number; say: (m: string, e?: boolean) => void;
+}) {
+  const avail = useMemo(() => menu.items.filter((i) => i.available !== false), [menu]);
+  const sections = useMemo(() => {
+    const cats = menuCategories(menu).map((c) => ({ label: c.name, items: itemsInCategory(menu, c.id) }));
+    const loose = itemsInCategory(menu, null);
+    // "Other" only earns a heading when there is something else to contrast it
+    // with; an uncategorized menu is just a list.
+    return [...cats, ...(loose.length ? [{ label: cats.length ? "Other" : "", items: loose }] : [])]
+      .map((s) => ({ ...s, items: s.items.filter((i) => i.available !== false) }))
+      .filter((s) => s.items.length > 0);
+  }, [menu]);
+
+  const lines = resolveCart(menu, cart);
+
   return (
     <div className="field">
       <span>menu — {menu.name || "items"} {cartCount(cart) > 0 ? `· ${cartCount(cart)} in cart` : ""}</span>
       {avail.length === 0 && <p className="hint">This venue hasn't published items yet.</p>}
-      {avail.map((item) => (
-        <div className="kv" key={item.id}>
-          <span className="k">
-            {item.name}
-            {item.desc ? <span className="hint"> · {item.desc}</span> : null}
-          </span>
-          <span className="v">
-            <span className="amount">{itemFiat(item.price) || `${item.price} PAS`} </span>
-            {itemFiat(item.price) && <span className="hint">{item.price} PAS </span>}
-            {(cart[item.id] ?? 0) > 0 && (
-              <>
-                <button className="btn ghost small" type="button" onClick={() => add(item.id, -1)}>−</button>
-                <span className="mono"> {cart[item.id]} </span>
-              </>
-            )}
-            <button className="btn small" type="button" onClick={() => add(item.id, 1)}>+</button>
-          </span>
+      {sections.map((s, i) => (
+        <div key={s.label || i}>
+          {s.label && <div className="section-note">{s.label}</div>}
+          {s.items.map((item) => (
+            <MenuItemRow key={item.id} {...{ item, cart, setCart, rate, say }} />
+          ))}
         </div>
       ))}
+      {cart.length > 0 && (
+        <>
+          <div className="section-note">your cart</div>
+          {cart.map((l, i) => {
+            const r = lines[i];
+            if (!r) return null;
+            return (
+              <div className="kv" key={`${l.itemId}-${i}`}>
+                <span className="k">
+                  {r.name}
+                  {r.choices.length > 0 && <span className="hint"> · {r.choices.map((c) => c.name).join(", ")}</span>}
+                </span>
+                <span className="v">
+                  <button className="btn ghost small" type="button"
+                    onClick={() => setCart(setLineQty(cart, i, l.qty - 1))}>−</button>
+                  <span className="mono"> {l.qty} </span>
+                  <button className="btn small" type="button"
+                    onClick={() => setCart(setLineQty(cart, i, l.qty + 1))}>+</button>
+                </span>
+              </div>
+            );
+          })}
+        </>
+      )}
     </div>
+  );
+}
+
+/// Menus for every listed venue, so the browse screen can show names, cuisines
+/// and artwork instead of "Venue #3". `fetchMenu` caches in localStorage and
+/// falls back to the cache when a gateway is down, so this is cheap after the
+/// first load and works offline.
+function useCatalog(venues: VenueRow[]): Map<string, Menu> {
+  const [catalog, setCatalog] = useState<Map<string, Menu>>(new Map());
+  const ids = venues.filter((v) => hasMenuURI(v.metadataURI)).map((v) => `${v.id}:${v.metadataURI}`).join("|");
+  useEffect(() => {
+    let live = true;
+    (async () => {
+      const next = new Map<string, Menu>();
+      for (const v of venues) {
+        if (!hasMenuURI(v.metadataURI)) continue;
+        try {
+          const m = await fetchMenu(v.metadataURI);
+          if (m) next.set(String(v.id), m);
+        } catch {
+          /* one unreachable menu must not blank the whole board */
+        }
+        if (!live) return;
+      }
+      if (live) setCatalog(next);
+    })();
+    return () => { live = false; };
+  }, [ids]);
+  return catalog;
+}
+
+const venueLabel = (v: VenueRow, menu?: Menu): string =>
+  menu?.name?.trim() || (hasMenuURI(v.metadataURI) ? `Venue #${v.id}` : v.metadataURI.replace(/^\w+:\/\//, "")) || `Venue #${v.id}`;
+
+/// Browse: search by venue, cuisine or dish; filter by cuisine; pick one.
+function VenuePicker({ venues, catalog, myLoc, venueId, setVenueId, locateMe }: {
+  venues: { v: VenueRow; dist: number | null }[];
+  catalog: Map<string, Menu>;
+  myLoc: MicroDeg | null;
+  venueId: string;
+  setVenueId: (id: string) => void;
+  locateMe: () => void;
+}) {
+  const [q, setQ] = useState("");
+  const [cuisine, setCuisine] = useState<string | null>(null);
+
+  const cuisines = useMemo(() => {
+    const set = new Set<string>();
+    for (const { v } of venues) for (const c of catalog.get(String(v.id))?.cuisine ?? []) set.add(c);
+    return [...set].sort();
+  }, [venues, catalog]);
+
+  const shown = useMemo(() => {
+    const needle = q.trim().toLowerCase();
+    return venues.filter(({ v }) => {
+      const m = catalog.get(String(v.id));
+      if (cuisine && !(m?.cuisine ?? []).includes(cuisine)) return false;
+      if (!needle) return true;
+      // Searching dishes as well as venue names is the difference between
+      // "find the Thai place" and "find someone who makes pad thai".
+      return (
+        venueLabel(v, m).toLowerCase().includes(needle) ||
+        (m?.cuisine ?? []).some((c) => c.toLowerCase().includes(needle)) ||
+        (m?.items ?? []).some((i) => i.name.toLowerCase().includes(needle))
+      );
+    });
+  }, [venues, catalog, q, cuisine]);
+
+  return (
+    <div className="field">
+      <span>
+        pickup venue
+        {!myLoc && <button className="link-btn" type="button" onClick={locateMe}> · ◉ sort by distance</button>}
+      </span>
+      <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="search venues or dishes…" />
+      {cuisines.length > 0 && (
+        <div className="btn-row" style={{ flexWrap: "wrap", marginTop: 6 }}>
+          <button className={`btn small ${cuisine ? "ghost" : ""}`} type="button" onClick={() => setCuisine(null)}>All</button>
+          {cuisines.map((c) => (
+            <button key={c} type="button" className={`btn small ${cuisine === c ? "" : "ghost"}`}
+              onClick={() => setCuisine(cuisine === c ? null : c)}>{c}</button>
+          ))}
+        </div>
+      )}
+      {shown.length === 0 && <p className="hint">No venue matches that.</p>}
+      {shown.map(({ v, dist }) => {
+        const m = catalog.get(String(v.id));
+        const open = !m || isOpenAt(m);
+        const selected = venueId === String(v.id);
+        return (
+          <div key={String(v.id)} className="kv" style={{ cursor: "pointer", opacity: open ? 1 : 0.6 }}
+            onClick={() => setVenueId(selected ? "" : String(v.id))}>
+            <span className="k" style={{ display: "flex", gap: 8, alignItems: "center" }}>
+              {m?.logo && (
+                <img src={imageUrl(m.logo)} alt="" loading="lazy"
+                  style={{ width: 32, height: 32, objectFit: "cover", borderRadius: 6 }} />
+              )}
+              <span>
+                {selected ? "▾ " : ""}{venueLabel(v, m)}
+                {!open && <span className="hint"> · closed</span>}
+                {m?.cuisine?.length ? <span className="hint"> · {m.cuisine.join(", ")}</span> : null}
+              </span>
+            </span>
+            <span className="v hint">
+              {dist != null ? fmtDist(dist) : fmtCoord({ lat: v.lat, lon: v.lon })}
+            </span>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+/// The venue's own page: artwork, hours, and today's status.
+function VenueHeader({ menu }: { menu: Menu }) {
+  const days = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+  const today = menu.schedule?.[new Date().getDay()];
+  const open = isOpenAt(menu);
+  return (
+    <>
+      {menu.banner && (
+        <img src={imageUrl(menu.banner)} alt=""
+          style={{ width: "100%", maxHeight: 140, objectFit: "cover", borderRadius: 8, marginBottom: 8 }} />
+      )}
+      <div className="kv">
+        <span className="k">{menu.name}</span>
+        <span className="v">
+          <span className={`badge ${open ? "delivered" : "cancelled"}`}>{open ? "open" : "closed"}</span>
+        </span>
+      </div>
+      {menu.schedule ? (
+        <div className="kv">
+          <span className="k">today</span>
+          <span className="v hint">
+            {days[new Date().getDay()]} {today ? `${today.open}–${today.close}` : "closed"}
+          </span>
+        </div>
+      ) : menu.hours ? (
+        <div className="kv"><span className="k">hours</span><span className="v hint">{menu.hours}</span></div>
+      ) : null}
+    </>
   );
 }
 
@@ -1024,20 +1282,26 @@ function CreateOrder({ session, venues, act, busy, say, myLoc, locateMe }: any) 
   const [tip, setTip] = useState("0");
   const [maxFare, setMaxFare] = useState("0.5");
   const [menu, setMenu] = useState<Menu | null>(null);
-  const [cart, setCart] = useState<Cart>({});
+  const [cart, setCart] = useState<Cart>([]);
+  const [note, setNote] = useState(""); // note to the kitchen, travels on the ticket
   const [menuLoading, setMenuLoading] = useState(false);
   const [asset, setAsset] = useState<"native" | "token">("native"); // escrow asset (C3)
   const { rate } = usePasUsd(); // fiat display rate (C2)
+  const catalog = useCatalog(venues as VenueRow[]);
 
-  // Fetch the selected venue's off-chain menu (IPFS via metadataURI).
+  // Fetch the selected venue's off-chain menu (IPFS via metadataURI). The
+  // catalog usually already has it, so this only reaches the network on a cold
+  // pick — but it stays authoritative for the venue actually being ordered from.
   useEffect(() => {
     setMenu(null);
-    setCart({});
+    setCart([]);
     const v = venues.find((x: VenueRow) => String(x.id) === venueId);
     if (!v || !hasMenuURI(v.metadataURI)) return;
+    const cached = catalog.get(String(v.id));
+    if (cached) return setMenu(cached);
     setMenuLoading(true);
     fetchMenu(v.metadataURI).then(setMenu).catch(() => {}).finally(() => setMenuLoading(false));
-  }, [venueId]);
+  }, [venueId, catalog]);
 
   const stable = stablecoinAsset();
   const isToken = asset === "token" && !!stable;
@@ -1059,23 +1323,7 @@ function CreateOrder({ session, venues, act, busy, say, myLoc, locateMe }: any) 
   return (
     <div className="card">
       <h2>Place a pickup order <span className="tag">escrow</span></h2>
-      <label className="field">
-        <span>
-          pickup venue
-          {!myLoc && (
-            <button className="link-btn" type="button" onClick={locateMe}> · ◉ sort by distance</button>
-          )}
-        </span>
-        <select value={venueId} onChange={(e) => setVenueId(e.target.value)}>
-          <option value="">— select —</option>
-          {active.map(({ v, dist }: any) => (
-            <option key={String(v.id)} value={String(v.id)}>
-              #{String(v.id)} · {hasMenuURI(v.metadataURI) ? `Venue #${v.id}` : v.metadataURI.replace(/^\w+:\/\//, "")}
-              {dist != null ? ` · ${fmtDist(dist)} away` : ` · ${fmtCoord({ lat: v.lat, lon: v.lon })}`}
-            </option>
-          ))}
-        </select>
-      </label>
+      <VenuePicker {...{ venues: active, catalog, myLoc, venueId, setVenueId, locateMe }} />
       <label className="field">
         <span>drop location (kept secret — only a commitment goes on-chain)</span>
         <div className="btn-row">
@@ -1108,7 +1356,21 @@ function CreateOrder({ session, venues, act, busy, say, myLoc, locateMe }: any) 
         </label>
       )}
       {menuLoading && <p className="hint">Loading menu…</p>}
-      {useMenu && <MenuCart menu={menu!} cart={cart} setCart={setCart} rate={rate} />}
+      {useMenu && <VenueHeader menu={menu!} />}
+      {useMenu && <MenuCart menu={menu!} cart={cart} setCart={setCart} rate={rate} say={say} />}
+      {useMenu && !isOpenAt(menu!) && (
+        <p className="hint">This venue is closed right now — your order may not be picked up until it reopens.</p>
+      )}
+      {useMenu && (
+        <label className="field"><span>note for the kitchen (optional)</span>
+          <input value={note} onChange={(e) => setNote(e.target.value)} placeholder="no onions, extra napkins…" /></label>
+      )}
+      {useMenu && !menu?.signerPub && (
+        <p className="hint">
+          This venue hasn't published a key for order tickets, so it will see the amount but not the items —
+          it needs to republish its menu.
+        </p>
+      )}
       {isToken && menuDriven && <p className="hint">This venue's menu is priced in PAS — pay in {sym} using manual amounts below.</p>}
 
       <div className="row3">
@@ -1134,11 +1396,9 @@ function CreateOrder({ session, venues, act, busy, say, myLoc, locateMe }: any) 
       <div className="btn-row">
         <button className="btn" disabled={busy || !session || !venueId || !pos}
           onClick={() => {
-            const items = useMenu
-              ? menu!.items
-                  .filter((it) => (cart[it.id] ?? 0) > 0)
-                  .map((it) => ({ name: it.name, price: it.price, qty: cart[it.id] }))
-              : [];
+            // One resolution feeds both the receipt and the venue's ticket, so
+            // what the customer is shown and what the kitchen is told can't drift.
+            const items = useMenu ? resolveCart(menu, cart) : [];
             const receipt: ReceiptData = {
               venueId, venueName: menu?.name || `Venue #${venueId}`, items,
               orderValue: fmtAsset(orderValueWei, escrowToken), tip, maxFare,
@@ -1149,6 +1409,16 @@ function CreateOrder({ session, venues, act, busy, say, myLoc, locateMe }: any) 
             placeOrder({
               venueId: BigInt(venueId), orderValueWei, tipWei, maxFareWei,
               lat: pos!.lat, lon: pos!.lon, receipt, token: escrowToken, act, say,
+              // The kitchen's copy. Only a menu-driven order has line items; a
+              // manual-amount order has nothing itemized to send.
+              ticket: useMenu
+                ? { lines: items, venueName: menu?.name, note: note.trim() || undefined, signerPub: menu?.signerPub }
+                : undefined,
+              onTicket: (delivered) => {
+                if (!delivered && useMenu) {
+                  say("Order placed, but this venue can't receive the item list — call ahead to confirm it.", true);
+                }
+              },
             });
           }}>
           Open for bids
@@ -1229,7 +1499,10 @@ function OrderReceipt({ o }: { o: OrderRow }) {
             <span className="v hint">{r.placedAt ? new Date(r.placedAt).toLocaleDateString() : ""}</span></div>
           {r.items.map((it, i) => (
             <div className="kv" key={i}>
-              <span className="k">{it.qty}× {it.name}</span>
+              <span className="k">
+                {it.qty}× {it.name}
+                {it.choices?.length ? <span className="hint"> · {it.choices.map((c) => c.name).join(", ")}</span> : null}
+              </span>
               <span className="v mono">{it.price} PAS</span>
             </div>
           ))}
@@ -1300,9 +1573,18 @@ function HistoryCard({ o, venues, act, busy, session, say }: any) {
       orderValue: fmt(o.orderValue), tip: fmt(o.tip), maxFare: fmt(o.maxFare),
     };
     r.rateUsd = cachedRate(); // re-capture at reorder time (C2)
+    // The kitchen needs the items on a reorder exactly as much as on a first
+    // order. They're already in the receipt; the signer key comes from the
+    // venue's current menu, since it may have rotated since the original.
+    const v = venues.find((x: VenueRow) => String(x.id) === String(o.venueId));
+    const signerPub = v ? (await fetchMenu(v.metadataURI).catch(() => null))?.signerPub : undefined;
     await placeOrder({
       venueId: o.venueId, orderValueWei: o.orderValue, tipWei: o.tip, maxFareWei: o.maxFare,
       token: o.token, lat, lon, receipt: r, act, say,
+      ticket: r.items.length ? { lines: r.items, venueName: r.venueName, signerPub } : undefined,
+      onTicket: (delivered) => {
+        if (!delivered && r.items.length) say("Reordered, but the venue can't receive the item list.", true);
+      },
     });
   }
   return (
@@ -1327,29 +1609,37 @@ function HistoryCard({ o, venues, act, busy, session, say }: any) {
 /// End-to-end encrypted order chat (B3). Content is sealed client-side (msg.ts)
 /// and moved over the relay channel (channel.ts); the relay never sees plaintext.
 /// Needs a local-key wallet for ECDH, so it no-ops for injected wallets.
-function ChatPanel({ orderId, myPriv, myAddr, peerAddr, peerRegistryURI }: { orderId: bigint; myPriv?: string | null; myAddr?: string; peerAddr?: string; peerRegistryURI?: string }) {
+function ChatPanel({ orderId, myPriv, myAddr, peerAddr, peerRegistryURI, myRole = "driver", peerRole = "driver" }: {
+  orderId: bigint; myPriv?: string | null; myAddr?: string; peerAddr?: string; peerRegistryURI?: string;
+  myRole?: ProfileRole; peerRole?: ProfileRole;
+}) {
   const [msgs, setMsgs] = useState<ChatMsg[]>([]);
   const [text, setText] = useState("");
   const [note, setNote] = useState("");
   const [open, setOpen] = useState(false);
-  // The counterparty's registration details (§5), once they reveal them AND the
-  // plaintext hashes to their on-chain commitment. Never rendered unverified.
-  const [peerProfile, setPeerProfile] = useState<DriverProfile | null>(null);
+  // The counterparty's details (§5), once they reveal them AND the plaintext
+  // hashes to their commitment. Never rendered unverified.
+  const [peerProfile, setPeerProfile] = useState<Profile | null>(null);
   const threadRef = useRef<OrderThread | null>(null);
-  const selfProfile = loadSelfProfile();
+  const selfProfile = loadSelfProfile(myRole);
 
   useEffect(() => {
     if (!open || !myPriv || !myAddr || !peerAddr || !isAddress(peerAddr)) return;
     const onProfile = (json: string) => {
-      if (!peerRegistryURI) return;
-      const p = verifyPayload(json, peerRegistryURI);
+      // A driver's commitment is on-chain and authoritative; a customer has no
+      // registry slot, so theirs rides their signed `hello` (channel.ts).
+      const commitment = peerRegistryURI || threadRef.current?.peerCommitment;
+      if (!commitment) return setNote("waiting for the other party's commitment…");
+      const p = verifyPayload(peerRole, json, commitment);
       if (p) setPeerProfile(p);
-      else setNote("the other party sent a profile that doesn't match their on-chain commitment");
+      else setNote("the other party sent a profile that doesn't match their commitment");
     };
     const t = new OrderThread(orderId, myPriv, myAddr, peerAddr, undefined, undefined, onProfile);
     threadRef.current = t;
     let alive = true;
-    t.open().catch(() => {});
+    // Announce our own commitment with the pubkey, so a peer with no registry
+    // slot can still be held to what they committed to.
+    t.open(selfProfile ? commitProfile(myRole, selfProfile) : undefined).catch(() => {});
     // Escrow a disclosure capsule (§7): normal operation never opens it, but a
     // dispute has to be resolvable. Silent no-op when no arbiter key is
     // configured — an unverifiable key must never be encrypted to.
@@ -1377,7 +1667,7 @@ function ChatPanel({ orderId, myPriv, myAddr, peerAddr, peerRegistryURI }: { ord
   const shareProfile = async () => {
     const t = threadRef.current;
     if (!t || !selfProfile) return;
-    const ok = await t.sendProfile(profilePayload(selfProfile));
+    const ok = await t.sendProfile(profilePayload(myRole, selfProfile));
     setNote(ok ? "profile shared with this order's counterparty" : "waiting for the other party to open the chat…");
   };
 
@@ -1398,8 +1688,7 @@ function ChatPanel({ orderId, myPriv, myAddr, peerAddr, peerRegistryURI }: { ord
           </div>
           {peerProfile && (
             <div className="hint" style={{ marginTop: 6, color: "var(--cyan)" }}>
-              ✓ verified: {[peerProfile.name, peerProfile.vehicle, peerProfile.plate, peerProfile.contact]
-                .filter(Boolean).join(" · ")}
+              ✓ verified: {Object.values(peerProfile).filter(Boolean).join(" · ")}
             </div>
           )}
           <div className="btn-row" style={{ marginTop: 6 }}>
@@ -1749,7 +2038,7 @@ function CustomerOrder({ o, venues, act, busy, session, say }: any) {
       )}
       {(o.status === 2 || o.status === 3) && (
         <ChatPanel orderId={o.id} myPriv={walletFor(o.customer)?.privateKey} myAddr={o.customer}
-          peerAddr={o.driver} peerRegistryURI={driverURI} />
+          peerAddr={o.driver} peerRegistryURI={driverURI} myRole="customer" peerRole="driver" />
       )}
       {(o.status === 2 || o.status === 3) && (() => {
         // The customer knows their own drop (stored locally at order creation);
@@ -1882,8 +2171,8 @@ function DriverRegister({ act, busy, signed }: any) {
             const profile: DriverProfile = { name: name || "driver", vehicle, contact };
             // Private mode publishes keccak256(profile) and keeps the plaintext
             // here — the chain holds a hash, so this device is the only copy.
-            if (priv) saveSelfProfile(profile);
-            const uri = priv ? commitProfile(profile) : `demo://${name || "driver"}`;
+            if (priv) saveSelfProfile("driver", profile);
+            const uri = priv ? commitProfile("driver", profile) : `demo://${name || "driver"}`;
             return signed.drivers.register(uri, { value: parse(stake) });
           })}>
           Register
@@ -1928,7 +2217,7 @@ function DriverAccount({ me, act, busy, signed, say }: any) {
       </div>
       <div className="kv"><span className="k">profile</span>
         <span className="v">{describeProfile(me.metadataURI)}</span></div>
-      {isCommitted(me.metadataURI) && !loadSelfProfile() && (
+      {isCommitted(me.metadataURI) && !loadSelfProfile("driver") && (
         <div className="hint" style={{ color: "var(--warn, #f90)" }}>
           This device doesn't hold the plaintext for your committed profile — save it again below,
           or customers can't verify what you show them.
@@ -1942,13 +2231,50 @@ function DriverAccount({ me, act, busy, signed, say }: any) {
             // Same split as registration: a commitment on-chain, the details here.
             const [name, vehicle, contact] = profile.split("·").map((x) => x.trim());
             const p: DriverProfile = { name: name || "driver", vehicle, contact };
-            saveSelfProfile(p);
-            return signed.drivers.setMetadata(commitProfile(p));
-          })}>Save private</button>
-        <button className="btn ghost small" disabled={busy || !profile}
-          onClick={() => act("Update profile", () => signed.drivers.setMetadata(`demo://${profile}`))}>Save public</button>
+            saveSelfProfile("driver", p);
+            return signed.drivers.setMetadata(commitProfile("driver", p));
+          })}>Save profile</button>
       </div>
+      {/* There used to be a "Save public" button here writing `demo://<text>`.
+          A privacy default any driver can undo in one tap is a default, not a
+          property (PRIVACY-TIERS §7) — and the plaintext it published was the
+          driver's name, vehicle and contact, forever, to everyone. */}
     </div>
+  );
+}
+
+/// The customer's own door details. There is no registry slot for these — the
+/// customer is a per-order burner and giving it a persistent on-chain record is
+/// exactly what per-order wallets exist to prevent — so the commitment travels
+/// on the order thread's signed `hello` and the plaintext is revealed to the
+/// assigned driver only (regmeta.ts).
+function CustomerProfileCard() {
+  const [p, setP] = useState<CustomerProfile>(() => loadSelfProfile<CustomerProfile>("customer") ?? { name: "" });
+  const [saved, setSaved] = useState(false);
+  const field = (k: keyof CustomerProfile, label: string, placeholder = "") => (
+    <label className="field"><span>{label}</span>
+      <input value={(p[k] as string) ?? ""} placeholder={placeholder}
+        onChange={(e) => { setP({ ...p, [k]: e.target.value }); setSaved(false); }} /></label>
+  );
+  return (
+    <details className="payload-details">
+      <summary>delivery details {p.name ? `· ${p.name}` : "· not set"}</summary>
+      <p className="hint">
+        Stays on this device. Your driver sees it once they're assigned to your order, and can check it
+        against the commitment you published on that order — nobody else ever sees it, and it is never
+        on-chain.
+      </p>
+      {field("name", "name", "who the driver should ask for")}
+      {field("phone", "phone (optional)")}
+      {field("buzzer", "buzzer / unit (optional)", "4B")}
+      {field("instructions", "instructions (optional)", "side door, ring twice")}
+      <div className="btn-row">
+        <button className="btn small" disabled={!p.name.trim()}
+          onClick={() => { saveSelfProfile("customer", p); setSaved(true); }}>
+          {saved ? "Saved ✓" : "Save"}
+        </button>
+      </div>
+    </details>
   );
 }
 
@@ -2144,7 +2470,8 @@ function DriverJob({ o, venues, act, busy, signed, session, say }: any) {
         </>
       )}
       {(o.status === 2 || o.status === 3) && (
-        <ChatPanel orderId={o.id} myPriv={(session?.signer as any)?.privateKey} myAddr={session?.address} peerAddr={o.customer} />
+        <ChatPanel orderId={o.id} myPriv={(session?.signer as any)?.privateKey} myAddr={session?.address}
+          peerAddr={o.customer} myRole="driver" peerRole="customer" />
       )}
       {(o.status === 2 || o.status === 3) && (
         <TrackPublisher orderId={o.id} myPriv={(session?.signer as any)?.privateKey} myAddr={session?.address} peerAddr={o.customer} />
@@ -2158,6 +2485,102 @@ function DriverJob({ o, venues, act, busy, signed, session, say }: any) {
 
 // ---------- venue ----------
 
+/// The kitchen's copy of an order: the line items, sealed to this venue's hot
+/// signer by the customer (ticket.ts).
+///
+/// `verdict` is shown rather than hidden. A ticket that doesn't add up to the
+/// escrow is not a rendering bug to paper over — it is either a stale menu price
+/// or someone posting junk on the order's mailbox, and the counter needs to know
+/// which order it can trust before it starts cooking.
+function VenueTicket({ o, session }: { o: OrderRow; session: any }) {
+  const [t, setT] = useState<ReceivedTicket | null>(null);
+  const [state, setState] = useState<"loading" | "none" | "ok">("loading");
+
+  const priv = (session?.signer as any)?.privateKey;
+  useEffect(() => {
+    if (!priv) return setState("none");
+    let live = true;
+    const load = () =>
+      fetchTicket(o.id, priv, o.orderValue)
+        .then((r) => {
+          if (!live) return;
+          setT(r);
+          setState(r ? "ok" : "none");
+        })
+        .catch(() => live && setState("none"));
+    load();
+    // The ticket is posted right after the order is mined, so the first look can
+    // legitimately be too early.
+    const id = window.setInterval(load, 15_000);
+    return () => { live = false; window.clearInterval(id); };
+  }, [String(o.id), priv, String(o.orderValue)]);
+
+  if (state === "loading") return <p className="hint">Loading the order…</p>;
+  if (state === "none" || !t) {
+    return (
+      <p className="hint">
+        {priv
+          ? "No item list for this order — the customer's app couldn't reach this venue's signer key."
+          : "Connect the hot-signer key on this device to read order items."}
+      </p>
+    );
+  }
+
+  return (
+    <div className="payload">
+      {t.ticket.lines.map((l, i) => (
+        <div className="kv" key={i}>
+          <span className="k">{l.qty}× {l.name}</span>
+          <span className="v">
+            {l.choices?.length ? <span className="hint">{l.choices.map((c) => c.name).join(", ")} · </span> : null}
+            {fmt(ticketTotalWei({ ...t.ticket, lines: [l] }))} PAS
+          </span>
+        </div>
+      ))}
+      {t.ticket.note && (
+        <div className="kv"><span className="k">note</span><span className="v">{t.ticket.note}</span></div>
+      )}
+      {t.verdict === "bound" && (
+        <div className="kv"><span className="k">total</span>
+          <span className="v">{fmt(t.totalWei)} PAS <span className="badge delivered">matches escrow</span></span></div>
+      )}
+      {t.verdict === "unpriced" && (
+        <div className="kv"><span className="k">total</span>
+          <span className="v">{fmt(t.totalWei)} PAS <span className="badge">paid off-chain</span></span></div>
+      )}
+      {t.verdict === "mismatch" && (
+        <div className="kv"><span className="k">total</span>
+          <span className="v">
+            {fmt(t.totalWei)} PAS <span className="badge cancelled">≠ {fmt(o.orderValue)} escrowed</span>
+          </span></div>
+      )}
+    </div>
+  );
+}
+
+/// One line on the kitchen board: the items to make, and where they are in the
+/// venue's own workflow.
+function KitchenCard({ t, session, onAdvance }: { t: KitchenTicket<OrderRow>; session: any; onAdvance: () => void }) {
+  const { o, prep, waitedSec, overdue } = t;
+  const label = prep === "new" ? "Start cooking" : prep === "cooking" ? "Mark ready" : "Waiting for the driver";
+  return (
+    <div className="order">
+      <div className="order-head">
+        <span className="order-id">Order #{String(o.id)}</span>
+        <span className={`badge ${prep === "ready" ? "delivered" : prep === "cooking" ? "assigned" : "open"}`}>
+          {prep}
+        </span>
+        {overdue && <span className="badge cancelled">waiting {fmtLeft(waitedSec)}</span>}
+        <span className={`badge ${badgeClass(o.status)}`}>{o.status === 1 ? "no driver yet" : "driver assigned"}</span>
+      </div>
+      <VenueTicket o={o} session={session} />
+      <div className="btn-row">
+        <button className="btn" disabled={prep === "ready"} onClick={onAdvance}>{label}</button>
+      </div>
+    </div>
+  );
+}
+
 function VenueView({ session, orders, venues, act, busy, signed, say }: any) {
   const mine = venues.filter(
     (v: VenueRow) => session && v.operator.toLowerCase() === session.address.toLowerCase()
@@ -2169,13 +2592,60 @@ function VenueView({ session, orders, venues, act, busy, signed, say }: any) {
     (o: OrderRow) => o.status === 2 && mySignerVenues.some((v: VenueRow) => v.id === o.venueId)
   );
 
+  // Tablet mode: everything not yet handed over, oldest first. Driven off the
+  // SIGNER venues, because the counter device holds the signer key — that is the
+  // device that can read the tickets and cosign the release.
+  const [nowSec, setNowSec] = useState(() => Math.floor(Date.now() / 1000));
+  useEffect(() => {
+    const id = window.setInterval(() => setNowSec(Math.floor(Date.now() / 1000)), 30_000);
+    return () => window.clearInterval(id);
+  }, []);
+  const [prepTick, setPrepTick] = useState(0); // re-read prep state after a change
+  const myVenueIds = useMemo(
+    () => new Set<string>(mySignerVenues.map((v: VenueRow) => String(v.id))),
+    [mySignerVenues]
+  );
+  const board = useMemo(
+    () => kitchenBoard(orders as OrderRow[], myVenueIds, nowSec),
+    [orders, myVenueIds, nowSec, prepTick]
+  );
+
+  // A tablet across the room needs a sound, not just a banner. Chime on an order
+  // the board hasn't shown before — the first render only seeds the baseline, or
+  // every reload would sound like a rush.
+  const seenOrders = useRef<Set<string> | null>(null);
+  useEffect(() => {
+    const ids = new Set(board.map((t) => String(t.o.id)));
+    if (seenOrders.current) {
+      for (const id of ids) if (!seenOrders.current.has(id)) { chime(); break; }
+    }
+    seenOrders.current = ids;
+    prunePrep([...ids]);
+  }, [board]);
+
   return (
     <>
       <VenueRegister {...{ act, busy, signed, say }} />
       {mine.length > 0 && <div className="section-note">my venues</div>}
       {mine.map((v: VenueRow) => (
-        <VenueManage key={String(v.id)} {...{ v, act, busy, signed, say }} />
+        <VenueManage key={String(v.id)} {...{ v, act, busy, signed, say, session }} />
       ))}
+      {mySignerVenues.length > 0 && (
+        <>
+          <div className="section-note">kitchen — orders to make, oldest first</div>
+          {board.length === 0 && (
+            <div className="empty"><span className="dots">· · ·</span>Nothing to cook right now.</div>
+          )}
+          {board.map((t) => (
+            <KitchenCard
+              key={String(t.o.id)}
+              t={t}
+              session={session}
+              onAdvance={() => { advancePrep(t.o.id); setPrepTick((n) => n + 1); }}
+            />
+          ))}
+        </>
+      )}
       <div className="section-note">pickup queue — driver is here, sign the release</div>
       {queue.length === 0 && (
         <div className="empty"><span className="dots">· · ·</span>No assigned orders waiting for pickup.</div>
@@ -2187,7 +2657,7 @@ function VenueView({ session, orders, venues, act, busy, signed, say }: any) {
   );
 }
 
-function VenueManage({ v, act, busy, signed, say }: any) {
+function VenueManage({ v, act, busy, signed, say, session }: any) {
   const [payout, setPayout] = useState("");
   const [signer, setSigner] = useState("");
   const [profile, setProfile] = useState("");
@@ -2243,16 +2713,36 @@ function VenueManage({ v, act, busy, signed, say }: any) {
             onConfirm={(m) => { setPos(m); setMapOpen(false); }} onCancel={() => setMapOpen(false)} />
         )}
       </details>
-      <MenuEditor {...{ v, act, busy, signed, say }} />
+      <MenuEditor {...{ v, act, busy, signed, say, session }} />
     </div>
   );
 }
 
-function MenuEditor({ v, act, busy, signed, say }: any) {
+function MenuEditor({ v, act, busy, signed, say, session }: any) {
   const [menu, setMenu] = useState<Menu | null>(null);
   const [name, setName] = useState("");
   const [price, setPrice] = useState("");
   const [desc, setDesc] = useState("");
+  const [category, setCategory] = useState("");
+  const [catName, setCatName] = useState("");
+  const [editing, setEditing] = useState<string | null>(null); // item whose options are open
+  const [uploading, setUploading] = useState(false);
+  const [vprofile, setVprofile] = useState<VenueProfile>(
+    () => loadSelfProfile<VenueProfile>("venue") ?? { name: "" }
+  );
+  // The hot signer's PUBLIC key, published in the menu so customers can seal
+  // order tickets to it (ticket.ts). Only derivable when this device holds the
+  // signer key — an operator managing a venue whose signer lives on the counter
+  // tablet must publish from that tablet instead.
+  const signerPub = (() => {
+    const priv = (session?.signer as any)?.privateKey;
+    if (!priv || session?.address?.toLowerCase() !== v.signer.toLowerCase()) return undefined;
+    try {
+      return pubKeyOf(priv);
+    } catch {
+      return undefined;
+    }
+  })();
   useEffect(() => {
     fetchMenu(v.metadataURI)
       .then((m) => setMenu(m ?? emptyMenu(v.metadataURI?.replace(/^\w+:\/\//, "") ?? "")))
@@ -2260,15 +2750,62 @@ function MenuEditor({ v, act, busy, signed, say }: any) {
   }, [v.metadataURI]);
   if (!menu) return null;
 
+  const patch = (p: Partial<Menu>) => setMenu({ ...menu, ...p });
+  const patchItem = (id: string, p: Partial<MenuItem>) =>
+    patch({ items: menu.items.map((i: MenuItem) => (i.id === id ? { ...i, ...p } : i)) });
+
   const addItem = () => {
     if (!name || !price) return say("Item needs a name and price", true);
-    setMenu({ ...menu, items: [...menu.items, { id: newItemId(), name, price, desc: desc || undefined, available: true }] });
+    patch({
+      items: [...menu.items, {
+        id: newItemId(), name, price, desc: desc || undefined,
+        category: category || undefined, available: true,
+      }],
+    });
     setName(""); setPrice(""); setDesc("");
   };
-  const removeItem = (id: string) => setMenu({ ...menu, items: menu.items.filter((i: MenuItem) => i.id !== id) });
+  const removeItem = (id: string) => patch({ items: menu.items.filter((i: MenuItem) => i.id !== id) });
+
+  const addCategory = () => {
+    const n = catName.trim();
+    if (!n) return;
+    const cats = menuCategories(menu);
+    patch({ categories: [...cats, { id: newItemId(), name: n, order: cats.length }] });
+    setCatName("");
+  };
+
+  /// Upload artwork: downscale + strip EXIF first (the same `compressImage` the
+  /// delivery-photo path uses), then store as its own IPFS object. Unlike the
+  /// menu JSON there is no local fallback — a `local://` photo renders for the
+  /// venue that uploaded it and is a broken box for every customer.
+  const upload = async (file: File, apply: (cid: string) => void) => {
+    setUploading(true);
+    try {
+      // Bigger and better quality than a delivery photo: this one is shown as a
+      // product image, not as evidence.
+      apply(await publishImage(await compressToBlob(file, 1280, 0.8)));
+      say("Image uploaded ✓ — publish the menu to make it live");
+    } catch (e: any) {
+      say(e?.message ?? String(e), true);
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  const setDay = (day: number, d: { open: string; close: string } | null) => {
+    const week: WeekHours = menu.schedule?.length === 7 ? [...menu.schedule] : Array(7).fill(null);
+    week[day] = d;
+    patch({ schedule: week });
+  };
+
   const publish = async () => {
     try {
-      const { uri, shared } = await publishMenu(menu);
+      // Carry the signer pubkey forward if this device can't derive it, so
+      // republishing from the operator's phone doesn't silently strip the key
+      // the tablet published and break order tickets.
+      const { uri, shared } = await publishMenu({
+        ...menu, version: MENU_VERSION, signerPub: signerPub ?? menu.signerPub,
+      });
       await act("Publish menu", () => signed.venues.setMetadata(v.id, uri));
       say(shared ? "Menu published to IPFS ✓" : "Menu saved locally (IPFS not configured — single device only)", !shared);
     } catch (e: any) {
@@ -2276,27 +2813,228 @@ function MenuEditor({ v, act, busy, signed, say }: any) {
     }
   };
 
+  const cats = menuCategories(menu);
+  const days = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+
   return (
     <details className="payload-details">
       <summary>menu · {menu.items.length} items</summary>
       <label className="field"><span>menu name</span>
-        <input value={menu.name} onChange={(e) => setMenu({ ...menu, name: e.target.value })} /></label>
+        <input value={menu.name} onChange={(e) => patch({ name: e.target.value })} /></label>
+      <label className="field"><span>cuisine (comma separated — customers filter on this)</span>
+        <input value={(menu.cuisine ?? []).join(", ")} placeholder="thai, noodles"
+          onChange={(e) => patch({ cuisine: e.target.value.split(",").map((s) => s.trim()).filter(Boolean) })} /></label>
+
+      <div className="section-note">private details — only the assigned driver sees these</div>
+      <p className="hint">
+        Kept on this device and revealed over the order thread once a driver is assigned. The menu
+        carries only a hash of them, so publishing it does not publish them.
+      </p>
+      {(["name", "contact", "pickup"] as const).map((k) => (
+        <label className="field" key={k}>
+          <span>{k === "pickup" ? "where the driver collects" : k === "contact" ? "counter phone" : "ask for"}</span>
+          <input value={(vprofile[k] as string) ?? ""}
+            onChange={(e) => setVprofile({ ...vprofile, [k]: e.target.value })} />
+        </label>
+      ))}
+      <div className="btn-row">
+        <button className="btn ghost small" disabled={!vprofile.name.trim()}
+          onClick={() => {
+            saveSelfProfile("venue", vprofile);
+            patch({ profileCommit: commitProfile("venue", vprofile) });
+            say("Saved — publish the menu to commit to it");
+          }}>Save private details</button>
+      </div>
+
+      <div className="section-note">artwork</div>
+      <div className="btn-row" style={{ flexWrap: "wrap" }}>
+        <ImagePick label={menu.logo ? "Replace logo" : "Add logo"} cid={menu.logo} busy={uploading}
+          onPick={(f) => upload(f, (cid) => patch({ logo: cid }))} />
+        <ImagePick label={menu.banner ? "Replace banner" : "Add banner"} cid={menu.banner} busy={uploading}
+          onPick={(f) => upload(f, (cid) => patch({ banner: cid }))} />
+      </div>
+
+      <div className="section-note">hours</div>
+      {days.map((d, i) => {
+        const day = menu.schedule?.[i] ?? null;
+        return (
+          <div className="kv" key={d}>
+            <span className="k">{d}</span>
+            <span className="v">
+              {day ? (
+                <>
+                  <input style={{ width: 66 }} value={day.open} placeholder="09:00"
+                    onChange={(e) => setDay(i, { ...day, open: e.target.value })} />
+                  {" – "}
+                  <input style={{ width: 66 }} value={day.close} placeholder="17:00"
+                    onChange={(e) => setDay(i, { ...day, close: e.target.value })} />
+                  <button className="btn ghost small" type="button" onClick={() => setDay(i, null)}>closed</button>
+                </>
+              ) : (
+                <button className="btn ghost small" type="button"
+                  onClick={() => setDay(i, { open: "09:00", close: "17:00" })}>closed · set hours</button>
+              )}
+            </span>
+          </div>
+        );
+      })}
+
+      <div className="section-note">categories</div>
+      {cats.map((c: MenuCategory) => (
+        <div className="kv" key={c.id}>
+          <span className="k">{c.name}</span>
+          <span className="v"><button className="btn ghost small" type="button"
+            onClick={() => patch({
+              categories: cats.filter((x: MenuCategory) => x.id !== c.id),
+              // Items keep pointing at a category that no longer exists; they
+              // fall back to "uncategorized" rather than disappearing.
+              items: menu.items.map((i: MenuItem) => (i.category === c.id ? { ...i, category: undefined } : i)),
+            })}>remove</button></span>
+        </div>
+      ))}
+      <div className="btn-row">
+        <input style={{ flex: 1 }} placeholder="new category" value={catName} onChange={(e) => setCatName(e.target.value)} />
+        <button className="btn small" type="button" onClick={addCategory}>Add</button>
+      </div>
+
+      <div className="section-note">items</div>
       {menu.items.map((it: MenuItem) => (
-        <div className="kv" key={it.id}>
-          <span className="k">{it.name} <span className="hint">· {it.price} PAS{it.desc ? ` · ${it.desc}` : ""}</span></span>
-          <span className="v"><button className="btn ghost small" type="button" onClick={() => removeItem(it.id)}>remove</button></span>
+        <div className="kv" key={it.id} style={{ alignItems: "flex-start" }}>
+          <span className="k" style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            {it.image && <img src={imageUrl(it.image)} alt="" style={{ width: 32, height: 32, objectFit: "cover", borderRadius: 4 }} />}
+            <span>
+              {it.name} <span className="hint">· {it.price} PAS{it.desc ? ` · ${it.desc}` : ""}</span>
+              {it.options?.length ? <span className="hint"> · {it.options.length} option group(s)</span> : null}
+            </span>
+          </span>
+          <span className="v" style={{ display: "flex", gap: 4, flexWrap: "wrap", justifyContent: "flex-end" }}>
+            <select value={it.category ?? ""} onChange={(e) => patchItem(it.id, { category: e.target.value || undefined })}>
+              <option value="">uncategorized</option>
+              {cats.map((c: MenuCategory) => <option key={c.id} value={c.id}>{c.name}</option>)}
+            </select>
+            <button className="btn ghost small" type="button"
+              onClick={() => patchItem(it.id, { available: it.available === false })}>
+              {it.available === false ? "sold out" : "available"}
+            </button>
+            <ImagePick label={it.image ? "photo ✓" : "photo"} cid={it.image} busy={uploading}
+              onPick={(f) => upload(f, (cid) => patchItem(it.id, { image: cid }))} />
+            <button className="btn ghost small" type="button" onClick={() => setEditing(editing === it.id ? null : it.id)}>
+              options
+            </button>
+            <button className="btn ghost small" type="button" onClick={() => removeItem(it.id)}>remove</button>
+          </span>
+          {editing === it.id && (
+            <OptionEditor item={it} onChange={(options) => patchItem(it.id, { options })} />
+          )}
         </div>
       ))}
       <div className="btn-row" style={{ flexWrap: "wrap" }}>
         <input style={{ flex: 2, minWidth: 110 }} placeholder="item name" value={name} onChange={(e) => setName(e.target.value)} />
         <input style={{ flex: 1, minWidth: 60 }} placeholder="PAS" value={price} onChange={(e) => setPrice(e.target.value)} inputMode="decimal" />
+        <select value={category} onChange={(e) => setCategory(e.target.value)}>
+          <option value="">uncategorized</option>
+          {cats.map((c: MenuCategory) => <option key={c.id} value={c.id}>{c.name}</option>)}
+        </select>
         <button className="btn small" type="button" onClick={addItem}>Add</button>
       </div>
       <input style={{ width: "100%", marginTop: 6 }} placeholder="description (optional)" value={desc} onChange={(e) => setDesc(e.target.value)} />
+      {!signerPub && !menu.signerPub && (
+        <p className="hint">
+          Publishing from this device won't include the hot-signer key, so customers can't send you the
+          item list. Publish from the device holding the signer key ({short(v.signer)}) instead.
+        </p>
+      )}
       <div className="btn-row" style={{ marginTop: 6 }}>
-        <button className="btn" disabled={busy} onClick={publish}>Publish menu</button>
+        <button className="btn" disabled={busy || uploading} onClick={publish}>Publish menu</button>
       </div>
     </details>
+  );
+}
+
+/// A file-picker button that hands back the chosen image.
+function ImagePick({ label, cid, busy, onPick }: {
+  label: string; cid?: string; busy: boolean; onPick: (f: File) => void;
+}) {
+  const ref = useRef<HTMLInputElement>(null);
+  return (
+    <>
+      <button className={`btn ghost small ${cid ? "" : ""}`} type="button" disabled={busy}
+        onClick={() => ref.current?.click()}>{busy ? "…" : label}</button>
+      <input ref={ref} type="file" accept="image/*" style={{ display: "none" }}
+        onChange={(e) => { const f = e.target.files?.[0]; if (f) onPick(f); e.target.value = ""; }} />
+    </>
+  );
+}
+
+/// Modifier groups for one item. Kept deliberately plain — a venue setting up
+/// "Size: small/large" should not have to think about min/max, so `required`
+/// and single-vs-multi select are the two knobs, and min/max are derived.
+function OptionEditor({ item, onChange }: { item: MenuItem; onChange: (g: ModifierGroup[]) => void }) {
+  const groups = item.options ?? [];
+  const [gname, setGname] = useState("");
+  const [cname, setCname] = useState("");
+  const [cdelta, setCdelta] = useState("0");
+  const [target, setTarget] = useState("");
+
+  const set = (next: ModifierGroup[]) => onChange(next);
+  const patchGroup = (id: string, p: Partial<ModifierGroup>) =>
+    set(groups.map((g) => (g.id === id ? { ...g, ...p } : g)));
+
+  return (
+    <div className="payload" style={{ width: "100%", marginTop: 6 }}>
+      {groups.map((g) => (
+        <div key={g.id}>
+          <div className="kv">
+            <span className="k">{g.name}</span>
+            <span className="v" style={{ display: "flex", gap: 4 }}>
+              <button className="btn ghost small" type="button"
+                onClick={() => patchGroup(g.id, { required: !g.required, min: !g.required ? 1 : 0 })}>
+                {g.required ? "required" : "optional"}
+              </button>
+              <button className="btn ghost small" type="button"
+                onClick={() => patchGroup(g.id, { max: (g.max ?? g.choices.length) === 1 ? undefined : 1 })}>
+                {(g.max ?? g.choices.length) === 1 ? "pick one" : "pick many"}
+              </button>
+              <button className="btn ghost small" type="button"
+                onClick={() => set(groups.filter((x) => x.id !== g.id))}>remove</button>
+            </span>
+          </div>
+          {g.choices.map((c) => (
+            <div className="kv" key={c.id}>
+              <span className="k hint">· {c.name}</span>
+              <span className="v hint">
+                {Number(c.priceDelta) ? `+${c.priceDelta} PAS` : "—"}{" "}
+                <button className="btn ghost small" type="button"
+                  onClick={() => patchGroup(g.id, { choices: g.choices.filter((x) => x.id !== c.id) })}>×</button>
+              </span>
+            </div>
+          ))}
+        </div>
+      ))}
+      <div className="btn-row" style={{ flexWrap: "wrap", marginTop: 4 }}>
+        <input style={{ flex: 1, minWidth: 90 }} placeholder="group (e.g. Size)" value={gname} onChange={(e) => setGname(e.target.value)} />
+        <button className="btn small" type="button" disabled={!gname.trim()}
+          onClick={() => { set([...groups, { id: newItemId(), name: gname.trim(), choices: [] }]); setGname(""); }}>
+          Add group
+        </button>
+      </div>
+      {groups.length > 0 && (
+        <div className="btn-row" style={{ flexWrap: "wrap", marginTop: 4 }}>
+          <select value={target || groups[0].id} onChange={(e) => setTarget(e.target.value)}>
+            {groups.map((g) => <option key={g.id} value={g.id}>{g.name}</option>)}
+          </select>
+          <input style={{ flex: 1, minWidth: 80 }} placeholder="choice" value={cname} onChange={(e) => setCname(e.target.value)} />
+          <input style={{ width: 70 }} placeholder="+PAS" value={cdelta} inputMode="decimal" onChange={(e) => setCdelta(e.target.value)} />
+          <button className="btn small" type="button" disabled={!cname.trim()}
+            onClick={() => {
+              const id = target || groups[0].id;
+              const g = groups.find((x) => x.id === id)!;
+              patchGroup(id, { choices: [...g.choices, { id: newItemId(), name: cname.trim(), priceDelta: cdelta || "0" }] });
+              setCname(""); setCdelta("0");
+            }}>Add choice</button>
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -2357,6 +3095,7 @@ function VenuePickup({ o, venues, session, say }: any) {
         <span className={`badge ${badgeClass(o.status)}`}>{STATUS[o.status]}</span>
       </div>
       <OrderMeta o={o} venues={venues} />
+      <VenueTicket o={o} session={session} />
       <p className="hint">
         Handing the goods to driver {short(o.driver)}? Sign the pickup — your GPS position is
         checked against your registered pin, and the order value releases to your payout address.

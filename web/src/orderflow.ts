@@ -18,6 +18,8 @@ import { newOrderWallet } from "./wallets";
 import { fundBurner, forwarderAvailable } from "./relay";
 import { approveToken, gaslessCreateOrderERC20, stablecoinBalance } from "./token";
 import { OrderThread } from "./channel";
+import { sendTicket, type TicketLine } from "./ticket";
+import { commitProfile, loadSelfProfile, type CustomerProfile } from "./regmeta";
 import { distanceMeters, type MicroDeg } from "./geo";
 
 // ── shared row shapes (mirrors what App builds from the chain) ───────────────
@@ -168,7 +170,9 @@ export const receiptKey = (commit: string) => `fare.receipt.${commit.toLowerCase
 export interface ReceiptData {
   venueId: string;
   venueName: string;
-  items: { name: string; price: string; qty: number }[];
+  /// Line items as configured, so a receipt and a reorder both reproduce the
+  /// exact dish — same shape as `TicketLine`, which is what the venue receives.
+  items: TicketLine[];
   orderValue: string; // PAS decimal
   tip: string;
   maxFare: string;
@@ -207,8 +211,25 @@ export interface PlaceOrderOpts {
   lon: number;
   receipt: ReceiptData;
   token?: string; // undefined / address(0) = native PAS; else stablecoin escrow (C3)
+  /// The line items to send to the venue's kitchen (ticket.ts). Omitted for a
+  /// manual-amount order, where there is nothing itemized to send.
+  ticket?: TicketDraft;
   act: (label: string, fn: () => Promise<any>) => Promise<any>;
   say: (m: string, err?: boolean) => void;
+  /// Whether the venue actually received the ticket. False means the order is
+  /// live and paid for but the kitchen has no idea what to make — worth telling
+  /// the customer, so it is surfaced rather than swallowed.
+  onTicket?: (delivered: boolean) => void;
+}
+
+/// Everything needed to seal a ticket except the orderId, which does not exist
+/// until the creating transaction is mined.
+export interface TicketDraft {
+  lines: TicketLine[];
+  venueName?: string;
+  note?: string;
+  /// From the venue's published menu; checked against the registry before use.
+  signerPub?: string;
 }
 
 /// Shared order placement: a fresh per-order wallet, funded through the
@@ -220,7 +241,7 @@ export interface PlaceOrderOpts {
 /// the secret for an order that DID would make the drop unprovable and the
 /// escrow unrecoverable.
 export async function placeOrder(opts: PlaceOrderOpts) {
-  const { venueId, orderValueWei, tipWei, maxFareWei, lat, lon, receipt, token, act, say } = opts;
+  const { venueId, orderValueWei, tipWei, maxFareWei, lat, lon, receipt, token, ticket, act, say, onTicket } = opts;
   const salt = randomSalt();
   const commit = computeDropCommit(lat, lon, salt);
   localStorage.setItem(dropStoreKey(commit), JSON.stringify({ lat, lon, salt }));
@@ -233,8 +254,41 @@ export async function placeOrder(opts: PlaceOrderOpts) {
     // Announce the order wallet's public key on the order thread as soon as the
     // order exists: sealed bids are sealed TO the customer, and a driver has no
     // other way to obtain the key of a wallet that has never spoken (phase 4).
+    // Announce with our profile commitment attached (regmeta.ts): a burner has
+    // no registry slot, so the signed `hello` is where the customer's commitment
+    // lives, and it must exist before the driver is assigned — otherwise the
+    // reveal at assignment has nothing to be checked against.
+    const self = loadSelfProfile<CustomerProfile>("customer");
     const announce = (orderId: bigint) =>
-      new OrderThread(orderId, w.privateKey, w.address, ZeroAddress).open().catch(() => {});
+      new OrderThread(orderId, w.privateKey, w.address, ZeroAddress)
+        .open(self ? commitProfile("customer", self) : undefined)
+        .catch(() => {});
+
+    // The venue's copy of the order. Sealed to the venue's hot signer, so the
+    // relay carrying it learns nothing, and bound to `orderValue`, so the venue
+    // can tell a real ticket from a forged one. Never fatal: the escrow and the
+    // delivery do not depend on it, and an order that arrives without a ticket
+    // is a phone call, not a lost payment.
+    const deliverTicket = async (orderId: bigint) => {
+      if (!ticket) return;
+      try {
+        onTicket?.(
+          await sendTicket(
+            {
+              orderId: orderId.toString(),
+              venueId: venueId.toString(),
+              venueName: ticket.venueName,
+              lines: ticket.lines,
+              note: ticket.note,
+              placedAt: Date.now(),
+            },
+            ticket.signerPub
+          )
+        );
+      } catch {
+        onTicket?.(false);
+      }
+    };
 
     // KS-ONLY funding: the burner is funded solely through the Kusama Shield
     // pool, so no non-shielded on-chain edge re-links it to the customer.
@@ -279,7 +333,10 @@ export async function placeOrder(opts: PlaceOrderOpts) {
     const created = rec?.logs
       ?.map((l: any) => { try { return contracts(w).orders.interface.parseLog(l); } catch { return null; } })
       ?.find((e: any) => e?.name === "OrderCreated");
-    if (created) await announce(created.args.orderId);
+    if (created) {
+      await announce(created.args.orderId);
+      await deliverTicket(created.args.orderId);
+    }
     return tx;
   });
 }

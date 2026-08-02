@@ -181,11 +181,30 @@ Ordered roughly by leverage. Check off as landed.
 ### Group B — Off-chain product services (net-new)
 *Menu/cart, tracking, comms — the DoorDash "app" layer over the settlement rail.*
 - [x] **Catalog / menu / cart** behind venue `metadataURI` (IPFS); `orderValue`
-      from a real cart — `web/src/menu.ts` (model + publish/fetch, graceful local
-      fallback), `web/functions/api/menu.ts` (server-side IPFS proxy key),
-      `MenuEditor` (venue publishes), `MenuCart` + cart-driven `CreateOrder`
-      (customer). Needs the DATUM IPFS node stood up + `IPFS_ADD_URL`/`IPFS_API_KEY`
-      set; untested in-browser.
+      from a real cart — `web/src/menu.ts` (v2 model: item images, modifier
+      groups, categories, structured weekly hours, logo/banner, cuisine; v1 menus
+      still read), `web/functions/api/menu.ts` + `api/asset.ts` (server-side IPFS
+      proxy key; artwork is separate CIDs because the menu JSON is capped at
+      64 KB), `MenuEditor` (venue publishes), `MenuCart`/`VenuePicker`/
+      `VenueHeader` + cart-driven `CreateOrder` (customer, with search and
+      cuisine filter). Needs `IPFS_ADD_URL`/`IPFS_API_KEY` set; untested
+      in-browser.
+- [x] **The order ticket** — `web/src/ticket.ts`. The cart used to be priced
+      client-side and then thrown away into a device-local receipt, so the venue
+      received a `venueId` and an escrowed amount and **had no way to know what to
+      cook**. The line items are now sealed to the venue's hot signer with
+      `sealAnon` (the relay learns nothing, the envelope names no sender) and
+      bound to the escrow: the venue re-adds the lines and compares against
+      `orders(id).orderValue`, so a forged ticket needs no on-chain commitment to
+      reject. `orderValue = 0` reports `unpriced` rather than a false match,
+      because a POS-keeping venue escrows only the fare.
+- [x] **Venue tablet mode** — `web/src/kitchen.ts` + `KitchenCard`. The venue view
+      only ever showed `status === 2` (a driver is here, sign the release); a
+      kitchen needs the moment before that. The board covers everything not yet
+      handed over, FIFO by creation, with a device-local prep state
+      (new → cooking → ready), an overdue badge, and a synthesized chime for a
+      tablet across the room. Prep state stays off-chain deliberately: it is the
+      kitchen's workflow, not a protocol fact.
 - 🟡 **Live order tracking**: status stepper + live ETA countdown done (`OrderTracker`,
       derived from on-chain status + deadlines). Remaining: driver-location relay +
       map trace (needs the off-chain location channel — see NETWORK-ARCHITECTURE.md)
@@ -275,7 +294,7 @@ one wallet session + toast in `OpsApp.tsx`; only D5 (offline ceremony) remains.*
 | A5 | Vault: withdrawTo + dust claim | A | Wallet chip | ✅ done |
 | A6 | Reputation in bid cards | A | Customer view | ✅ done |
 | A7 | Dispute evidence + status view | A | Customer/Driver | ✅ done |
-| B1 | Catalog / menu / cart | B | New service + all views | ✅ done |
+| B1 | Catalog / menu / cart | B | New service + all views | ✅ done — full catalog (images, categories, modifiers, hours, search) **+ the order ticket that actually reaches the venue** (`web/src/ticket.ts`); needs IPFS configured |
 | B2 | Live tracking + ETA | B | Customer/Driver | ✅ done (E2E driver location + TrackMap) |
 | B3 | Order-scoped messaging | B | Customer/Driver | ✅ done (channel + chat) |
 | B4 | Notifications | B | Cross-cutting + venue-node | ✅ done (P1 local + P2 region push) |

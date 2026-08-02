@@ -139,4 +139,58 @@ describe("relay channel (B3)", () => {
     const t = new OrderThread(1n, a.privateKey, a.address, b.address);
     await expect(t.send("hi")).rejects.toThrow(/waiting/);
   });
+
+  // A customer has no registry slot to publish a profile commitment in, so it
+  // rides the `hello`. The pubkey there is self-authenticating; the commitment
+  // is not, so it is signed — otherwise a relay could swap it and make every
+  // honest profile reveal fail verification.
+  describe("profile commitments on the hello", () => {
+    const COMMIT = "fare-meta:v1:" + "ab".repeat(32);
+
+    it("adopts a commitment whose signature recovers to the peer", async () => {
+      const cust = Wallet.createRandom();
+      const drv = Wallet.createRandom();
+      const custThread = new OrderThread(3n, cust.privateKey, cust.address, drv.address);
+      const drvThread = new OrderThread(3n, drv.privateKey, drv.address, cust.address);
+
+      await custThread.open(COMMIT);
+      await drvThread.poll();
+      expect(drvThread.peerCommitment).toBe(COMMIT);
+    });
+
+    it("is null when the peer announced no commitment — not a false 'none'", async () => {
+      const cust = Wallet.createRandom();
+      const drv = Wallet.createRandom();
+      await new OrderThread(4n, cust.privateKey, cust.address, drv.address).open();
+      const drvThread = new OrderThread(4n, drv.privateKey, drv.address, cust.address);
+      await drvThread.poll();
+      expect(drvThread.peerCommitment).toBeNull();
+    });
+
+    it("ignores a commitment a relay rewrote in place", async () => {
+      const cust = Wallet.createRandom();
+      const drv = Wallet.createRandom();
+      await new OrderThread(5n, cust.privateKey, cust.address, drv.address).open(COMMIT);
+      // The relay tampers: same envelope, different commitment, original signature.
+      const thread = store.get(topicOf(5n))!;
+      thread[0].commit = "fare-meta:v1:" + "cd".repeat(32);
+
+      const drvThread = new OrderThread(5n, drv.privateKey, drv.address, cust.address);
+      await drvThread.poll();
+      expect(drvThread.peerCommitment).toBeNull();
+    });
+
+    it("ignores a commitment signed by someone other than the peer", async () => {
+      const cust = Wallet.createRandom();
+      const drv = Wallet.createRandom();
+      const impostor = Wallet.createRandom();
+      // A stranger posts a well-formed hello claiming to be the customer.
+      await new OrderThread(6n, impostor.privateKey, cust.address, drv.address).open(COMMIT);
+
+      const drvThread = new OrderThread(6n, drv.privateKey, drv.address, cust.address);
+      await drvThread.poll();
+      expect(drvThread.peerCommitment).toBeNull();
+      expect(drvThread.ready).toBe(false); // nor is the impostor's key adopted
+    });
+  });
 });
