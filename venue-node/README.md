@@ -68,7 +68,7 @@ by doing the two things that are safe to relay:
 | `POST /submit { method, args }` | **Relay a settlement call.** Only `confirmPickup` / `confirmDropoffZK` are allowlisted — they carry their own signatures / ZK proof and don't check `msg.sender`, so the relay submits them paying gas → those steps are fully gasless. |
 | `POST /forward { request }` | **Relay a gasless user action (F8).** Submits a user-signed EIP-2771 `ForwardRequest` through `FareForwarder`. Guarded: `value` must be 0 and `to` must be `FareOrders`/`FareRatings`, so the relay pays gas but never fronts a customer's escrow. |
 | `POST /withdraw { account, recipient, deadline, signature }` | **Relay a gasless withdrawal (F8).** Submits a driver-signed `FareVault.withdrawFor`; the relay is `msg.sender`, so a configured `withdrawFeeBps` reimburses its gas. Lets a driver pull earnings with zero gas held. |
-| `POST /shield-withdraw { pA, pB, pC, pubSignals, recipient, burner? }` | **Fund a fresh burner through Kusama Shield (C4).** Submits a client-built `proxy_withdraw` on the KS pool. See the shielded-funding section below. |
+| `POST /shield-withdraw { pA, pB, pC, pubSignals, recipient, burner? }` | **Fund a fresh burner through Kusama Shield (C4).** Submits a client-built `withdraw` on the KS pool. See the shielded-funding section below. |
 | `GET /health` | Relay address + gas balance + wired settlement + forwarder + vault + shield pool/mode. |
 
 ### Relay discovery (DATUM `relayUrl` pattern)
@@ -135,11 +135,18 @@ pool's 16-entry window before mining) it returns **HTTP 409 `{retry:true}`**; th
 client rebuilds the proof against a fresh root and resubmits (the relay can't fix
 a root baked into a proof). Config: `SHIELD_POOL`, `SHIELD_FEE_PAS`.
 
-> **Why a fee at all?** The KS `proxy_withdraw` has no on-chain relayer fee and
-> the Groth16 withdrawal verify costs ~0.77 PAS of gas on Paseo — so an
+> **Why a fee at all?** The KS withdrawal has no on-chain relayer fee, so an
 > unreimbursed relay won't sponsor shielded funding at scale. Fee mode lets the
-> relay recoup that from the withdrawn amount (the customer still ultimately pays;
-> the relay breaks even). See the C4 e2e report's recommendation R2.
+> relay recoup its gas from the withdrawn amount (the customer still ultimately
+> pays; the relay breaks even).
+>
+> **This is much less pressing than it was.** The relay used to submit
+> `proxy_withdraw`, which routes the payout through a freshly deployed forwarder
+> and cost ~0.77 PAS on Paseo. It now submits `withdraw` — identical arguments,
+> **~0.031 PAS** — because that forwarder was 96% of the gas and hid nothing
+> (both calls emit the same `Withdrawal(…, recipient, …)` from the pool). At
+> 0.031 PAS sponsor mode is affordable, and `SHIELD_FEE_PAS=0` is a reasonable
+> default rather than a subsidy you are tolerating.
 
 ### Shielded payouts (ZK notes)
 

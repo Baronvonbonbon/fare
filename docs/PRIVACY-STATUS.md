@@ -93,7 +93,7 @@ remain withdrawable — the freeze-and-drain pattern.
 vault           0x1ebE61af02d4b5E6083089f220e5D95766643a13   (old 0x51bD2e55… draining)
 orders          0x0e638033a89Fa4367acEbb57F62f59776d1c6437
 shieldVerifier  0x97C3DA8aD06E99B195D4B2B86dfa18d23387fDcD
-shieldPool      0x3068490C79708D0725E3D4Aa9C35Da708f09071e   (Kusama Shield)
+shieldPool      0x7d5a496bD61b631025A828d9049f6A68e007e0dC   (Kusama Shield)
 poseidon        0x1d165f6fE5A30422E0E2140e91C8A9B800380637   (Paseo precompile)
 buckets 1 / 5 / 25 PAS · minBatch 8 · dwell 300 s · no keeper authorized
 ```
