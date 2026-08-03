@@ -97,6 +97,14 @@ discipline.
   (DATUM CampaignAllowlist shape)
 - Kusama → Polkadot Hub mainnet plan, EIP-170 revalidation, deploy
   runbooks + dress rehearsal (copy DATUM's MODULAR-DEPLOY-RUNBOOK habit)
+- **Ship as a Polkadot Product** — `fare.dot` via DotNS, bundle on Bulletin
+  via `pad`, listed in Browse, contracts registered through CDM, storage and
+  signalling on Bulletin + Statement Store, personhood as the driver/venue
+  Sybil gate. Retires Kubo, Caddy, `agent.mjs`, `scorer.mjs`, and the three
+  Cloudflare Functions; keeps the gasless relay, Kusama Shield, and the ZK
+  stack (no platform equivalent). Full service-by-service map, the sr25519
+  vs. `ecrecover` conflict, and the phased migration:
+  [POLKADOT-PLATFORM-PLAN.md](POLKADOT-PLATFORM-PLAN.md)
 
 ## What makes this "formal"
 

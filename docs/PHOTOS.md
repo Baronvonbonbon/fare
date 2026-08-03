@@ -103,7 +103,7 @@ the *content* unrecoverable regardless.
 | Authorized submitter → transient storage | ✅ done (`/api/photo` KV, content-addressed + ~2-wk TTL; venue-node `/photo` P2) |
 | Key wrap over the channel + attach the storage id | ✅ done (`OrderThread.sendPhoto` → `kind:"photo"`; customer `TrackPanel` decrypts + views) |
 | Expiry — don't-renew + key-shred | 🟡 TTL-driven (KV/venue TTL ~2 wk = "don't renew"); crypto-shred is inherent (fresh key, never persisted server-side). A proactive local key-purge after terminal + grace is the remaining nicety. |
-| Bulletin Chain `store` submitter (vs the KV/IPFS demo store) | ☐ (swap `/api/photo` for the Bulletin path when it's live — §2) |
+| Bulletin Chain `store` submitter (vs the KV/IPFS demo store) | ☐ (swap `/api/photo` for the Bulletin path when it's live — §2; scheduled as Phase 2 of [POLKADOT-PLATFORM-PLAN.md](POLKADOT-PLATFORM-PLAN.md), which also covers the renewal-keeper role and the authorization dependency) |
 
 **Shipped.** Driver captures at dropoff → `compressImage` (downscale + EXIF-strip)
 → `newPhotoKey` + `sealPhoto` → `storeSealed` (content-addressed `/api/photo`,
