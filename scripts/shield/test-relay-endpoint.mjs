@@ -14,7 +14,7 @@ import { WITHDRAW_WASM, loadWithdrawZkey } from "./zkey.mjs";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.join(__dirname, "..", "..");
 const RPC = process.env.TESTNET_RPC ?? "https://eth-rpc-testnet.polkadot.io/";
-const POOL = process.env.SHIELD_POOL ?? "0x3068490C79708D0725E3D4Aa9C35Da708f09071e";
+const POOL = process.env.SHIELD_POOL ?? "0x7d5a496bD61b631025A828d9049f6A68e007e0dC";
 const RELAY = process.env.RELAY_URL ?? "http://localhost:8788";
 const BN254_R = 21888242871839275222246405745257275088548364400416034343698204186575808495617n;
 const AMOUNT = ethers.parseEther("0.5");

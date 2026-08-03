@@ -23,6 +23,8 @@ Ordered by what a reader should act on, not by discovery order.
 | 24 | `regionsCovering` returned 3.6M cells near a pole, hanging the tab | **Medium** | ✅ Fixed |
 | 25 | New tests passed but broke `npm run build`, which CI gates on | Medium (process) | ✅ Fixed |
 | 26 | Every order ticket was posted into the same relay slot, so any stranger could erase one | **Medium** | ✅ Fixed |
+| 27 | The v7 shielded pool accepts deposits and can never pay them out | **Critical** (funds lost) | 🟡 Client moved back; on-chain vault pointer still to flip |
+| 28 | The stablecoin e2e prints ✅ without sending a transaction | **Medium** (process) | ☐ Open |
 | 2 | `/fund` can double-fund inside a 250 ms window | Low → **Medium** once the relay went public | ✅ Fixed |
 | 3 | Oversized request body returns 500, not 413 | Cosmetic | ✅ Fixed |
 | 4 | CI ran nothing but Slither, path-filtered to `contracts/**` | **High** (process) | ✅ Fixed |
@@ -680,6 +682,71 @@ have made the broken code pass and the fix look like a no-op.
 Untouched and still true: an attacker can flood a thread to the `THREAD_MAX`
 200-envelope cap and push a real ticket out. That is a property of the channel,
 not of tickets, and it costs the attacker 200 posts instead of one.
+
+---
+
+## 27. The v7 shielded pool cannot be withdrawn from — **funds lost**
+
+Full write-up in [KUSAMA-SHIELD-FINDINGS.md](KUSAMA-SHIELD-FINDINGS.md) Issue 7.
+Recorded here because of *how* it got past us.
+
+`isKnownRoot` on the canonical v7 pool `0x3068490C…` panics with
+`Panic(0x32)` for every non-zero root. Both `withdraw` and `proxy_withdraw`
+require it after verifying the proof, so a correct proof against a correct root
+still reverts, permanently. The pool takes deposits and returns nothing.
+
+PR #22 moved FARE onto it, and the vault pointer with it. The verification in
+that PR was: circuit `.wasm`/`.zkey` hashes match the SDK's, the selectors we
+call are present, the Poseidon precompile matches. Every one of those is true.
+None of them executes a withdrawal, and the two pools' runtime bytecode differs
+(14,335 vs 14,235 bytes), so "the interface is identical" was a claim about
+selectors that got read as a claim about behaviour.
+
+**It cost a real payout.** Running the native e2e, phase 8 shielded a driver's
+earnings and `FareVault.depositShieldNoteZK` routed them to the pool the vault
+pointed at — the broken one. Its `escrow(address(0))` went 115.908 → 116.908
+PAS. That 1 PAS is unrecoverable, and a real driver would have lost it.
+
+**The cheap check that would have caught it** costs nothing — no funds, no gas,
+no proof:
+
+```js
+pool.isKnownRoot(1n)   // -> Panic(0x32) on a pool you must not use
+```
+
+A `proxy_withdraw.staticCall` with a real proof is the stronger version and also
+free. `scripts/shield/pool-withdraw-probe.mjs` is that probe, kept as a gate for
+any future pool move: it deposits small, **persists the note before anything can
+fail**, and static-calls before it ever sends.
+
+**The lesson is about what "verified" meant.** Hash equality and selector
+presence are static facts about artifacts. "Money can leave" is a behaviour, and
+only executing it tests it. When a migration's whole risk is *can we still get
+our money out*, that is the one thing the verification must do.
+
+---
+
+## 28. The stablecoin e2e reports success without running — **open**
+
+`scripts/e2e-stablecoin.mjs` guards every phase on a persisted `st.*` flag
+(`if (!st.accepted) { … }`) and then prints progress as bare `console.log`s with
+hardcoded labels:
+
+```js
+console.log(`   status ${await orders.statusOf(orderId)} (2=Assigned)`);
+```
+
+Re-run against an order that already completed, it skips every phase, prints
+`status 4 (2=Assigned)`, `status 4 (3=PickedUp)`, `status 4 (4=Delivered)` — the
+actual status beside three different expected labels, matching none of them —
+and finishes `✅ STABLECOIN e2e complete`. It wrote no ledger entry and sent no
+transaction. I ran it today and it "passed" in seconds while doing nothing; the
+real evidence for the USDC path is still the 2026-07-28 ledger.
+
+Same family as findings 8–11 and the `record()` bug that printed `✓` for a
+reverted receipt: **the run's own output is not evidence unless something
+asserts.** Fix is to assert the status rather than print it, and to make resume
+explicit (`RESUME=1`) so a bare run is always a real run.
 
 ---
 

@@ -1,10 +1,20 @@
 # Kusama Shield — integration findings & questions
 
-> **Superseded in part (2026-08-01).** FARE has migrated to the canonical v7 pool
-> `0x3068490C79708D0725E3D4Aa9C35Da708f09071e`; the addresses below record what was
-> originally tested. **Issue 2 is resolved** — upstream standardised on the other address.
-> **Issue 4 (16-entry root window) is not fixed** and the workaround stands. See the
-> migration note in [SHIELDED-POOL-INTEGRATION.md](SHIELDED-POOL-INTEGRATION.md).
+> ## ⛔ 2026-08-03 — THE v7 POOL `0x3068490C…` CANNOT BE WITHDRAWN FROM. DO NOT DEPOSIT.
+>
+> `isKnownRoot(uint256)` reverts with **`Panic(0x32)` (array out-of-bounds)** for
+> **every non-zero root**, including a root sitting in `recentRoots[0]`. Both
+> `withdraw` and `proxy_withdraw` call it at step 2, so **every withdrawal
+> reverts and every deposit is permanently stuck.** Measured, not inferred — see
+> [Issue 7](#issue-7--the-v7-pools-isknownroot-panics-making-the-pool-a-one-way-door).
+>
+> **FARE has moved back to `0x7d5a496bD61b631025A828d9049f6A68e007e0dC`**, where a
+> full deposit → prove → `proxy_withdraw` → fresh recipient completes
+> (tx `0x348f97c9dee1cd014ae0f103cdd247a83b1d395f09e272cd1c67eca73658df7a`,
+> status 1, recipient credited 0.5 PAS). Issue 2 therefore reopens: the address
+> upstream standardised on is not the one that works.
+>
+> **Issue 4 (16-entry root window) is still not fixed** and its workaround stands.
 
 *From an external integrator (the FARE team). We integrated private wallet
 funding against your Paseo Asset Hub pool and got it working end-to-end. Two
@@ -158,12 +168,106 @@ time-decorrelated withdrawal reliably lands under load. Client-side we can reduc
 the race (relayer submits with minimal latency; retry on `"Unknown root"`), but
 we can't close it if inserts outpace our rebuild-and-submit cycle.
 
+## Issue 7 — the v7 pool's `isKnownRoot` panics, making the pool a one-way door
+
+**Severity: funds-lost. Found 2026-08-03.**
+
+`0x3068490C79708D0725E3D4Aa9C35Da708f09071e` accepts deposits and cannot pay any
+of them out.
+
+```
+isKnownRoot(0)                    -> false          (the _root == 0 early return)
+isKnownRoot(1)                    -> Panic(0x32)    ARRAY_RANGE_ERROR
+isKnownRoot(recentRoots[0])       -> Panic(0x32)    ← a root that IS in the buffer
+isKnownRoot(currentRoot())        -> Panic(0x32)
+```
+
+The same calls on `0x7d5a496b…` return correctly. Both report
+`ROOT_HISTORY_SIZE() = 16`, both expose `recentRoots(i)` readable for `i = 0..15`
+and reverting at 16, and both have `recentRootsIndex == treeSize`. So the storage
+is shaped as the source says; it is the **loop inside `isKnownRoot` that walks
+past the 16-slot array**. The published source bounds it by `ROOT_HISTORY_SIZE`,
+so the deployed build does not match it — the runtime bytecode differs (14,335 vs
+14,235 bytes), which also falsifies "the interface is identical" as a statement
+about behaviour.
+
+### It is the build, not the tree size
+
+| pool | treeSize | bytes | `isKnownRoot(1)` |
+|---|---|---|---|
+| `0x7d5a496b…` (works) | **335** | 14,235 | `false` ✓ |
+| v7 `0x3068490C…` | 97 | 14,335 | **Panic(0x32)** |
+| v5 `0x6a32147F…` | 17 | 15,156 | *no such function* (reverts, empty data) |
+
+The working pool holds **335 leaves — twenty times the window — and answers
+correctly**, so this is not a threshold that trips once a tree outgrows
+`ROOT_HISTORY_SIZE`. Two builds of the same function behave differently; that is
+the whole finding. (v5 is not evidence either way: `isKnownRoot` is a v7 feature
+— it replaced v6's `require(root == this.root())` — and v5 simply does not have
+it. An earlier revision of this document read v5's empty-data revert as the same
+panic and inferred a leaf-count threshold from it. That was wrong, and the
+335-leaf pool disproves it.)
+
+Which leaves the uncomfortable version: we cannot tell you from outside whether
+`0x3068490C…` ever worked. If it did, something about its state made it stop; if
+it did not, it was canonical from day one without a withdrawal ever being run
+against it. Either way the check that distinguishes them is the same one nobody
+ran.
+
+**A likely cause worth checking on your side:** the README directs deployment
+through Remix pinned to `soljson-v0.8.28+commit.7893614a-**revive-0.1.0-dev.12**`.
+A pre-release revive/PolkaVM backend miscompiling a bounded `for` over a
+fixed-size storage array would produce exactly this: correct source, correct
+storage layout, wrong loop bound in the emitted code. The pool that works was
+presumably built with a different compiler version. If so, the fix is a rebuild
+rather than a source change — and every contract deployed with that toolchain
+deserves the same look, not just this one.
+
+`contracts/polkadot_assethub/PolkadotShieldedPool.sol` carries the **same
+correct source** (`i < ROOT_HISTORY_SIZE`), so it will inherit the same fate if
+built the same way. We could find no deployed instance of it to probe.
+
+Because `proxy_withdraw` and `withdraw` both `require(isKnownRoot(root))` at
+step 2 — after the proof verifies — a correct proof against a correct root still
+reverts. `recentRootsIndex` only grows, so this cannot heal.
+
+**What it cost us.** `escrow(address(0))` on that pool is **116.9 PAS**, none of
+it recoverable, and not all of it ours. We contributed 6.5 PAS across a failed
+e2e (5), a diagnostic (0.5) and — the one that matters — **a driver's shielded
+earnings (1 PAS)**, which `FareVault.depositShieldNoteZK` routed there because
+the vault's `shieldPool` pointer had been flipped to it. A real driver shielding
+a real payout would have lost it.
+
+**How we missed it.** The migration was verified statically: circuit `.wasm`/
+`.zkey` hashes matched, the selectors we call were present, the Poseidon
+precompile matched. All true, all insufficient — nothing executed a withdrawal.
+A single `proxy_withdraw.staticCall` against the new pool would have cost
+nothing and caught it. That check now gates any future pool move.
+
+**Reproduce** (no funds, no gas — a view call is enough):
+
+```js
+new ethers.Contract("0x3068490C79708D0725E3D4Aa9C35Da708f09071e",
+  ["function isKnownRoot(uint256) view returns (bool)"], provider).isKnownRoot(1n)
+// -> execution reverted: Panic due to ARRAY_RANGE_ERROR(50)
+```
+
+**Recommendation:** withdraw-path coverage before a deployment is advertised as
+canonical, and a redeploy of v7 from the published source. We are happy to
+supply the probe. Until then, Issue 2 is **reopened** — the canonical address and
+the working address are different, and the canonical one loses money.
+
 ## Questions for the team
 
 1. Is there a genesis leaf at index 0? If so, can you publish its value and/or
    emit an event for it in future deployments?
 2. Which Paseo address is canonical, and can the docs be corrected to match the
-   shipped circuit artifacts?
+   shipped circuit artifacts? **(Reopened by Issue 7 — the address you
+   standardised on cannot pay out.)**
+5. Was `0x3068490C…` built from `FixedIlopPhase2Paseo_v7.sol` as published, and
+   with which `resolc`/`solc`? Its `isKnownRoot` does not behave like that
+   source, and we would like to know whether this is a compiler regression or a
+   source drift, since it decides whether a plain redeploy is enough.
 3. Is a reconstruction indexer / SDK planned, or would you accept a docs PR
    describing the `Deposit`+`NewCommitment` reconstruction?
 4. Would you consider a larger `ROOT_HISTORY_SIZE` to support relayed/delayed

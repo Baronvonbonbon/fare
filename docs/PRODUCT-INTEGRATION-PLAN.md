@@ -294,7 +294,8 @@ Ordered roughly by leverage. Check off as landed.
   can't be forwarded — which is also why the NATIVE accept still reads
   `msg.sender` while `acceptSealedBidERC20` reads `_msgSender()`.
   **The fee model is F6-flat**, not the bps rebate this doc once described:
-  `relayServiceFee = 1.25 PAS` escrowed at creation and paid to the settling
+  `relayServiceFee = 0.25 PAS` (retuned from 1.25 once `withdraw` replaced
+  `proxy_withdraw`) escrowed at creation and paid to the settling
   relay, `relayRebateBps = 0`. The rebate needed a ~183 PAS fare to clear the
   relay's cost, so the profit guard declined every realistic order.
 - [x] **Fiat-denominated pricing** (C2) — off-chain display layer: `web/src/pricing.ts`
@@ -420,7 +421,7 @@ Full design in [NETWORK-ARCHITECTURE.md](NETWORK-ARCHITECTURE.md).*
 - [x] F3 Replication agent — chain-indexed region pinning + manifest publish
 - [x] F4 Client gateway/RPC fallback pool from venue manifests (light-client-first) — gateway pool (`web/src/pool.ts`) + RPC-provider pool (`web/src/rpcpool.ts`)
 - [x] F5 Data-availability scoring (challenge-response + client reports) — `venue-node/scorer.mjs` + leaderboard
-- [~] F6 On-chain rewards — Tier 1 shipped and **since replaced in kind**: the trustless relay reward is now the **flat `relayServiceFee`** (escrowed at creation, paid in full to the account that submits the dropoff, self-identified via `msg.sender` — no oracle), not the original `relayRebateBps` carve-out, which is set to 0. Proven end-to-end on Paseo: the relay spent ~0.02 PAS of gas and earned 1.25 PAS. Both branches are verified — when no relay settles (`relayer == 0` or `== treasury`) the fee is **refunded to the customer** rather than paid out, so don't mistake that refund for a misdirected fee. Tier 2 (DA-score reward via `FareDataAvailability` + attester) deferred — no oracles for now
+- [~] F6 On-chain rewards — Tier 1 shipped and **since replaced in kind**: the trustless relay reward is now the **flat `relayServiceFee`** (escrowed at creation, paid in full to the account that submits the dropoff, self-identified via `msg.sender` — no oracle), not the original `relayRebateBps` carve-out, which is set to 0. Proven end-to-end on Paseo, and re-proven after the 2026-08-03 retune: the relay spent ~0.02 PAS of gas and earned **0.25 PAS** (was 1.25, cut once `withdraw` replaced `proxy_withdraw` and the cost it was sized against fell 25×). Both branches are verified — when no relay settles (`relayer == 0` or `== treasury`) the fee is **refunded to the customer** rather than paid out, so don't mistake that refund for a misdirected fee. Tier 2 (DA-score reward via `FareDataAvailability` + attester) deferred — no oracles for now
 - [x] F7 Hosted super-node mode (for non-technical venues) — one appliance serves many venues via `HOME_COORDS` (union of regions)
 - [x] F8 Venue-operated gasless relay (region meta-tx) — relay + EIP-2771 `FareForwarder`; non-value user actions gasless via `_msgSender()`
 

@@ -25,6 +25,17 @@ export const KS_POOL_ABI = [
   // large". The Deposit event then reports the ERC-20 precompile ADDRESS, so the
   // two directions use different encodings; do not assume they match.
   "function depositAsset(uint256 asset, uint256 value, bytes32 commitment)",
+  // The client only PROVES; a relay submits (the recipient must never sign, or
+  // the burner is linked to itself). Both `withdraw` and `proxy_withdraw` take
+  // these exact arguments and take a `recipient`, so both are relayable and the
+  // proof is identical — the choice is purely the submitter's.
+  //
+  // We endorse `withdraw`. proxy_withdraw routes the payout through a freshly
+  // deployed forwarder, which costs 741,938 gas on Paseo — 96% of the whole
+  // withdrawal — and conceals nothing: both paths end with the same
+  // `emit Withdrawal(asset, value, recipient, …)` from the pool, and the
+  // forwarder logs the recipient a second time on top.
+  "function withdraw(uint[2] pA, uint[2][2] pB, uint[2] pC, uint[8] pubSignals, address recipient)",
   "function proxy_withdraw(uint[2] pA, uint[2][2] pB, uint[2] pC, uint[8] pubSignals, address recipient)",
   "function currentRoot() view returns (uint256)",
   "function treeSize() view returns (uint256)",

@@ -16,12 +16,24 @@ Legend: ☐ not started · 🟡 partial (verifiable core built, rest deferred) �
 > and gasless-withdraw paths are active.
 >
 > **The relay fee model is now F6-flat, not the bps rebate.** On-chain:
-> `relayServiceFee = 1.25 PAS` flat, `relayRebateBps = 0`, `feeBps = 250`. The
+> `relayServiceFee = 0.25 PAS` flat (**retuned from 1.25 on 2026-08-03** — see
+> below), `relayRebateBps = 0`, `feeBps = 250`. The
 > bps rebate needed a ~183 PAS fare to clear the relay's cost, so the profit
 > guard declined every realistic order; a flat fee for a fixed cost replaced it.
-> **Verified end-to-end 2026-07-28** by `scripts/privacy/relay-settle-check.mjs`
-> — one real delivery, `confirmDropoffZK` relayed (200, not 402), relay paid
-> 0.0201 PAS of gas and earned the 1.25 PAS fee.
+> **Re-verified at the new fee, 2026-08-03**, by
+> `scripts/privacy/relay-settle-check.mjs`: order #11, one real delivery,
+> `confirmDropoffZK` relayed **200, not 402** — the guard still approves. Relay
+> paid 0.0200 PAS of dropoff gas and earned the 0.25 PAS fee.
+>
+> **Why it was retuned.** 1.25 PAS was sized when a shielded withdrawal cost
+> 0.773 PAS; switching that call from `proxy_withdraw` to `withdraw` cut it to
+> 0.031, leaving the fee ~17× the cost it existed to cover — and the customer
+> escrows it on every order, so on a 1 PAS order the relay fee was 125% of the
+> food. At 0.25 the relay still clears a pickup+dropoff (~0.033 PAS) by **7.5×**
+> against a 1.25× requirement, and a busy 8-bid order by ~1.8×. Retune with
+> `scripts/retune-service-fee.mjs` (`DRY_RUN=1` to preview).
+> **In-flight orders are unaffected** — each order pays out the fee it snapshotted
+> at creation (`Order.serviceFee`).
 
 ---
 

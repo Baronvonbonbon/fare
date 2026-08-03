@@ -49,7 +49,7 @@ const nameKey = (s: string) => ethers.encodeBytes32String(s);
 // Both are external, already-deployed contracts. Read them from the address book
 // first: on a local chain they are mocks, and hardcoding Paseo's addresses makes
 // the migration revert against an account with no code. Env overrides the book.
-const PASEO_SHIELD_POOL = "0x3068490C79708D0725E3D4Aa9C35Da708f09071e";
+const PASEO_SHIELD_POOL = "0x7d5a496bD61b631025A828d9049f6A68e007e0dC";
 const PASEO_POSEIDON = "0x1d165f6fE5A30422E0E2140e91C8A9B800380637";
 // Fixed denominations. Without them the amounts re-identify entries and the
 // pool's crowd is decorative — this survives the keeper path's removal because

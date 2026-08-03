@@ -16,7 +16,7 @@ import { ethers } from "ethers";
 import { poseidon2 } from "poseidon-lite";
 
 const RPC = process.env.TESTNET_RPC ?? "https://eth-rpc-testnet.polkadot.io/";
-const POOL = process.env.SHIELD_POOL ?? "0x3068490C79708D0725E3D4Aa9C35Da708f09071e";
+const POOL = process.env.SHIELD_POOL ?? "0x7d5a496bD61b631025A828d9049f6A68e007e0dC";
 const p = new ethers.JsonRpcProvider(RPC, undefined, { batchMaxCount: 1 });
 const POOL_C = new ethers.Contract(POOL, [
   "function currentRoot() view returns (uint256)",

@@ -222,7 +222,20 @@ Artifacts: `web/public/shield/withdraw_v7.{wasm,zkey.part*}`. Deps: `ethers`,
 
 ---
 
-## Migration to the canonical v7 pool (2026-08-01)
+## Migration to the canonical v7 pool (2026-08-01) — ⛔ REVERSED 2026-08-03
+
+> **This migration was wrong and has been undone.** The canonical pool
+> `0x3068490C…` cannot be withdrawn from: `isKnownRoot` panics for every
+> non-zero root once the tree passes 16 leaves, so every `withdraw` and
+> `proxy_withdraw` reverts *after* the proof verifies. It cost a driver's 1 PAS
+> shielded payout before we caught it. FARE is back on `0x7d5a496b…`. Full
+> analysis: [KUSAMA-SHIELD-FINDINGS.md](KUSAMA-SHIELD-FINDINGS.md) Issue 7.
+>
+> **The verification below is left verbatim as the record of what went wrong.**
+> Every claim in it is true and none of it was sufficient: hash equality and
+> selector presence are facts about *artifacts*, and "money can leave" is a
+> *behaviour*. The migration's entire risk was the behaviour, and nothing in
+> this list executed it. One free `staticCall` would have caught it.
 
 The [Kusama Shield release](https://forum.polkadot.network/t/kusama-shield-new-release/18301)
 standardised Paseo on `0x3068490C79708D0725E3D4Aa9C35Da708f09071e`. The pool FARE had been
@@ -266,6 +279,71 @@ pointer only governs where new ones go.
 **Still not fixed upstream:** the 16-entry known-roots window (Issue 4). The relay's
 retry-on-`"Unknown root"` workaround stays.
 
+
+## The forwarder hop costs 96% of a withdrawal and hides nothing (2026-08-03)
+
+Measured on the working pool, same note size, same fresh recipient, both
+succeeding and delivering 0.5 PAS:
+
+| call | gas | fee @ 1000 gwei | tx |
+|---|---|---|---|
+| `withdraw` | **31,141** | **0.031 PAS** | `0x791a4473…` |
+| `proxy_withdraw` | **773,079** | **0.773 PAS** | `0x05b612dd…` |
+| difference | 741,938 | 0.742 PAS | **24.8×** |
+
+The forwarder is **96% of the cost of a shielded withdrawal**. It is 24× the
+entire rest of the operation — proof verification, nullifier write, escrow
+update, transfer and change insert combined — because `new SimpleTokenForwarder`
+is a contract deployment, and deploying on PolkaVM is expensive. For scale, a
+`depositNative` is 17,900 gas, so the forwarder costs about **41 deposits**.
+
+**And it buys no privacy.** Both functions end with the same line:
+
+```solidity
+emit Withdrawal(asset, withdrawnValue, recipient, newCommitmentHash);
+```
+
+The pool names the recipient in its own event log on both paths, and the
+forwarder emits `NativeForwarded(from, to, amount)` on top of that — so the
+recipient is published twice on the expensive path and once on the cheap one.
+The only difference the forwarder makes is which address appears as the
+immediate sender of the *value transfer*, in the same transaction that logs the
+recipient anyway. That defeats an observer who reads balance traces but not
+event logs, which is not an observer worth 0.742 PAS.
+
+**What is identical between them**, and is where the real privacy lives:
+
+- Both take `recipient` as a parameter, so **the recipient never signs** and a
+  relay can submit either. Sender unlinkability is a property of the *relayed
+  submission*, not of the forwarder.
+- Both spend a nullifier against a ZK proof, so which deposit funded the
+  withdrawal is hidden by the anonymity set in both.
+- Neither reveals the funder. The customer→burner edge that per-order burners
+  exist to break is broken identically by both.
+
+### ✅ Switched (2026-08-03) — confirmed live through the production relay
+
+`venue-node/relay.mjs` `/shield-withdraw` now calls `withdraw`. Verified by
+selector on the resulting transaction rather than by reading the diff:
+
+```
+tx 0xd0fc0eca…  selector 0x613ce157 = withdraw        ✓
+                (proxy_withdraw would be 0x82fcfd95)
+gasUsed 31,287   fee 0.031287 PAS   status 1
+burner 0x1fD8C0e3…  0.0 → 0.5 PAS
+```
+
+**0.773 → 0.031 PAS, a 96% cut on the most expensive action in FARE**, with the
+burner funded exactly as before. Nothing else moved: the client still only
+proves and never submits, the relay still pays gas in sponsor mode, and the
+proof, circuit and 8-signal layout are untouched — the two calls take identical
+arguments, so this was a one-word change.
+
+`web/src/shieldpool.ts` keeps both entries in `KS_POOL_ABI` with the reasoning
+attached, since the client builds proofs that either submitter could relay.
+
+The measurement is reproducible: `scripts/shield/pool-withdraw-probe.mjs`
+(`MODE=withdraw|proxy`).
 
 ## PoseidonPolkaVM — already in use, no change needed (2026-08-01)
 
