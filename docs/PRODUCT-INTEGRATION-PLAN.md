@@ -11,11 +11,12 @@ Keep the checkboxes current as work lands. Source of truth for the contract
 surface is `contracts/`; for the app surface, `web/src/{abi,chain,App}.tsx`.
 
 > **Updated 2026-08-03** for the C5 landing (stablecoin shielded payouts + DEX
-> pricing), which added rows to the `FareVault` audit and moved the "Pay" and
-> "Earnings" journeys back to 🟡: the rail is built and tested but has no PWA
-> surface, so a driver paid in USDC still has only the public exit in the app.
-> It also flagged a name collision worth knowing about (`pricing.ts` vs
-> `price.ts`, C2) and corrected a cross-cutting row that contradicted the board.
+> pricing): new `FareVault` rows, a rewritten "Pay" journey (checkout now
+> defaults to USDC and hides native behind a flag), and the shielded note wallet.
+> C5 stays 🟡 on two things only — the **live e2e**, and **running the migration
+> on Paseo**, so the deployed vault is still the native-only one. It also flagged
+> a name collision worth knowing about (`pricing.ts` vs `price.ts`, C2) and
+> corrected a cross-cutting row that contradicted the board.
 >
 > **Re-verified against the code on 2026-08-03** (commit `99b62d6`). Parts 1–3
 > had drifted badly: they still described open bids that had been deleted from
