@@ -112,6 +112,25 @@ export const VAULT_ABI = [
   "function shieldNonce(address) view returns (uint256)",
   "function shieldBuckets(uint256) view returns (uint96)",
   "function shieldBucketCount() view returns (uint256)",
+  // Token shield notes: the stablecoin half of the same path. Each asset gets
+  // its OWN note tree — that is what binds a note to its asset, since the
+  // circuit's public signals carry no asset and a spend reveals only a
+  // nullifier. A proof over one tree cannot satisfy another's root window.
+  "function insertShieldNoteToken(address token, uint96 bucket, uint256 commitment)",
+  "function insertShieldNoteTokenFor(address token, address account, uint96 bucket, uint256 commitment, uint256 deadline, bytes signature)",
+  "function depositShieldNoteTokenZK(bytes proof, uint256 root, uint256 nullifierHash, address token, uint96 bucket, bytes32 ksCommitment)",
+  "function noteRootOf(address asset) view returns (uint256)",
+  "function isKnownNoteRootFor(address asset, uint256 root) view returns (bool)",
+  "function noteIndexOf(address asset) view returns (uint32)",
+  "function nullifierSpentOf(address asset, uint256 nullifierHash) view returns (bool)",
+  "function shieldBufferOf(address asset) view returns (uint256)",
+  "function shieldBucketsToken(address token, uint256 i) view returns (uint96)",
+  "function shieldBucketCountToken(address token) view returns (uint256)",
+  "function shieldAssetId(address token) view returns (uint64)",
+  "function withdrawForToken(address token, address account, address recipient, uint256 deadline, bytes signature)",
+  // Asset indexed FIRST: Paseo's eth_getLogs can only server-side filter on a
+  // LEADING indexed topic (it rejects null placeholders and mishandles []).
+  "event ShieldNoteInsertedToken(address indexed token, address account, uint96 bucket, uint256 commitment, uint32 index)",
   // Governance params (D2): withdrawal relay fee.
   "function withdrawFeeBps() view returns (uint16)",
   "function setWithdrawFeeBps(uint16 bps)",

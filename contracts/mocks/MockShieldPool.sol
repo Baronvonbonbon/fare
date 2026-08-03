@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 pragma solidity ^0.8.24;
 
+import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+
 /// @title MockShieldPool
 /// @notice Stand-in for the Kusama Shield pool's deposit surface, so the batched
 ///         shielded-payout path (FareVault, docs/PRIVACY-TIERS.md §4) is testable
@@ -17,6 +19,16 @@ contract MockShieldPool {
     mapping(bytes32 => uint256) public depositedValue;
     mapping(uint256 => uint256) private _sideNodes;
 
+    // Multi-asset half. The real pool derives the ERC-20 precompile address from
+    // the asset ID it is handed (`getPrecompileAddress`, which reverts
+    // "AssetId too large" above 2**64); the mock is told the mapping instead,
+    // because a local chain has no asset precompiles. Recording the ID the
+    // caller passed is the point: `depositAsset` takes the ID while the escrow
+    // ledger and the note commitment key on the ADDRESS, and committing the
+    // wrong one of that pair is what permanently stranded 0.3 USDC on Paseo.
+    mapping(uint256 => address) public assetToken;
+    mapping(bytes32 => uint256) public depositedAssetId;
+
     event Deposit(address indexed asset, bytes32 commitment);
     event NewCommitment(bytes32 commitment);
 
@@ -25,6 +37,22 @@ contract MockShieldPool {
         commitments.push(commitment);
         depositedValue[commitment] += msg.value;
         emit Deposit(address(0), commitment);
+    }
+
+    function setAssetToken(uint256 assetId, address token) external {
+        assetToken[assetId] = token;
+    }
+
+    function depositAsset(uint256 asset, uint256 value, bytes32 commitment) external {
+        require(asset < 2 ** 64, "AssetId too large"); // the real pool's guard, verbatim
+        require(value > 0, "zero-value");
+        address token = assetToken[asset];
+        require(token != address(0), "unknown-asset");
+        IERC20(token).transferFrom(msg.sender, address(this), value);
+        commitments.push(commitment);
+        depositedValue[commitment] += value;
+        depositedAssetId[commitment] = asset;
+        emit Deposit(token, commitment); // the EVENT carries the address, the CALL took the id
     }
 
     /// Insert a leaf that is NOT ours — a third party depositing into the same

@@ -77,6 +77,8 @@ const MATRIX: Entry[] = [
   { c: "vault", fn: "setRouter", args: [A1], allow: ["owner"] },
   { c: "vault", fn: "setShieldPool", args: [A1], allow: ["owner"] },
   { c: "vault", fn: "setShieldBuckets", args: [[PAS(1)]], allow: ["owner"] },
+  { c: "vault", fn: "setShieldBucketsToken", args: [A1, [PAS(1)]], allow: ["owner"] },
+  { c: "vault", fn: "setShieldAssetId", args: [A1, 1337], allow: ["owner"] },
   { c: "vault", fn: "setShieldVerifier", args: [A1], allow: ["owner"] },
   { c: "vault", fn: "setShieldPoseidon", args: [A1], allow: ["owner"] },
   { c: "vault", fn: "setAuthorized", args: [A1, true], allow: ["owner"] },

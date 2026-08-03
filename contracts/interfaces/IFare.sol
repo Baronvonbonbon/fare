@@ -53,6 +53,15 @@ interface IFareVenues {
 /// docs/SHIELDED-POOL-INTEGRATION.md.
 interface IFareShieldPool {
     function depositNative(bytes32 commitment) external payable;
+
+    /// Multi-asset deposit. `asset` is the ASSET HUB ASSET ID (1337 for USDC),
+    /// NOT the ERC-20 precompile address — passing an address reverts with
+    /// "AssetId too large". The pool then credits its escrow under the
+    /// precompile ADDRESS, which is also what the commitment and the withdraw
+    /// proof must carry. Getting that pair backwards leaves the value
+    /// permanently unwithdrawable; see docs/SHIELDED-POOL-INTEGRATION.md.
+    /// Requires an ERC-20 approval first — the pool pulls via transferFrom.
+    function depositAsset(uint256 asset, uint256 value, bytes32 commitment) external;
 }
 
 /// Groth16 verifier for the shield-note circuit (privacy phase 3).

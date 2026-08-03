@@ -14,9 +14,10 @@
 import { Contract } from "ethers";
 import { ADDRESSES, CHAIN_ID, readProvider } from "./chain";
 import { VAULT_ABI } from "./abi";
+import { decompose } from "./denominations";
 
-/// Denominations the vault accepts. Fixed sizes are what make a batch worth
-/// anything — variable amounts would re-identify each entry inside it.
+/// Denominations the vault accepts for native payouts. Fixed sizes are what make
+/// a batch worth anything — variable amounts would re-identify each entry.
 export async function shieldBuckets(): Promise<bigint[]> {
   const vault = new Contract(ADDRESSES.vault, VAULT_ABI, readProvider as any);
   const n = Number(await vault.shieldBucketCount());
@@ -25,14 +26,20 @@ export async function shieldBuckets(): Promise<bigint[]> {
   return out;
 }
 
+/// The same, for an ERC-20 payout. The vault keeps a separate ladder per asset:
+/// a 1 PAS rung and a 1 USDC rung are different magnitudes in different
+/// decimals, and one shared list would be nonsense.
+export async function shieldBucketsToken(token: string): Promise<bigint[]> {
+  const vault = new Contract(ADDRESSES.vault, VAULT_ABI, readProvider as any);
+  const n = Number(await vault.shieldBucketCountToken(token));
+  const out: bigint[] = [];
+  for (let i = 0; i < n; i++) out.push(await vault.shieldBucketsToken(token, i));
+  return out;
+}
+
 /// The largest combination of buckets `balanceWei` covers, biggest first. The
 /// remainder stays an ordinary balance — shielding it would need a denomination
 /// nobody else is using, which is a fingerprint, not privacy.
 export function planShielding(balanceWei: bigint, buckets: bigint[]): bigint[] {
-  const plan: bigint[] = [];
-  let left = balanceWei;
-  for (const b of [...buckets].sort((x, y) => (x > y ? -1 : 1))) {
-    while (left >= b) { plan.push(b); left -= b; }
-  }
-  return plan;
+  return decompose(balanceWei, buckets).rungs;
 }

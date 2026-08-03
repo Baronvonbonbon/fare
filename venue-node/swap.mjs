@@ -1,16 +1,25 @@
-// Asset-conversion cost-coverage layer — turn shielded PAS into exactly the
-// assets an order costs (gas + fare + tip), on FARE's own chain, no XCM.
+// Asset-conversion layer — quoting PAS/USDC and buying USDC on Asset Hub's own
+// asset-conversion DEX, from an EVM key.
 //
-// WHY THIS EXISTS. The live Kusama Shield pool on Paseo is NATIVE-PAS ONLY
-// (`depositNative`), so a shielded burner arrives holding PAS. But FARE orders
-// escrow in USDC. The combined e2e (docs/E2E-COMBINED-REPORT.md) shields the gas
-// but leaves the escrow **USDC value linkable** — its "one genuinely-new mainnet
-// gap". This layer closes it: everything shields as the ONE asset the pool
-// supports (PAS), then the burner fans that PAS out via the local
-// `asset-conversion` DEX into exactly what each cost needs —
-//   keep PAS for gas · swap PAS→USDC for fare+tip
-// so the USDC now originates from a burner-side swap of shielded PAS, not from a
-// `main→burner` transfer. No new pool, no XCM, no Hydration.
+// ⚠ THE ORIGINAL PREMISE OF THIS MODULE WAS WRONG, and the correction changed
+// where the swap belongs. It used to read: "the live Kusama Shield pool on Paseo
+// is NATIVE-PAS ONLY (`depositNative`), so a shielded burner arrives holding PAS"
+// — therefore shield PAS and swap to USDC AT THE BURNER. Kusama Shield is in fact
+// a MULTI-ASSET pool (`depositAsset(assetId, value, commitment)`), and shielding
+// USDC directly is proven end to end on Paseo. So the burner-side swap is not
+// forced, and it was never desirable: a burner making a distinctive-amount DEX
+// swap is a timing-and-amount correlation with its own funding deposit, which is
+// the exact link the burner exists to break.
+//
+// The swap now happens PRE-SHIELD, on the customer's own funded account:
+//   funded account: PAS --[this DEX]--> USDC --> shield as asset 1337
+//   burner: withdraws USDC notes. Never touches the DEX.
+// That leaves the swap fully public, which is fine — it is on the funder's side
+// of the anonymity boundary, like a withdrawal from an exchange.
+//
+// The burner-side coverage path below (planCoverage/encodeSwapCall/executeSwap)
+// is KEPT: it is still the right tool when a burner ends up holding the wrong
+// asset, and it is the fallback if pre-shield sourcing is unavailable.
 //
 // EXECUTION MODEL (the key enabler). asset-conversion is a SUBSTRATE pallet, but
 // the burner is an EVM account. It drives the swap WITHOUT a separate substrate
@@ -52,6 +61,64 @@ export async function quoteExactIn(path, amountIn, { api: injected } = {}) {
       if (amt <= 0n) return null;
     }
     return amt;
+  } finally { if (!injected) await api.disconnect().catch(() => {}); }
+}
+
+// ── pre-shield sourcing: buy USDC with PAS, from an EVM key ──────────────────
+// There is NO asset-conversion precompile. A scan of the precompile space finds
+// code at only two addresses — the XCM precompile at 0x…0a0000 and 0x…0900 — so
+// the direct call does not exist. The route that DOES work is the XCM
+// precompile's `ExchangeAsset`, executed locally under the caller's own origin:
+//
+//     WithdrawAsset(PAS) -> ExchangeAsset{give PAS, want USDC} -> DepositAsset
+//
+// pallet-revive maps H160 -> AccountId32 as `H160 ++ 0xEE*12`, which is both the
+// source of the PAS and the beneficiary of the USDC, so the ERC-20 view shows the
+// proceeds at the same EVM address immediately.
+export const XCM_PRECOMPILE = "0x00000000000000000000000000000000000a0000";
+
+/// Quote then build the XCM program that buys exactly `want` of `assetId`.
+///
+/// Two encoding facts, both hard-won and both silent if you get them wrong:
+///   - the chain rejects XCM below **v5** ("Only XCM version 5 and onwards are
+///     supported");
+///   - `execute(bytes,Weight)` takes a Weight STRUCT (refTime, proofSize). A
+///     bare uint64 encodes wrong and reverts as `OUT_OF_MEMORY`, which is a
+///     decode failure wearing a misleading name.
+///
+/// `maximal: false` takes exactly `want` and refunds the rest of the offered PAS,
+/// so the slippage headroom comes back rather than being swallowed by the pool.
+/// Returns `{ xcm, givePas, quoted, slippageBps }`; the caller weighs and sends.
+export async function buildExchangeXcm({ assetId, want, beneficiaryH160, slippageBps = 500n, api: injected }) {
+  const api = injected ?? await connect();
+  try {
+    const wantN = BigInt(want);
+    if (wantN <= 0n) throw new Error("buildExchangeXcm: want must be > 0");
+    const TOKEN_LOC = assetLoc(assetId);
+    const q = await api.call.assetConversionApi.quotePriceTokensForExactTokens(
+      NATIVE_LOC, TOKEN_LOC, wantN.toString(), true
+    );
+    const quoted = BigInt(q?.toJSON?.() ?? 0);
+    if (quoted <= 0n) throw new Error(`no pool/liquidity for asset ${assetId}`);
+    const givePas = (quoted * (10_000n + BigInt(slippageBps))) / 10_000n;
+
+    const beneficiary = fallbackAccountId(beneficiaryH160);
+    const xcm = api.registry.createType("XcmVersionedXcm", {
+      V5: [
+        { WithdrawAsset: [{ id: NATIVE_LOC, fun: { Fungible: givePas } }] },
+        { ExchangeAsset: {
+            give: { Definite: [{ id: NATIVE_LOC, fun: { Fungible: givePas } }] },
+            want: [{ id: TOKEN_LOC, fun: { Fungible: wantN } }],
+            maximal: false,
+        } },
+        { DepositAsset: {
+            assets: { Wild: "All" },
+            beneficiary: { parents: 0, interior: { X1: [{ AccountId32: { network: null, id: beneficiary } }] } },
+        } },
+      ],
+    }).toHex();
+
+    return { xcm, givePas, quoted, slippageBps: BigInt(slippageBps), want: wantN, assetId };
   } finally { if (!injected) await api.disconnect().catch(() => {}); }
 }
 

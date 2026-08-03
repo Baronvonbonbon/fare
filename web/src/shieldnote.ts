@@ -36,6 +36,12 @@ export interface ShieldNote {
   /// relay already knows the account, and letting it see the proof too would
   /// hand it the pairing (relaypick.ts).
   insertedVia?: string;
+  /// The vault asset this note was cut from — an ERC-20 address, or undefined
+  /// for native PAS. It is NOT in the commitment: the circuit has no asset
+  /// signal. The binding is that the vault keeps a SEPARATE TREE per asset, so
+  /// this field says which tree to rebuild, and proving against the wrong one
+  /// fails "unknown-root" rather than moving someone else's money.
+  token?: string;
 }
 
 const randField = (): bigint => toBigInt(randomBytes(31)) % BN254_R;
@@ -46,7 +52,11 @@ export const noteCommitment = (nullifier: bigint, secret: bigint, bucket: bigint
   poseidon2([poseidon2([nullifier, secret]), bucket]);
 export const nullifierHashOf = (nullifier: bigint): bigint => poseidon1([nullifier]);
 
-export function makeShieldNote(bucketWei: bigint): ShieldNote {
+/// Native and token notes are the same shape — same circuit, same leaf. Only
+/// which tree they live in differs.
+export const isTokenNote = (n: ShieldNote): boolean => !!n.token && n.token !== ZeroAddress;
+
+export function makeShieldNote(bucketWei: bigint, token?: string): ShieldNote {
   const nullifier = randField();
   const secret = randField();
   return {
@@ -55,6 +65,7 @@ export function makeShieldNote(bucketWei: bigint): ShieldNote {
     bucketWei: bucketWei.toString(),
     commitment: noteCommitment(nullifier, secret, bucketWei).toString(),
     createdAt: Date.now(),
+    ...(token && token !== ZeroAddress ? { token } : {}),
   };
 }
 
@@ -115,11 +126,21 @@ export class NoteTree {
   }
 }
 
-/// Every note leaf the vault holds, in insertion order, from its own events.
-/// The leaves are public — only which one is yours is not.
-export async function fetchNoteLeaves(provider: Provider = readProvider as any): Promise<bigint[]> {
+/// Every note leaf in one asset's tree, in insertion order, from the vault's own
+/// events. The leaves are public — only which one is yours is not.
+///
+/// `token` selects the tree: undefined for native, an ERC-20 address otherwise.
+/// The token event indexes the asset FIRST so this filter is server-side, which
+/// Paseo requires — it rejects `null` topic placeholders and mishandles the `[]`
+/// wildcard, so only a LEADING indexed param can be filtered by the node.
+export async function fetchNoteLeaves(
+  provider: Provider = readProvider as any, token?: string
+): Promise<bigint[]> {
   const vault = new Contract(ADDRESSES.vault, VAULT_ABI, provider as any);
-  const logs = await vault.queryFilter(vault.filters.ShieldNoteInserted(), 0, "latest");
+  const filter = token && token !== ZeroAddress
+    ? vault.filters.ShieldNoteInsertedToken(token)
+    : vault.filters.ShieldNoteInserted();
+  const logs = await vault.queryFilter(filter, 0, "latest");
   return logs
     .map((l: any) => ({ index: Number(l.args.index), commitment: toBigInt(l.args.commitment) }))
     .sort((a, b) => a.index - b.index)
@@ -211,27 +232,49 @@ export const NOTE_TYPES = {
   ],
 };
 
+/// A DISTINCT struct, not the native one with a field added: the typehash must
+/// differ, or a signature authorizing a native insert would authorize a token
+/// insert of the same bucket and commitment.
+export const NOTE_TOKEN_TYPES = {
+  ShieldNoteToken: [
+    { name: "token", type: "address" },
+    { name: "account", type: "address" },
+    { name: "bucket", type: "uint96" },
+    { name: "commitment", type: "uint256" },
+    { name: "nonce", type: "uint256" },
+    { name: "deadline", type: "uint256" },
+  ],
+};
+
 /// Convert `bucketWei` of vault balance into a shielded note. Returns the note —
 /// persisted locally first, because the chain holds only its commitment and the
 /// secrets exist nowhere else.
+///
+/// `token` shields an ERC-20 balance (USDC) instead of native. Without it a
+/// payee settled in stablecoin has no private exit at all, only `withdrawToken`
+/// to a named address.
 export async function insertShieldNote(
-  signer: Signer, relayUrl: string, bucketWei: bigint
+  signer: Signer, relayUrl: string, bucketWei: bigint, token?: string
 ): Promise<{ note: ShieldNote; txHash: string }> {
   const account = await signer.getAddress();
   const vault = new Contract(ADDRESSES.vault, VAULT_ABI, readProvider as any);
-  const note = { ...makeShieldNote(bucketWei), insertedVia: relayUrl };
+  const note = { ...makeShieldNote(bucketWei, token), insertedVia: relayUrl };
+  const isToken = isTokenNote(note);
   rememberShieldNote(note);
 
   const nonce: bigint = await vault.shieldNonce(account);
   const deadline = Math.floor(Date.now() / 1000) + 3600;
-  const signature = await signer.signTypedData(
-    { name: "FareVault", version: "1", chainId: CHAIN_ID, verifyingContract: ADDRESSES.vault },
-    NOTE_TYPES,
-    { account, bucket: bucketWei, commitment: BigInt(note.commitment), nonce, deadline }
-  );
+  const domain = { name: "FareVault", version: "1", chainId: CHAIN_ID, verifyingContract: ADDRESSES.vault };
+  const commitment = BigInt(note.commitment);
+  const signature = isToken
+    ? await signer.signTypedData(domain, NOTE_TOKEN_TYPES,
+        { token: note.token, account, bucket: bucketWei, commitment, nonce, deadline })
+    : await signer.signTypedData(domain, NOTE_TYPES,
+        { account, bucket: bucketWei, commitment, nonce, deadline });
 
   const res = await postPadded(`${relayUrl}/shield-note`, {
     account, bucket: bucketWei.toString(), commitment: note.commitment, deadline, signature,
+    ...(isToken ? { token: note.token } : {}),
   });
   const j = await res.json();
   if (!res.ok || !j.txHash) {
@@ -250,14 +293,28 @@ export async function insertShieldNote(
 export async function spendShieldNote(
   note: ShieldNote, relayUrl: string, poolAddr: string, provider: Provider = readProvider as any
 ): Promise<{ txHash: string; ksNote: any }> {
-  const { makeNote, commitmentOf, batchNotePaths } = await import("./shieldpool");
+  const { makeNote, commitmentOf, batchNotePaths, precompileFor } = await import("./shieldpool");
   const { adoptShieldedNote } = await import("./shield");
 
   const bucket = BigInt(note.bucketWei);
-  const ksNote = makeNote(bucket); // the pool note this deposit will fund
+  // THE TRAP. For a token note the pool commitment must bind the ERC-20
+  // PRECOMPILE ADDRESS, not the asset id — the vault calls `depositAsset(id, …)`
+  // but the pool credits `escrow[precompileAddress]` and reads the withdraw
+  // proof's asset signal straight back as an address. Commit the id and the
+  // later withdrawal looks up an escrow that holds nothing and reverts
+  // "Insufficient balance" while the money sits safely under the other key. That
+  // mistake has already stranded 0.3 USDC permanently.
+  let ksAsset = 0n;
+  if (isTokenNote(note)) {
+    const vault = new Contract(ADDRESSES.vault, VAULT_ABI, provider as any);
+    const assetId: bigint = await vault.shieldAssetId(note.token);
+    if (!assetId) throw new Error(`vault has no asset id for ${note.token} — governance must set it`);
+    ksAsset = precompileFor(assetId);
+  }
+  const ksNote = makeNote(bucket, ksAsset); // the pool note this deposit will fund
   const ksCommitment = commitmentOf(ksNote);
 
-  const leaves = await fetchNoteLeaves(provider);
+  const leaves = await fetchNoteLeaves(provider, note.token);
   const spend = await proveSpend(note, leaves, ksCommitment);
 
   // Snapshot the pool's tree BEFORE the deposit: inside the transaction the
@@ -275,6 +332,7 @@ export async function spendShieldNote(
   const res = await postPadded(`${relayUrl}/shield-note-spend`, {
     proof: spend.proof, root: spend.root, nullifierHash: spend.nullifierHash,
     bucket: spend.bucketWei, ksCommitment: spend.ksCommitment,
+    ...(isTokenNote(note) ? { token: note.token } : {}),
   });
   const j = await res.json();
   // 409 = the note tree moved past our root while we were proving. Recoverable:
