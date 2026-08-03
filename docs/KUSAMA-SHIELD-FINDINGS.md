@@ -191,29 +191,28 @@ so the deployed build does not match it — the runtime bytecode differs (14,335
 14,235 bytes), which also falsifies "the interface is identical" as a statement
 about behaviour.
 
-### It only breaks after the 17th deposit — which is why it shipped
-
-A third deployment settles the shape of the bug. The v5 pool referenced by your
-own `scripts/deposit_3x10.mjs`:
+### It is the build, not the tree size
 
 | pool | treeSize | bytes | `isKnownRoot(1)` |
 |---|---|---|---|
-| v5 `0x6a32147F…` | **17** | 15,156 | **Panic(0x32)** |
-| `0x7d5a496b…` (works) | 335 | 14,235 | `false` ✓ |
+| `0x7d5a496b…` (works) | **335** | 14,235 | `false` ✓ |
 | v7 `0x3068490C…` | 97 | 14,335 | **Panic(0x32)** |
+| v5 `0x6a32147F…` | 17 | 15,156 | *no such function* (reverts, empty data) |
 
-v5 fails at **17 leaves — one past the window**. That is the signature of a loop
-bounded by something that grows with inserts (`recentRootsIndex`) rather than by
-`ROOT_HISTORY_SIZE`: while `treeSize ≤ 16` the bound stays inside the array and
-everything works, and the 17th deposit turns the pool into a one-way door
-without any state change or error.
+The working pool holds **335 leaves — twenty times the window — and answers
+correctly**, so this is not a threshold that trips once a tree outgrows
+`ROOT_HISTORY_SIZE`. Two builds of the same function behave differently; that is
+the whole finding. (v5 is not evidence either way: `isKnownRoot` is a v7 feature
+— it replaced v6's `require(root == this.root())` — and v5 simply does not have
+it. An earlier revision of this document read v5's empty-data revert as the same
+panic and inferred a leaf-count threshold from it. That was wrong, and the
+335-leaf pool disproves it.)
 
-**So a v7 pool tested end-to-end shortly after deployment would have passed.**
-Anyone validating it on a fresh deployment — as we would have, had we probed at
-the time — sees a correct withdrawal. That is how it became the canonical
-address, and it is why "we tested it once" is not sufficient for this class of
-bug: the test has to run against a pool that already holds more than
-`ROOT_HISTORY_SIZE` leaves.
+Which leaves the uncomfortable version: we cannot tell you from outside whether
+`0x3068490C…` ever worked. If it did, something about its state made it stop; if
+it did not, it was canonical from day one without a withdrawal ever being run
+against it. Either way the check that distinguishes them is the same one nobody
+ran.
 
 **A likely cause worth checking on your side:** the README directs deployment
 through Remix pinned to `soljson-v0.8.28+commit.7893614a-**revive-0.1.0-dev.12**`.
