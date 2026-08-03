@@ -577,12 +577,22 @@ contract FareVault is Ownable2Step, PaseoSafeSender, FareUpgradable, EIP712 {
         _verifyAndBurn(token, proof, root, nullifierHash, bucket, ksCommitment);
         emit ShieldNoteSpentToken(token, nullifierHash, bucket, ksCommitment);
 
-        // The pool pulls via transferFrom, so it needs an allowance — bounded to
-        // exactly this bucket. A MaxUint256 approval REVERTS on the Asset Hub
-        // ERC-20 precompile ("Balance conversion failed"): it narrows to
-        // pallet-assets' u128.
-        IERC20(token).forceApprove(address(shieldPool), bucket);
-        shieldPool.depositAsset(uint256(assetId), bucket, ksCommitment);
+        // PUSH, then credit — deliberately NOT approve + `depositAsset`.
+        //
+        // pallet-assets charges the approver a RESERVED NATIVE DEPOSIT for an
+        // approval, so a contract holding zero PAS cannot approve at all. This
+        // vault is precisely that contract: every wei of its native balance is
+        // owed to a payee through `balanceOf`, so it is not a float it may spend
+        // and it is legitimately zero on a fresh deployment. The failure is also
+        // nasty to diagnose — the precompile reverts with NO revert data, which
+        // reads like a decode bug rather than a missing deposit. Measured on
+        // Paseo: identical `approve` calls succeed from an EOA and from a vault
+        // holding 9.275 PAS, and fail from a vault holding 0.
+        //
+        // `transfer` reserves nothing, so this path does not care what the vault
+        // holds in native.
+        IERC20(token).safeTransfer(address(shieldPool), bucket);
+        shieldPool.depositAssetDirect(uint256(assetId), bucket, ksCommitment);
     }
 
     /// @dev The shared half of both spends: every check, then the state effects,

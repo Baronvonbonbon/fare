@@ -351,6 +351,45 @@ describe("shield notes — stablecoin payouts", function () {
     expect(await f.vault.tokenBalanceOf(f.usdc.target, f.payee.address)).to.equal(USDC(40) - RUNG);
   });
 
+  it("spends without ever approving, so a vault holding no native can still shield", async () => {
+    // THE BUG THIS PINS, found only on live Paseo. The spend used to
+    // `forceApprove` the pool and call `depositAsset`. pallet-assets charges the
+    // approver a RESERVED NATIVE DEPOSIT for an approval, so a vault holding
+    // zero PAS could not approve at all — and the Asset Hub ERC-20 precompile
+    // reverts with NO revert data, which reads like a decode bug rather than a
+    // missing deposit. Measured: the same approve succeeded from an EOA and from
+    // a vault holding 9.275 PAS, and failed from one holding 0.
+    //
+    // The vault's native balance is payees' money, not a float, so zero is a
+    // legitimate steady state and the dependency was never acceptable. `transfer`
+    // + `depositAssetDirect` reserves nothing.
+    //
+    // A local chain cannot reproduce the precompile's deposit rule, so this
+    // asserts the PROPERTY that made us immune to it: the vault holds no native
+    // at all, and the token spend still completes.
+    // A vault that has only ever settled stablecoin orders — the case a
+    // USDC-denominated deployment produces, and the one that broke.
+    const f = await deploy();
+    await f.vault.connect(f.payee).withdraw(); // drain the fixture's native credit
+    await f.vault.connect(f.owner).withdraw().catch(() => {});
+    expect(await ethers.provider.getBalance(f.vault.target), "vault must hold no native for this to mean anything")
+      .to.equal(0n);
+
+    const tree = new NoteTree();
+    const mine = await insertToken(f, f.payee, tree);
+    const ks = poseidon2([randField(), 37n]);
+    const encoded = await prove(mine.note, tree, mine.index, ks);
+    const nh = poseidon1([mine.note.nullifier]);
+
+    await f.vault.connect(f.submitter).depositShieldNoteTokenZK(
+      encoded, tree.root(), nh, f.usdc.target, RUNG, ethers.toBeHex(ks, 32)
+    );
+    expect(await f.usdc.balanceOf(f.pool.target)).to.equal(RUNG);
+    // And no allowance was ever granted — the approval path is not merely
+    // unused, it is absent.
+    expect(await f.usdc.allowance(f.vault.target, f.pool.target)).to.equal(0n);
+  });
+
   it("refuses to spend a token with no asset id bound", async () => {
     // Without the id the vault would have to guess what to pass depositAsset,
     // and a wrong guess is unrecoverable value.

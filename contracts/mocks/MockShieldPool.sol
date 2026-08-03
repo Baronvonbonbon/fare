@@ -28,6 +28,7 @@ contract MockShieldPool {
     // wrong one of that pair is what permanently stranded 0.3 USDC on Paseo.
     mapping(uint256 => address) public assetToken;
     mapping(bytes32 => uint256) public depositedAssetId;
+    mapping(address => uint256) public credited; // token => value already accounted for
 
     event Deposit(address indexed asset, bytes32 commitment);
     event NewCommitment(bytes32 commitment);
@@ -49,9 +50,28 @@ contract MockShieldPool {
         address token = assetToken[asset];
         require(token != address(0), "unknown-asset");
         IERC20(token).transferFrom(msg.sender, address(this), value);
+        _record(asset, token, value, commitment);
+    }
+
+    /// Credit a balance the caller already transferred in. This — not
+    /// `depositAsset` — is the path FareVault uses, because pallet-assets makes
+    /// the approver reserve a native deposit and the vault may hold no PAS. The
+    /// mock checks the value really arrived, which is the invariant the real
+    /// pool's escrow accounting depends on.
+    function depositAssetDirect(uint256 asset, uint256 value, bytes32 commitment) external {
+        require(asset < 2 ** 64, "AssetId too large");
+        require(value > 0, "zero-value");
+        address token = assetToken[asset];
+        require(token != address(0), "unknown-asset");
+        require(IERC20(token).balanceOf(address(this)) >= credited[token] + value, "not-received");
+        _record(asset, token, value, commitment);
+    }
+
+    function _record(uint256 asset, address token, uint256 value, bytes32 commitment) internal {
         commitments.push(commitment);
         depositedValue[commitment] += value;
         depositedAssetId[commitment] = asset;
+        credited[token] += value;
         emit Deposit(token, commitment); // the EVENT carries the address, the CALL took the id
     }
 

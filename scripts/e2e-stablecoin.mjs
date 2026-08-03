@@ -2,20 +2,23 @@
 // settled ENTIRELY in REAL Asset Hub USDC (asset 1337, via its ERC-20
 // precompile), the ERC-20 path:
 //   KS-shielded gas + KS-shielded USDC → approve → createOrderERC20 → commitBid →
-//   acceptSealedBidERC20 → confirmPickup
-//   → confirmDropoffZK → withdrawToken payouts.
+//   acceptSealedBidERC20 → confirmPickup → confirmDropoffZK → payouts, and then
+//   BOTH exits: the venue takes the public `withdrawToken`, and the driver takes
+//   the private one — insertShieldNoteToken → depositShieldNoteTokenZK → pool →
+//   withdraw to a fresh address. That second half is the whole reason a USDC
+//   order can be private at both ends rather than only at funding.
 // Reuses the registered venue (id 3) + driver from the native e2e; a fresh
 // customer holds USDC (escrow) + PAS (gas). Settlement is submitted by the
 // venue-node relay wallet (the F6 rebate accrues in USDC). Every tx is recorded.
 import { ethers } from "ethers";
-import { poseidon2, poseidon3 } from "poseidon-lite";
+import { poseidon1, poseidon2, poseidon3 } from "poseidon-lite";
 import * as snarkjs from "snarkjs";
 import { WITHDRAW_WASM, loadWithdrawZkey } from "./shield/zkey.mjs";
 import fs from "fs";
 import path from "path";
 import {
   ROOT, provider, book, env, loadState, waitTx, leanGas, GAS_PRICE_WEI, fmt, eth, runScript,
-  KS_POOL, ksShieldedFund,
+  KS_POOL, ksShieldedFund, ksPrecompileFor,
 } from "./shield/e2e-lib.mjs";
 
 // Sealed bids are the only bid path. A fixed salt is fine for a scripted run:
@@ -25,7 +28,38 @@ const OFF_LAT = 90_000_000n, OFF_LON = 180_000_000n;
 const encLat = (m) => BigInt(m) + OFF_LAT, encLon = (m) => BigInt(m) + OFF_LON;
 const b32 = (x) => ethers.zeroPadValue(ethers.toBeHex(x), 32);
 const usdc = (n) => BigInt(Math.round(n * 1e6)); // 6 decimals
-const rand = () => ethers.toBigInt(ethers.randomBytes(31)) % 21888242871839275222246405745257275088548364400416034343698204186575808495617n;
+const BN254_R = 21888242871839275222246405745257275088548364400416034343698204186575808495617n;
+const rand = () => ethers.toBigInt(ethers.randomBytes(31)) % BN254_R;
+
+// Mirror of FareVault's incremental note tree, for building authentication paths
+// the way the client does from the vault's own events. Empty subtrees
+// short-circuit to a precomputed zero, so a root is O(leaves) not O(2^depth).
+const NOTE_DEPTH = 16; // must match FareVault.NOTE_DEPTH and the circuit
+const noteZeros = (() => { const z = [0n]; for (let i = 1; i <= NOTE_DEPTH; i++) z.push(poseidon2([z[i - 1], z[i - 1]])); return z; })();
+class NoteTree {
+  constructor(leaves = []) { this.leaves = leaves; this.memo = new Map(); }
+  node(lv, i) {
+    if (i * 2 ** lv >= this.leaves.length) return noteZeros[lv];
+    if (lv === 0) return this.leaves[i];
+    const k = `${lv}:${i}`;
+    const hit = this.memo.get(k);
+    if (hit !== undefined) return hit;
+    const v = poseidon2([this.node(lv - 1, i * 2), this.node(lv - 1, i * 2 + 1)]);
+    this.memo.set(k, v);
+    return v;
+  }
+  root() { return this.node(NOTE_DEPTH, 0); }
+  path(index) {
+    const elements = [], indices = [];
+    let idx = index;
+    for (let lv = 0; lv < NOTE_DEPTH; lv++) {
+      elements.push(this.node(lv, idx % 2 === 0 ? idx + 1 : idx - 1));
+      indices.push(idx % 2);
+      idx = Math.floor(idx / 2);
+    }
+    return { elements, indices };
+  }
+}
 
 // amounts (USDC)
 const ORDER_VALUE = usdc(3), TIP = usdc(0.5), MAX_FARE = usdc(2), FARE = usdc(1.5);
@@ -100,6 +134,15 @@ async function rec(prov, { step, party, action, hash, tokenValue }) {
   const fee = (rc.gasUsed ?? 0n) * GAS_PRICE_WEI;
   const e = { step, party, action, from: rc.from, to: rc.to, usdc: tokenValue != null ? (Number(tokenValue) / 1e6).toString() : "", hash, block: rc.blockNumber, status: rc.status, gasUsed: (rc.gasUsed ?? 0n).toString(), feePAS: ethers.formatEther(fee) };
   appendLedger(e);
+  // A REVERTED receipt is status 0, and this used to print the same "✓" for it
+  // as for a success — the sibling of finding 28 and of the e2e-lib `record()`
+  // bug: a run in which every call reverted still read as green, and the first
+  // symptom was some later step failing for an unrelated-looking reason.
+  // Mined is not succeeded.
+  if (rc.status !== 1) {
+    console.log(`   ✗ ${action} [${party}] REVERTED (status 0) gas ${e.gasUsed} — ${hash}`);
+    throw new Error(`${action} reverted on-chain (tx ${hash}); see ${path.relative(ROOT, LEDGER)}`);
+  }
   console.log(`   ✓ ${action} [${party}] status ${rc.status} gas ${e.gasUsed} fee ${e.feePAS} PAS${tokenValue != null ? ` value ${e.usdc} USDC` : ""}`);
   return rc;
 }
@@ -178,12 +221,12 @@ async function main() {
     console.log(`\n1a. KS shield GAS → burner (${fmt(eth("30"))} PAS, unlinked)`);
     const kg = await ksShieldedFund({ ...ks, amount: eth("30"), assetId: 0 });
     await rec(prov, { step: "S.ksGasDeposit", party: "customer-main", action: "KS.depositNative", hash: kg.depositHash });
-    await rec(prov, { step: "S.ksGasWithdraw", party: "ks-submitter", action: "KS.proxy_withdraw→burner(PAS)", hash: kg.withdrawHash });
+    await rec(prov, { step: "S.ksGasWithdraw", party: "ks-submitter", action: "KS.withdraw→burner(PAS)", hash: kg.withdrawHash });
 
     console.log(`\n1b. KS shield USDC ESCROW → burner (${fmt6(NEED)} USDC, asset 1337, unlinked)`);
     const ku = await ksShieldedFund({ ...ks, amount: NEED, assetId: 1337 });
     await rec(prov, { step: "S.ksUsdcDeposit", party: "customer-main", action: "KS.depositAsset(USDC)", hash: ku.depositHash, tokenValue: NEED });
-    await rec(prov, { step: "S.ksUsdcWithdraw", party: "ks-submitter", action: "KS.proxy_withdraw→burner(USDC)", hash: ku.withdrawHash, tokenValue: NEED });
+    await rec(prov, { step: "S.ksUsdcWithdraw", party: "ks-submitter", action: "KS.withdraw→burner(USDC)", hash: ku.withdrawHash, tokenValue: NEED });
 
     // NOT MaxUint256: the asset precompile narrows to u128 and reverts
     // "Balance conversion failed" on an unlimited approval.
@@ -302,8 +345,152 @@ async function main() {
   console.log(`\n7. Vault USDC balances — venue ${fmt6(bV)}  driver ${fmt6(bD)}  treasury ${fmt6(bT)}  relay ${fmt6(bR)} (feeBps ${feeBps})`);
   st.payouts = { venue: bV.toString(), driver: bD.toString(), treasury: bT.toString(), relay: bR.toString(), treasuryAddr: treasury }; saveSt(st);
 
+  // The VENUE takes the public path. A venue is a business address — its
+  // location and menu are public by design, so naming it at settlement leaks
+  // nothing the chain does not already say.
   if (!st.venuePaid && bV > 0n) { const tx = await vault.connect(V).withdrawToken(b.stablecoin, { gasLimit: await leanGas(vault.connect(V).withdrawToken, [b.stablecoin]) }); await rec(prov, { step: "S.payout-venue", party: "venue", action: "withdrawToken", hash: tx.hash, tokenValue: bV }); st.venuePaid = true; saveSt(st); }
-  if (!st.driverPaid && bD > 0n) { const tx = await vault.connect(D).withdrawToken(b.stablecoin, { gasLimit: await leanGas(vault.connect(D).withdrawToken, [b.stablecoin]) }); await rec(prov, { step: "S.payout-driver", party: "driver", action: "withdrawToken", hash: tx.hash, tokenValue: bD }); st.driverPaid = true; saveSt(st); }
+
+  // ── 8. The DRIVER takes the PRIVATE path (this is the new half) ────────────
+  // Until now the shield-note path was native-only, so a driver settled in USDC
+  // could only do what the venue just did: withdraw to a persistent, named
+  // address, publishing their whole revenue history. This is the token
+  // equivalent — earnings → note → ZK spend → pool → fresh address.
+  //
+  // The asset binding is the note TREE, not a circuit signal: the shield-note
+  // circuit's public inputs are [root, nullifierHash, bucket, ksCommitment] and
+  // carry no asset, so a proof built over the USDC tree simply cannot satisfy
+  // the native root window. That is why this needed no new trusted setup.
+  if (!st.driverShielded && bD > 0n) {
+    const vaultT = new ethers.Contract(b.vault, [
+      "function insertShieldNoteToken(address token, uint96 bucket, uint256 commitment)",
+      "function depositShieldNoteTokenZK(bytes proof, uint256 root, uint256 nullifierHash, address token, uint96 bucket, bytes32 ksCommitment)",
+      "function noteRootOf(address) view returns (uint256)",
+      "function shieldBucketCountToken(address) view returns (uint256)",
+      "function shieldBucketsToken(address,uint256) view returns (uint96)",
+      "function shieldAssetId(address) view returns (uint64)",
+      "event ShieldNoteInsertedToken(address indexed token, address account, uint96 bucket, uint256 commitment, uint32 index)",
+    ], prov);
+
+    // Read the ladder from the chain. Hardcoding rungs is how a script starts
+    // reverting "bad-bucket" the first time governance retunes them.
+    const nB = Number(await vaultT.shieldBucketCountToken(b.stablecoin));
+    const rungs = [];
+    for (let i = 0; i < nB; i++) rungs.push(await vaultT.shieldBucketsToken(b.stablecoin, i));
+    const plan = [];
+    let left = bD;
+    for (const r of [...rungs].sort((x, y) => (x > y ? -1 : 1))) while (left >= r) { plan.push(r); left -= r; }
+    console.log(`\n8. driver shields USDC earnings — ladder [${rungs.map(fmt6).join(", ")}]`);
+    console.log(`   ${fmt6(bD)} USDC → ${plan.length} note(s) [${plan.map(fmt6).join(", ")}], ${fmt6(left)} stays unshielded`);
+    if (plan.length === 0) throw new Error(`driver earned ${fmt6(bD)} USDC, below the smallest rung ${fmt6(rungs[0])}`);
+
+    const BUCKET = plan[0]; // one note is enough to prove the path
+    const note = { nullifier: rand(), secret: rand() };
+    const commitment = poseidon2([poseidon2([note.nullifier, note.secret]), BUCKET]);
+    const vdT = vaultT.connect(D);
+    const iTx = await vdT.insertShieldNoteToken(b.stablecoin, BUCKET, commitment, {
+      gasLimit: await leanGas(vdT.insertShieldNoteToken, [b.stablecoin, BUCKET, commitment]),
+    });
+    await rec(prov, { step: "S.shield-insert", party: "driver", action: "insertShieldNoteToken", hash: iTx.hash, tokenValue: BUCKET });
+
+    // Rebuild the USDC tree from the vault's own events. Filtered by the token
+    // topic, which is indexed FIRST precisely so Paseo can filter it server-side
+    // — it rejects null topic placeholders and mishandles the [] wildcard, so a
+    // non-leading indexed param cannot be filtered at the node.
+    const inserted = await vaultT.queryFilter(vaultT.filters.ShieldNoteInsertedToken(b.stablecoin), 0, "latest");
+    const leaves = inserted.map((l) => ({ i: Number(l.args.index), c: ethers.toBigInt(l.args.commitment) }))
+      .sort((a, x) => a.i - x.i).map((x) => x.c);
+    const tree = new NoteTree(leaves);
+    if ((await vaultT.noteRootOf(b.stablecoin)) !== tree.root())
+      throw new Error("USDC note tree disagrees with the client");
+    const myIndex = leaves.findIndex((l) => l === commitment);
+    console.log(`   ✓ USDC tree matches the client; our leaf is #${myIndex} of ${leaves.length}`);
+
+    // THE TRAP: the pool note must commit to the ERC-20 PRECOMPILE ADDRESS, not
+    // the asset id. depositAsset takes the id, but the pool credits
+    // escrow[precompileAddress] and reads the withdraw proof's asset signal back
+    // as an address. Commit the id and the later withdrawal looks up an escrow
+    // holding nothing and reverts "Insufficient balance" while the money sits
+    // safely under the other key — 0.3 USDC is permanently stuck that way.
+    const assetId = await vaultT.shieldAssetId(b.stablecoin);
+    const ksAsset = ksPrecompileFor(assetId);
+    const ksOut = { nullifier: rand(), secret: rand(), value: BUCKET, asset: ksAsset };
+    const ksCommitment = poseidon2([poseidon2([ksOut.value, ksAsset]), poseidon2([ksOut.nullifier, ksOut.secret])]);
+
+    const { elements, indices } = tree.path(myIndex);
+    const spend = await snarkjs.groth16.fullProve({
+      root: tree.root().toString(), nullifierHash: poseidon1([note.nullifier]).toString(),
+      bucket: BUCKET.toString(), ksCommitment: ksCommitment.toString(),
+      nullifier: note.nullifier.toString(), secret: note.secret.toString(),
+      pathElements: elements.map(String), pathIndices: indices,
+    }, path.join(ROOT, "circuits/build/shieldnote_js/shieldnote.wasm"),
+       path.join(ROOT, "circuits/build/shieldnote.zkey"));
+    const encoded = ethers.AbiCoder.defaultAbiCoder().encode(
+      ["uint256[2]", "uint256[4]", "uint256[2]"],
+      [[spend.proof.pi_a[0], spend.proof.pi_a[1]],
+       [spend.proof.pi_b[0][1], spend.proof.pi_b[0][0], spend.proof.pi_b[1][1], spend.proof.pi_b[1][0]],
+       [spend.proof.pi_c[0], spend.proof.pi_c[1]]]);
+
+    const pool = new ethers.Contract(KS_POOL, [
+      "function withdraw(uint[2],uint[2][2],uint[2],uint[8],address)",
+      "function treeSize() view returns(uint256)", "function sideNodes(uint256) view returns(uint256)",
+      "function currentRoot() view returns(uint256)",
+    ], prov);
+    const ksStart = Number(await pool.treeSize());
+    const preSide = [];
+    for (let lv = 0; lv < 128; lv++) preSide.push((await pool.sideNodes(lv)).toString());
+
+    // Submitted by the VENUE, not the driver: the call is permissionless and the
+    // proof binds the destination, so the submitter can neither be linked to the
+    // note nor redirect it. Using a third party is the point.
+    const sTx = await vaultT.connect(V).depositShieldNoteTokenZK(
+      encoded, tree.root(), spend.publicSignals[1], b.stablecoin, BUCKET, b32(ksCommitment),
+      { gasLimit: 5_000_000n });
+    const sRec = await rec(prov, { step: "S.shield-spend", party: "venue(third party)", action: "depositShieldNoteTokenZK", hash: sTx.hash, tokenValue: BUCKET });
+
+    // The privacy claim, checked rather than asserted.
+    const sFull = await prov.getTransaction(sTx.hash);
+    const blob = (sFull.data + sRec.logs.map((l) => l.data + l.topics.join("")).join("")).toLowerCase();
+    if (blob.includes(D.address.slice(2).toLowerCase())) throw new Error("the spend leaked the driver's address");
+    if (blob.includes(commitment.toString(16).padStart(64, "0"))) throw new Error("the spend leaked the note commitment");
+    console.log(`   ✓ the spend names neither the driver nor the note`);
+
+    // ── 9. Out of the pool, to an address that has never been seen ───────────
+    const ksIndex = ksStart; // our leaf is the one just inserted
+    const siblings = [];
+    for (let lv = 0; lv < 128; lv++) siblings.push(((BigInt(ksIndex) >> BigInt(lv)) & 1n) === 1n ? preSide[lv] : "0");
+    let node = ksCommitment;
+    for (let lv = 0; lv < 128; lv++) if (((BigInt(ksIndex) >> BigInt(lv)) & 1n) === 1n) node = poseidon2([BigInt(siblings[lv]), node]);
+    const ksRoot = await pool.currentRoot();
+    if (node !== ksRoot) throw new Error("KS: our leaf is not the last one (deposit race) — re-run");
+
+    const fresh = ethers.Wallet.createRandom().address;
+    const change = { nullifier: rand(), secret: rand() };
+    const ctx = ethers.toBigInt(ethers.keccak256(ethers.solidityPacked(["address"], [fresh]))) % BN254_R;
+    const w = await snarkjs.groth16.fullProve({
+      withdrawnValue: BUCKET.toString(), treeDepth: "128", context: ctx.toString(),
+      root: ksRoot.toString(), asset: ksAsset.toString(), existingValue: BUCKET.toString(),
+      existingNullifier: ksOut.nullifier.toString(), existingSecret: ksOut.secret.toString(),
+      newNullifier: change.nullifier.toString(), newSecret: change.secret.toString(),
+      siblings, leafIndex: String(ksIndex),
+    }, WITHDRAW_WASM, loadWithdrawZkey());
+    const wPB = [[w.proof.pi_b[0][1], w.proof.pi_b[0][0]], [w.proof.pi_b[1][1], w.proof.pi_b[1][0]]];
+    console.log(`\n9. withdraw ${fmt6(BUCKET)} USDC from the pool → fresh address ${fresh}`);
+    const before = await USDC.balanceOf(fresh);
+    const wTx = await pool.connect(V).withdraw(
+      [w.proof.pi_a[0], w.proof.pi_a[1]], wPB, [w.proof.pi_c[0], w.proof.pi_c[1]], w.publicSignals, fresh,
+      { gasLimit: 3_000_000n });
+    await rec(prov, { step: "S.pool-withdraw", party: "venue(third party)", action: "KS.withdraw→fresh(USDC)", hash: wTx.hash, tokenValue: BUCKET });
+    const after = await USDC.balanceOf(fresh);
+    if (after <= before) throw new Error("the fresh address received no USDC");
+    console.log(`   ✓ fresh address holds ${fmt6(after)} USDC, and nothing on-chain ties it to the driver`);
+    st.driverShielded = { bucket: BUCKET.toString(), fresh, received: after.toString() }; saveSt(st);
+  }
+
+  // Whatever was below the smallest rung leaves by the public path — the
+  // residue is deliberate, since a bespoke small note would be unique and
+  // therefore self-identifying.
+  const bDLeft = await vault.tokenBalanceOf(b.stablecoin, D.address);
+  if (!st.driverPaid && bDLeft > 0n) { const tx = await vault.connect(D).withdrawToken(b.stablecoin, { gasLimit: await leanGas(vault.connect(D).withdrawToken, [b.stablecoin]) }); await rec(prov, { step: "S.payout-driver-residue", party: "driver", action: "withdrawToken (residue)", hash: tx.hash, tokenValue: bDLeft }); st.driverPaid = true; saveSt(st); }
 
   console.log(`\n   venue wallet USDC now: ${fmt6(await USDC.balanceOf(V.address))}   driver wallet USDC now: ${fmt6(await USDC.balanceOf(D.address))}`);
   // Finding 28: this is the line that used to lie. Every phase is guarded on a

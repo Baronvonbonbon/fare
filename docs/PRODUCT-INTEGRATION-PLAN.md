@@ -13,8 +13,8 @@ surface is `contracts/`; for the app surface, `web/src/{abi,chain,App}.tsx`.
 > **Updated 2026-08-03** for the C5 landing (stablecoin shielded payouts + DEX
 > pricing): new `FareVault` rows, a rewritten "Pay" journey (checkout now
 > defaults to USDC and hides native behind a flag), and the shielded note wallet.
-> C5 stays 🟡 on two things only — the **live e2e**, and **running the migration
-> on Paseo**, so the deployed vault is still the native-only one. It also flagged
+> C5 is now **PROVEN END TO END on Paseo** (order #16) with the migration run;
+> live vault `0x5Cff057eF0b31BdECC07dC22C1f28cbed8899fb6`. It also flagged
 > a name collision worth knowing about (`pricing.ts` vs `price.ts`, C2) and
 > corrected a cross-cutting row that contradicted the board.
 >
@@ -396,10 +396,18 @@ Ordered roughly by leverage. Check off as landed.
     burner funding as available and then failed at the pick. Decimal scaling was
     hiding it — 100 USDC is 1e8, no native threshold is that small — which is an
     accident, not a guarantee. `shield.ts` is now asset-keyed throughout.
-  - Not done: the **live e2e**. `scripts/e2e-stablecoin.mjs` still funds its
-    burner by direct transfer from the deployer, and `e2e-combined.mjs` still
-    calls the deleted `USDC.mint`. And the migration has not been run on Paseo,
-    so the deployed vault is still the native-only one.
+  - **PROVEN END TO END ON PASEO** (order #16, 15 transactions): KS-shielded gas
+    + KS-shielded USDC escrow → burner → USDC order → sealed bid → pickup → ZK
+    dropoff → payouts, then BOTH exits — the venue's public `withdrawToken` and
+    the driver's private `insertShieldNoteToken` → `depositShieldNoteTokenZK` →
+    pool → **1 USDC to a fresh address with nothing tying it to the driver**.
+    The residue below the smallest rung (0.4625) leaves by the public path, as
+    designed. Migration run twice; live vault is `0x5Cff057eF0b31BdECC07dC22C1f28cbed8899fb6`.
+  - **A correction:** an earlier version of this entry said `e2e-stablecoin.mjs`
+    funded its burner by direct transfer and `e2e-combined.mjs` called the
+    deleted `USDC.mint`. Both had already been fixed; the claim came from a stale
+    note and was repeated without checking. What those scripts actually lacked
+    was the payout half, which is what got added.
 
 ### Group D — Ops / governance / trust (⚙️ console, not consumer app)
 *A separate app (`web/ops.html` → `/ops`, `web/src/ops/`) — shares the chain glue
@@ -453,7 +461,7 @@ one wallet session + toast in `OpsApp.tsx`; only D5 (offline ceremony) remains.*
 | C2 | Fiat pricing (oracle) | C | Checkout | ✅ done (off-chain layer) |
 | C3 | Stablecoin escrow | C | Vault + checkout | ✅ done (rail + tests + PWA UI) |
 | C4 | Shielded burner funding | C | Infra | 🟡 **built + proven on Paseo** (Kusama Shield, native **and** USDC); remaining gate is the anonymity set, not code — see SHIELDED-POOL-INTEGRATION.md |
-| C5 | Stablecoin shielded **payouts** + DEX pricing | C | Vault + infra + wallet chip | 🟡 contract, relay, client, migration **and PWA surface** done + tested (`test/shieldnote-token.test.ts`, `denominations.test.ts`, `price.test.ts`, `shieldwallet.test.ts`). **Outstanding: live e2e + running the migration on Paseo.** Closes the other end of C4: funding was private, payouts were not |
+| C5 | Stablecoin shielded **payouts** + DEX pricing | C | Vault + infra + wallet chip | ✅ done — contract, relay, client, PWA surface, migration **and a live Paseo run** (order #16: driver's USDC earnings → note → ZK spend → pool → fresh address). Closes the other end of C4: funding was private, payouts were not. Live vault `0x5Cff057e…` |
 | D1 | Arbiter console (`resolve`) | D | Ops app (`/ops`) | ✅ done |
 | D2 | Governance console | D | Ops app | ✅ done |
 | D3 | Guardian pause console | D | Ops app | ✅ done |
