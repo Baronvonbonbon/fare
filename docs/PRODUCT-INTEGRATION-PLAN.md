@@ -17,8 +17,9 @@ surface is `contracts/`; for the app surface, `web/src/{abi,chain,App}.tsx`.
 > funding path called "blocked on external infra" that had been proven on-chain.
 > The drift ran **in both directions** — understating what was built and
 > overstating what still worked — which is why a checkbox board needs reading
-> against the code, not trusted. Two ticked items turned out to be **undone**
-> (A1r, A6r); see the Part 1 audit summary.
+> against the code, not trusted. One ticked item turned out to be genuinely
+> **undone** (A6r, since fixed); see the Part 1 audit summary, which also records
+> a *false* regression this audit reported and had to withdraw.
 
 **Legend**
 | Mark | Meaning |
@@ -41,7 +42,7 @@ surface is `contracts/`; for the app surface, `web/src/{abi,chain,App}.tsx`.
 | `createOrderERC20` | ✅ | Token escrow path (`token.ts`); approve + direct |
 | `createOrderERC20WithPermit` | 🟡 | Wired (`token.ts:139`) but **unusable on Asset Hub USDC** — the ERC-20 precompile is bare IERC20 with no `permit()`. Kept for a token that has one |
 | `commitBid` | ✅ | Sealed bid — the only bid path. Terms are sealed to the customer and relayed; the chain sees a hash |
-| `revokeBid` | ⛔ | **Driver cannot retract a sealed bid in-app** — no call site anywhere in `web/src`. See the regression note below |
+| `revokeBid` | ✅ | "Withdraw sealed" per outstanding bid (`DriverBid`) → `revokeSealedBid` → relay `/revoke-bid` → `ordersW.revokeBid`. **Called through the relay on purpose**, and therefore deliberately absent from `ORDERS_ABI`: a driver-signed retraction would put their address on-chain and undo the point of sealing the bid. Authorized by the `revokeSecret`, not a signature |
 | `acceptSealedBid` / `acceptSealedBidERC20` | ✅ | Customer opens the sealed terms and accepts; the ERC-20 variant reads `_msgSender()` so it can be relayed |
 | `bidHashOf` / `sealedBid` / `sealedBidCount` | ✅ | Read by `sealedbid.ts` to build and verify bid cards |
 | `increaseTip` / `increaseTipERC20` | ✅ | Customer top-up, both assets |
@@ -80,7 +81,7 @@ surface is `contracts/`; for the app surface, `web/src/{abi,chain,App}.tsx`.
 | `isEligible` / `drivers(struct)` | ✅ | Read for eligibility + own stats |
 | `addStake` / `requestUnstake` / `withdrawStake` | ✅ | Stake lifecycle + unbonding countdown (`DriverAccount`) |
 | `setMetadata` | ✅ | Driver profile edit (`DriverAccount`); commitment-backed via `regmeta.ts` |
-| `reputationOf` (delivered/failed) | 🟡 | The client reads the `drivers(address)` struct, not `reputationOf`. Rendered in the driver's **own** view (`App.tsx:2200`); **still not in the customer's bid cards** — see the regression note below |
+| `reputationOf` (delivered/failed) | ✅ | The client reads the `drivers(address)` struct rather than `reputationOf` — one call gets the counts and the ban flag. Rendered in the driver's own view and, since A6r, on the customer's sealed bid cards (`reputation.ts`) |
 | `slash` / `recordDelivered` / `recordFailed` / `importRecords` | ⚙️ | Internal / admin |
 | `setBanned` / `setMinStake` / `setUnbondingSeconds` / `setAuthorized` / `setRouter` | ⚙️ | Governance |
 
@@ -117,27 +118,33 @@ surface is `contracts/`; for the app surface, `web/src/{abi,chain,App}.tsx`.
 **Audit summary.** The six tie-in gaps this section originally listed (retract
 bid, stake lifecycle, dispute evidence + arbiter console, venue management,
 vault `withdrawTo`/dust, reputation in bid cards) were wired as Group A and
-Group D. Two of them have since come **undone**, and both were collateral from
-the sealed-bid migration rather than anything anyone chose:
+Group D. All six still hold — but one of them survived the sealed-bid migration
+only by being **rebuilt somewhere else**, and one did not survive at all:
 
-1. ⛔ **Retract a bid.** `withdrawBid` was wired (A1) and then deleted from the
-   contract with the rest of the open-bid path. Its sealed-bid replacement,
-   `revokeBid(orderId, bidHash, revokeSecret)`, exists on-chain and
-   `sealedbid.ts` already stores the `revokeSecret` needed to call it — but
-   **nothing in `web/src` calls it**, and it is not in `ORDERS_ABI`. A driver
-   commits a bid and cannot take it back.
-2. 🟡 **Reputation in the bid cards.** A6 wired delivered/failed per bidder when
-   bid cards were built from the on-chain `biddersOf`/`bidOf`. Sealed bids now
-   arrive off-chain from the relay's `/bidbox` (`fetchSealedBids`), and the
-   reputation lookup did not come with them. `CustomerOrder` does read
-   `drivers.drivers(o.driver)` — but only for `metadataURI`, and only once a
-   driver is already **assigned**, which is after the choice has been made. So
-   the customer picks among bids blind.
+1. ✅ **Retract a bid — intact, via a different route.** `withdrawBid` was wired
+   (A1) and then deleted from the contract with the rest of the open-bid path.
+   The replacement is whole: "Withdraw sealed" in `DriverBid` →
+   `revokeSealedBid` (`sealedbid.ts`) → relay `/revoke-bid` →
+   `ordersW.revokeBid`. Searching `web/src` for `revokeBid` finds nothing and
+   that is **correct, not a gap** — the call is made by the relay, because a
+   driver-signed retraction would name them on-chain and undo the sealing. The
+   secret authorizes it instead of a signature.
+2. ⛔ **Reputation in the bid cards — genuinely lost.** A6 rendered
+   delivered/failed per bidder when bid cards were built from the on-chain
+   `biddersOf`/`bidOf`. Sealed bids now arrive off-chain from the relay's
+   `/bidbox` (`fetchSealedBids`) and the reputation lookup did not come with
+   them. `CustomerOrder` does read `drivers.drivers(o.driver)` — but only for
+   `metadataURI`, and only once a driver is already **assigned**, which is after
+   the choice has been made. So the customer picked among bids blind. Wired back
+   in A6r via `reputation.ts`.
 
-Neither is a doc problem, so neither is fixed here; both are tracked as A1r/A6r
-on the Part 4 board. The lesson worth keeping: *removing* a contract path can
-silently un-wire a feature that was ticked off months earlier, and a board of
-checkboxes has no way to notice.
+Two lessons, and the second one cost more than the first. *Removing* a contract
+path can silently un-wire a feature ticked off months earlier, and a board of
+checkboxes has no way to notice — that is real, and A6 is the example. But the
+first audit of this also reported A1 as broken, on the evidence that `web/src`
+contains no `revokeBid` call. It contains no such call **by design**. Grepping
+for a contract method name is a test for one implementation, not for the
+capability; the capability was there the whole time, one indirection away.
 
 Everything ⚙️ is deliberately out of the consumer PWA — it belongs in an **ops/governance console** (Part 3, group D).
 
@@ -158,7 +165,7 @@ role views. The mapping below is the target shape.
 | Pay | native PAS **or** Asset Hub USDC escrow | ✅ | Dual-asset selector at checkout; fiat display captured into the receipt at checkout (C2); gasless where the relay can carry it (C1) |
 | Order confirmation | `OrderCreated` event | ✅ | — |
 | **Live tracking** (status, driver on map, ETA) | order `status` + E2E channel (`kind:loc`) | ✅ | Driver opt-in shares live location; customer sees driver+trace+ETA on TrackMap (off-chain, E2E) |
-| Pick a Dasher (FARE-specific: reverse auction) | `commitBid` → `fetchSealedBids` → `acceptSealedBid` | 🟡 | Sealed bid cards work, but **no driver reputation is shown on them** — regressed with the sealed-bid migration (A6r) |
+| Pick a Dasher (FARE-specific: reverse auction) | `commitBid` → `fetchSealedBids` → `acceptSealedBid` | ✅ | Sealed bid cards, cheapest first, each showing the bidder's delivered/failed record and success rate (A6r) — a new driver reads as unknown rather than as perfect |
 | Chat with Dasher / support | E2E crypto (`msg.ts`) + relay channel (`channel.ts`) | ✅ | ChatPanel in order cards; per-order topic, KV/venue-node relay (MESSAGING.md) |
 | Handoff / proof of delivery | `confirmDropoffZK` (ZK) + E2E photo (`kind:photo`) | ✅ | ZK dropoff + optional E2E delivery photo (crypto-shred, expires) |
 | Rate order + driver + restaurant | `FareRatings` (verified-delivery) | ✅ | On-chain stars, gated to a Delivered order's customer |
@@ -172,7 +179,7 @@ role views. The mapping below is the target shape.
 | Sign up + (stake) | `register` | ✅ | Stake optional (`minStake` is 0 on Paseo today) |
 | **Go online / availability + location** | region discovery + radius filter | 🟡 | Radius filter exists; still **no explicit online/offline toggle or presence** |
 | Receive offers (pay, distance) | in-region open-order discovery | ✅ | Server-side region topic filter + distance sort |
-| Bid / accept offer (reverse auction) | `commitBid` (sealed) | 🟡 | Bidding ✅ and sealed — the chain never sees who bid or how much. **Cannot retract**: `revokeBid` exists on-chain but is unwired (A1r) |
+| Bid / accept offer (reverse auction) | `commitBid` / `revokeBid` (sealed) | ✅ | Bidding is sealed — the chain never sees who bid or how much — and "Withdraw sealed" retracts it through the relay, authorized by the revoke secret rather than a signature |
 | Navigate to restaurant | venue pin | 🟡 | Pin shown; **no in-app nav/route** — no maps hand-off anywhere in the app |
 | Confirm pickup | `confirmPickup` | ✅ | Dual-sig + QR |
 | Navigate to customer | ZK — driver gets coords at handoff | 🟡 | By design coords are late-bound; still needs a nav bridge at handoff |
@@ -212,16 +219,16 @@ Ordered roughly by leverage. Check off as landed.
 
 ### Group A — On-chain tie-ins (fast wins: primitive already exists) 🟡 MOSTLY DONE
 *Pure PWA wiring — no new contracts.*
-- [~] ~~`withdrawBid` — driver retract-bid button (`DriverBid`)~~ **undone.** The
-      entry point was deleted with the open-bid path; the sealed-bid equivalent
-      `revokeBid` is unwired (A1r).
+- [x] Driver retract-bid button (`DriverBid`) — was `withdrawBid`, now
+      "Withdraw sealed" → `revokeSealedBid` → relay → `revokeBid`. The entry
+      point changed under it; the capability did not.
 - [x] Driver stake lifecycle: `addStake` / `requestUnstake` / `withdrawStake` (+ unbonding countdown) (`DriverAccount`)
 - [x] Driver + venue profile edit: `setMetadata` (`DriverAccount` / `VenueManage`)
 - [x] Venue management: `setActive` (pause/resume), `setLocation`, `setPayout`, `setSigner` (`VenueManage`)
 - [x] Vault: `withdrawTo` (cold wallet) + `claimPaseoDust` (+ show `pendingPaseoDust`) (`VaultStrip`)
-- [~] ~~Surface driver **reputation** (delivered/failed + success %) in bid cards (`CustomerOrder`)~~
-      **undone.** It was rendered per bidder off `biddersOf`/`bidOf`; sealed bid
-      cards are built from the relay instead and carry no reputation (A6r).
+- [x] Surface driver **reputation** (delivered/failed + success %) in bid cards
+      (`CustomerOrder`). Broke when bid cards moved off `biddersOf`/`bidOf` to
+      the relay's bid box; rebuilt as `reputation.ts` (A6r).
 - [x] Dispute **evidence** input on `openDispute` + a dispute status/detail view (`DisputeControl`)
 
 ### Group B — Off-chain product services (net-new)
@@ -368,14 +375,13 @@ one wallet session + toast in `OpsApp.tsx`; only D5 (offline ceremony) remains.*
 
 | # | Item | Group | Home | Status |
 |---|---|---|---|---|
-| A1 | Retract bid (`withdrawBid`) | A | Driver view | ⚠️ **undone** — the contract path was deleted with open bids (PR #15); see A1r |
-| A1r | Retract a **sealed** bid (`revokeBid`) | A | Driver view | ☐ todo — on-chain and `sealedbid.ts` already keeps the `revokeSecret`, but there is **no call site in `web/src`** and it is absent from `ORDERS_ABI` |
+| A1 | Retract bid | A | Driver view | ✅ done — rebuilt as the sealed path when `withdrawBid` was deleted (PR #15): "Withdraw sealed" → `revokeSealedBid` → relay `/revoke-bid` → `revokeBid`. Absent from `ORDERS_ABI` **by design** — the relay makes the call so the driver is never named on-chain |
 | A2 | Driver stake lifecycle | A | Driver view | ✅ done |
 | A3 | Profile edit (`setMetadata`) | A | Driver/Venue | ✅ done |
 | A4 | Venue management (active/pin/payout/signer) | A | Venue view | ✅ done |
 | A5 | Vault: withdrawTo + dust claim | A | Wallet chip | ✅ done |
-| A6 | Reputation in bid cards | A | Customer view | ⚠️ **undone** — was wired against the on-chain `biddersOf`/`bidOf`; see A6r |
-| A6r | Reputation on **sealed** bid cards | A | Customer view | ☐ todo — bids now come from the relay's `/bidbox` (`fetchSealedBids`) and no reputation lookup came with them. `CustomerOrder` reads `drivers(o.driver)` for `metadataURI` only, and only **after** assignment — i.e. after the choice |
+| A6 | Reputation in bid cards | A | Customer view | ⚠️ was **undone** by the sealed-bid migration — rebuilt as A6r |
+| A6r | Reputation on **sealed** bid cards | A | Customer view | ✅ done — `web/src/reputation.ts` (+13 tests) reads the `drivers(address)` struct per bidder, deduped and keyed on the bidder *set* so the 8 s poll doesn't re-read it. Shows `✓N · ✗M · P%`, distinguishes a **new driver** from a perfect one, never rounds up to 100 with a failure on record, and disables Accept for a banned driver (the contract's `isEligible` would revert anyway) |
 | A7 | Dispute evidence + status view | A | Customer/Driver | ✅ done |
 | B1 | Catalog / menu / cart | B | New service + all views | ✅ done — full catalog (images, categories, modifiers, hours, search) **+ the order ticket that actually reaches the venue** (`web/src/ticket.ts`); needs IPFS configured |
 | B2 | Live tracking + ETA | B | Customer/Driver | ✅ done (E2E driver location + TrackMap) |
