@@ -29,7 +29,9 @@ const ks = await import(pathToFileURL(path.join(ROOT, "web/src/shieldpool.ts")).
 
 const RPC = process.env.TESTNET_RPC ?? "https://eth-rpc-testnet.polkadot.io/";
 const BOOK = JSON.parse(fs.readFileSync(path.join(ROOT, "deployed-addresses.json"), "utf8"));
-const POOL = process.env.SHIELD_POOL ?? "0x3068490C79708D0725E3D4Aa9C35Da708f09071e";
+// See docs/KUSAMA-SHIELD-FINDINGS.md Issue 7 — the v7 pool 0x3068490C… cannot
+// be withdrawn from, so this deliberately is not it.
+const POOL = process.env.SHIELD_POOL ?? "0x7d5a496bD61b631025A828d9049f6A68e007e0dC";
 const OUT = path.join(ROOT, "e2e-runs", "privacy-order");
 const GAS = 500_000_000n;
 

@@ -27,7 +27,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    command: ["node", "--env-file=.env", "agent.mjs"]
+    command: ["node", "agent.mjs"]
     restart: unless-stopped
     env_file: .env
     environment:
@@ -46,7 +46,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    command: ["node", "--env-file=.env", "relay.mjs"]
+    command: ["node", "relay.mjs"]
     restart: on-failure:3
     env_file: .env
     environment:
@@ -61,7 +61,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    command: ["node", "--env-file=.env", "push.mjs"]
+    command: ["node", "push.mjs"]
     restart: on-failure:3
     env_file: .env
     environment:

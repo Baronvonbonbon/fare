@@ -16,7 +16,11 @@ export const LEDGER_FILE = path.join(OUT, "ledger.json");
 
 export const RPC = env("TESTNET_RPC") || "https://eth-rpc-testnet.polkadot.io/";
 export const GAS_PRICE_WEI = 1_000_000_000_000n; // 1000 gwei on Paseo AH
-export const KS_POOL = process.env.SHIELD_POOL || "0x3068490C79708D0725E3D4Aa9C35Da708f09071e";
+// NOT the "canonical" v7 pool 0x3068490C…. Its isKnownRoot panics with
+// Panic(0x32) for every non-zero root, so withdraw and proxy_withdraw both
+// revert at step 2 and nothing deposited can ever come out. See
+// docs/KUSAMA-SHIELD-FINDINGS.md Issue 7.
+export const KS_POOL = process.env.SHIELD_POOL || "0x7d5a496bD61b631025A828d9049f6A68e007e0dC";
 
 export function env(k) {
   try {
