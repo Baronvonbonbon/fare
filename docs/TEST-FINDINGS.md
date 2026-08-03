@@ -23,8 +23,8 @@ Ordered by what a reader should act on, not by discovery order.
 | 24 | `regionsCovering` returned 3.6M cells near a pole, hanging the tab | **Medium** | ✅ Fixed |
 | 25 | New tests passed but broke `npm run build`, which CI gates on | Medium (process) | ✅ Fixed |
 | 26 | Every order ticket was posted into the same relay slot, so any stranger could erase one | **Medium** | ✅ Fixed |
-| 27 | The v7 shielded pool accepts deposits and can never pay them out | **Critical** (funds lost) | 🟡 Client moved back; on-chain vault pointer still to flip |
-| 28 | The stablecoin e2e prints ✅ without sending a transaction | **Medium** (process) | ☐ Open |
+| 27 | The v7 shielded pool accepts deposits and can never pay them out | **Critical** (funds lost) | ✅ Fixed — client + vault pointer both back on the working pool |
+| 28 | The stablecoin e2e printed ✅ without sending a transaction | **Medium** (process) | ✅ Fixed |
 | 2 | `/fund` can double-fund inside a 250 ms window | Low → **Medium** once the relay went public | ✅ Fixed |
 | 3 | Oversized request body returns 500, not 413 | Cosmetic | ✅ Fixed |
 | 4 | CI ran nothing but Slither, path-filtered to `contracts/**` | **High** (process) | ✅ Fixed |
@@ -726,7 +726,7 @@ our money out*, that is the one thing the verification must do.
 
 ---
 
-## 28. The stablecoin e2e reports success without running — **open**
+## 28. The stablecoin e2e reported success without running — **fixed**
 
 `scripts/e2e-stablecoin.mjs` guards every phase on a persisted `st.*` flag
 (`if (!st.accepted) { … }`) and then prints progress as bare `console.log`s with
@@ -745,8 +745,40 @@ real evidence for the USDC path is still the 2026-07-28 ledger.
 
 Same family as findings 8–11 and the `record()` bug that printed `✓` for a
 reverted receipt: **the run's own output is not evidence unless something
-asserts.** Fix is to assert the status rather than print it, and to make resume
-explicit (`RESUME=1`) so a bare run is always a real run.
+asserts.**
+
+**Fixed** three ways, and the order matters because the first two are not what
+actually closes it:
+
+1. **Resume is opt-in.** `RESUME=1` is now required to reuse state; a bare run
+   always starts a fresh order. This is what stops the accident.
+2. **Statuses are asserted, not printed.** `expectStatus(orders, id, want)`
+   replaces `console.log(\`status ${…} (2=Assigned)\`)`. It polls — a read issued
+   immediately after a *confirmed* write can hit a lagging node on Paseo's
+   load-balanced RPC, which is real: order #14 read `3` right after a successful
+   `confirmDropoffZK` receipt and was `4` moments later. It asserts **≥**, since
+   under resume the order is legitimately already further along.
+3. **`txCount` — the one that actually closes it.** Because of (2)'s leniency, a
+   do-nothing run could still satisfy every status check. So the script counts
+   the transactions it sent and **refuses to print ✅ if that count is zero**.
+   Statuses can look right without anything having happened; a transaction count
+   cannot.
+
+The general lesson: when the failure is "it did nothing", the assertion has to
+be about *work performed*, not about *state observed*. State was already correct
+— that was the whole problem.
+
+Verified both directions. Against the stale state that produced the original
+false green, it now fails with
+`order #8: expected status 2 (Assigned), got 4 (Delivered)` and exit 1. A real
+run drove order #14 end to end in USDC.
+
+**Also fixed while here:** the script budgeted the customer's USDC as
+`ORDER_VALUE + TIP + FARE + usdc(5)`, a magic constant standing in for the
+service fee. That fee is governed and moved 4.25 → 0.85 the same day, so the
+constant was wrong in both directions — over-funding after a cut, and silently
+under-funding after a raise, which is exactly how the native scripts hit
+`"bad-value"` in July. It now reads `relayServiceFee(stablecoin)` from chain.
 
 ---
 

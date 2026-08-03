@@ -40,11 +40,62 @@ const positionCommit = (lat, lon, salt) => b32(poseidon3([encLat(lat), encLon(lo
 const OUT = path.join(ROOT, "e2e-runs", "e2e-stablecoin");
 const LEDGER = path.join(OUT, "ledger.json");
 const STATE = path.join(process.env.E2E_SCRATCH || "/tmp/claude-1000/-home-k-Documents-fare/b72267a7-e6ed-4ea1-a42c-ce13603eacaa/scratchpad", "e2e-stablecoin-state.json");
-const loadSt = () => (fs.existsSync(STATE) ? JSON.parse(fs.readFileSync(STATE, "utf8")) : {});
+/// Resume is OPT-IN. Every phase below is guarded on a persisted `st.*` flag, so
+/// with a state file left over from a finished order a bare run skipped all of
+/// them, asserted nothing, sent no transaction, and still printed ✅ (finding 28
+/// in docs/TEST-FINDINGS.md). A run that does nothing must not look like a run
+/// that passed, so the default is now a fresh order and `RESUME=1` is required
+/// to continue an interrupted one.
+const RESUME = process.env.RESUME === "1";
+const loadSt = () => (RESUME && fs.existsSync(STATE) ? JSON.parse(fs.readFileSync(STATE, "utf8")) : {});
 const saveSt = (s) => { fs.mkdirSync(path.dirname(STATE), { recursive: true }); fs.writeFileSync(STATE, JSON.stringify(s, null, 2)); };
+
+/// Assert an on-chain status instead of printing it next to a hardcoded label.
+/// The old code did `console.log(\`status ${await statusOf(id)} (2=Assigned)\`)`,
+/// which prints the actual value beside the expected one and compares neither —
+/// so a finished order printed "status 4 (2=Assigned)" three times, matching
+/// none of them, and the run still ended green.
+const STATUS_NAME = { 1: "Open", 2: "Assigned", 3: "PickedUp", 4: "Delivered", 5: "Cancelled" };
+
+/// Polls, because Paseo's hosted RPC is load-balanced and a read issued right
+/// after a CONFIRMED write can land on a node that has not caught up — order #14
+/// read 3 immediately after a successful confirmDropoffZK receipt and was 4
+/// moments later. Bounded and still fatal: it fails if the status never arrives,
+/// and a genuinely wrong status (a stale resume showing 4 where 2 is wanted)
+/// never becomes right no matter how long we wait, so this does not weaken the
+/// check that finding 28 was about.
+/// Asserts the order has reached AT LEAST `want`. The lifecycle is monotonic
+/// (Open → Assigned → PickedUp → Delivered), and under RESUME the order is by
+/// definition already part-way through, so demanding equality would fail every
+/// resumed run at its first checkpoint.
+///
+/// That leniency is NOT what stops finding 28 — `txCount` below is. A run that
+/// only reads is caught at the end, whatever the statuses said.
+async function expectStatus(orders, orderId, want, { tries = 15, delayMs = 2000 } = {}) {
+  let got;
+  for (let i = 0; i < tries; i++) {
+    got = Number(await orders.statusOf(orderId));
+    if (got >= want) {
+      const note = got > want ? ` — already past ${STATUS_NAME[want]}` : "";
+      console.log(`   status ${got} (${STATUS_NAME[got] ?? "?"}) ✓${i ? ` after ${i} retr${i === 1 ? "y" : "ies"}` : ""}${note}`);
+      return;
+    }
+    if (i < tries - 1) await new Promise((r) => setTimeout(r, delayMs));
+  }
+  throw new Error(
+    `order #${orderId}: expected status ≥ ${want} (${STATUS_NAME[want]}), got ${got} (${STATUS_NAME[got] ?? "?"}) ` +
+    `after ${tries} reads over ${(tries * delayMs) / 1000}s`
+  );
+}
 function appendLedger(e) { fs.mkdirSync(OUT, { recursive: true }); const l = fs.existsSync(LEDGER) ? JSON.parse(fs.readFileSync(LEDGER, "utf8")) : []; l.push(e); fs.writeFileSync(LEDGER, JSON.stringify(l, null, 2)); }
 
+/// How many transactions this run actually sent. The whole point of finding 28:
+/// a run that skipped every phase still printed ✅. Statuses can look right
+/// without anything having happened; this cannot.
+let txCount = 0;
+
 async function rec(prov, { step, party, action, hash, tokenValue }) {
+  txCount++;
   const rc = await waitTx(prov, hash, action);
   const fee = (rc.gasUsed ?? 0n) * GAS_PRICE_WEI;
   const e = { step, party, action, from: rc.from, to: rc.to, usdc: tokenValue != null ? (Number(tokenValue) / 1e6).toString() : "", hash, block: rc.blockNumber, status: rc.status, gasUsed: (rc.gasUsed ?? 0n).toString(), feePAS: ethers.formatEther(fee) };
@@ -83,6 +134,7 @@ async function main() {
     "function bidHashOf(uint256,address,uint96,bytes32) pure returns (bytes32)", "function commitBid(uint256,bytes32,bytes32)", "function acceptSealedBid(uint256,address,uint96,bytes32) payable", "function acceptSealedBidERC20(uint256,address,uint96,bytes32)",
     "function nextOrderId() view returns(uint256)", "function statusOf(uint256) view returns(uint8)",
     "function dropCommitOf(uint256) view returns(bytes32)", "function treasury() view returns(address)", "function feeBps() view returns(uint16)",
+    "function relayServiceFee(address) view returns(uint96)",
   ], prov);
   const vault = new ethers.Contract(b.vault, ["function tokenBalanceOf(address,address) view returns(uint256)", "function withdrawToken(address)"], prov);
 
@@ -97,7 +149,14 @@ async function main() {
   // commitment, withdrawal names the burner and a nullifier, and nothing ties
   // them together. The relay submits the withdrawals, so the burner needs no
   // prior balance to receive its first one.
-  const NEED = ORDER_VALUE + TIP + FARE + usdc(5); // + headroom for the service fee
+  // READ the service fee; do not budget a magic constant for it. It is governed
+  // (`setRelayServiceFee`) and moves without a redeploy — it went 4.25 → 0.85
+  // USDC on 2026-08-03 — so a hardcoded `+ usdc(5)` headroom is wrong in both
+  // directions: it over-funds after a cut, and silently under-funds after a
+  // raise, which is how the native scripts hit "bad-value" in July.
+  const SERVICE_FEE = await orders.relayServiceFee(b.stablecoin);
+  const NEED = ORDER_VALUE + TIP + FARE + SERVICE_FEE + usdc(0.5); // + slack for rounding/approve
+  console.log(`   service fee (live): ${fmt6(SERVICE_FEE)} USDC → needs ${fmt6(NEED)} USDC total`);
   if (!st.funded) {
     const held = await USDC.balanceOf(deployer.address);
     if (held < NEED) {
@@ -169,7 +228,7 @@ async function main() {
     await rec(prov, { step: "S.accept", party: "customer", action: "acceptSealedBidERC20", hash: tx.hash, tokenValue: FARE });
     st.accepted = true; saveSt(st);
   }
-  console.log(`   status ${await orders.statusOf(orderId)} (2=Assigned)`);
+  await expectStatus(orders, orderId, 2);
 
   // Settlement goes through the RELAY'S HTTP ENDPOINT, not the relay's key
   // directly. That distinction is the whole point: submitting with the key
@@ -210,7 +269,7 @@ async function main() {
     await rec(prov, { step: "S.pickup", party: "relay(venue-node)", action: "confirmPickup", hash: out.txHash });
     st.pickup = true; st.pickupCoarse = dC; saveSt(st);
   }
-  console.log(`   status ${await orders.statusOf(orderId)} (3=PickedUp)`);
+  await expectStatus(orders, orderId, 3);
 
   // ── 6. confirmDropoffZK (real Groth16 proof, relay submits) ────────────────
   if (!st.dropoff) {
@@ -235,7 +294,7 @@ async function main() {
     await rec(prov, { step: "S.dropoff", party: "relay(venue-node)", action: "confirmDropoffZK", hash: out.txHash });
     st.dropoff = true; saveSt(st);
   }
-  console.log(`   status ${await orders.statusOf(orderId)} (4=Delivered)`);
+  await expectStatus(orders, orderId, 4);
 
   // ── 7. token payouts + verify splits ───────────────────────────────────────
   const treasury = await orders.treasury(), feeBps = await orders.feeBps();
@@ -247,7 +306,17 @@ async function main() {
   if (!st.driverPaid && bD > 0n) { const tx = await vault.connect(D).withdrawToken(b.stablecoin, { gasLimit: await leanGas(vault.connect(D).withdrawToken, [b.stablecoin]) }); await rec(prov, { step: "S.payout-driver", party: "driver", action: "withdrawToken", hash: tx.hash, tokenValue: bD }); st.driverPaid = true; saveSt(st); }
 
   console.log(`\n   venue wallet USDC now: ${fmt6(await USDC.balanceOf(V.address))}   driver wallet USDC now: ${fmt6(await USDC.balanceOf(D.address))}`);
-  console.log(`\n✅ STABLECOIN e2e complete. orderId=${st.orderId}. Ledger: artifacts/e2e-stablecoin/ledger.json`);
+  // Finding 28: this is the line that used to lie. Every phase is guarded on a
+  // persisted flag, so a run over finished state skipped all of them and still
+  // got here. Reaching the end is not the claim — sending transactions is.
+  if (txCount === 0) {
+    throw new Error(
+      "this run sent NO transactions — every phase was skipped as already done, so nothing was verified. " +
+      (RESUME ? "Drop RESUME=1 to run a fresh order." : "Delete the state file or investigate.")
+    );
+  }
+  console.log(`\n✅ STABLECOIN e2e complete. orderId=${st.orderId}. ${txCount} transaction${txCount === 1 ? "" : "s"} sent this run.`);
+  console.log(`   Ledger: ${path.relative(ROOT, LEDGER)}`);
 }
 const fmt6 = (x) => (Number(x) / 1e6).toString();
 
