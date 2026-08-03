@@ -280,6 +280,58 @@ pointer only governs where new ones go.
 retry-on-`"Unknown root"` workaround stays.
 
 
+## The forwarder hop costs 96% of a withdrawal and hides nothing (2026-08-03)
+
+Measured on the working pool, same note size, same fresh recipient, both
+succeeding and delivering 0.5 PAS:
+
+| call | gas | fee @ 1000 gwei | tx |
+|---|---|---|---|
+| `withdraw` | **31,141** | **0.031 PAS** | `0x791a4473…` |
+| `proxy_withdraw` | **773,079** | **0.773 PAS** | `0x05b612dd…` |
+| difference | 741,938 | 0.742 PAS | **24.8×** |
+
+The forwarder is **96% of the cost of a shielded withdrawal**. It is 24× the
+entire rest of the operation — proof verification, nullifier write, escrow
+update, transfer and change insert combined — because `new SimpleTokenForwarder`
+is a contract deployment, and deploying on PolkaVM is expensive. For scale, a
+`depositNative` is 17,900 gas, so the forwarder costs about **41 deposits**.
+
+**And it buys no privacy.** Both functions end with the same line:
+
+```solidity
+emit Withdrawal(asset, withdrawnValue, recipient, newCommitmentHash);
+```
+
+The pool names the recipient in its own event log on both paths, and the
+forwarder emits `NativeForwarded(from, to, amount)` on top of that — so the
+recipient is published twice on the expensive path and once on the cheap one.
+The only difference the forwarder makes is which address appears as the
+immediate sender of the *value transfer*, in the same transaction that logs the
+recipient anyway. That defeats an observer who reads balance traces but not
+event logs, which is not an observer worth 0.742 PAS.
+
+**What is identical between them**, and is where the real privacy lives:
+
+- Both take `recipient` as a parameter, so **the recipient never signs** and a
+  relay can submit either. Sender unlinkability is a property of the *relayed
+  submission*, not of the forwarder.
+- Both spend a nullifier against a ZK proof, so which deposit funded the
+  withdrawal is hidden by the anonymity set in both.
+- Neither reveals the funder. The customer→burner edge that per-order burners
+  exist to break is broken identically by both.
+
+**Recommendation: switch `web/src/shieldpool.ts` and the relay's
+`/shield-withdraw` to `withdraw`.** The call takes byte-identical arguments —
+`withdraw(uint[2],uint[2][2],uint[2],uint[8],address)` — so it is a one-word
+change with no proof, circuit or client-model impact. It takes the single most
+expensive action in FARE (0.773 PAS, 40× a ZK dropoff) down to 0.031 PAS,
+roughly the cost of creating an order.
+
+Not done unilaterally: it is a live privacy-surface change and belongs to whoever
+owns that call. The measurement is `scripts/shield/pool-withdraw-probe.mjs`
+(`MODE=withdraw|proxy`), and it is cheap to re-run.
+
 ## PoseidonPolkaVM — already in use, no change needed (2026-08-01)
 
 The release advertises **PoseidonPolkaVM at 17.7× cheaper gas than Solidity**, which looked like a

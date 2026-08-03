@@ -29,6 +29,7 @@ const POOL_ABI = [
   "function withdraw(uint[2] pA, uint[2][2] pB, uint[2] pC, uint[8] pubSignals, address recipient)",
   "function treeSize() view returns (uint256)",
   "function currentRoot() view returns (uint256)",
+  "function sideNodes(uint256) view returns (uint256)",
 ];
 const b32 = (x) => ethers.zeroPadValue(ethers.toBeHex(x), 32);
 const key = () => process.env.DEPLOYER_PRIVATE_KEY
@@ -60,12 +61,36 @@ if (fs.existsSync(NOTE_FILE) && !process.env.FRESH) {
   record = JSON.parse(fs.readFileSync(NOTE_FILE, "utf8"));
   console.log("\nreusing persisted note, index", record.index, "value", ethers.formatEther(record.value));
 } else {
-  console.log("\ndepositing", ethers.formatEther(value), "PAS");
-  const r = await ks.depositAndSnapshot(POOL, D0, prov, value, GAS_LIMIT);
-  record = r.record;
-  fs.mkdirSync(path.dirname(NOTE_FILE), { recursive: true });
-  fs.writeFileSync(NOTE_FILE, JSON.stringify(record, (_, v) => typeof v === "bigint" ? v.toString() : v, 2));
-  console.log("deposited. note persisted →", path.relative(ROOT, NOTE_FILE), "index", record.index);
+  // Deliberately NOT ks.depositAndSnapshot: that mints the note, deposits, and
+  // only returns after snapshotting, so the secrets exist on chain but nowhere
+  // else for the whole of that call. A stall in the snapshot leg — which is
+  // what happened here on 2026-08-03 — strands the leaf permanently. Minting
+  // and writing the secrets BEFORE the value moves makes the same failure
+  // recoverable: index + note is enough, and the left path can be read back
+  // afterwards because those levels never change once inserted.
+  const index = Number(await pool.treeSize());
+  const note = ks.makeNote(value);
+  const bit = (n, lv) => ((BigInt(n) >> BigInt(lv)) & 1n) === 1n;
+  const persist = (extra = {}) => {
+    fs.mkdirSync(path.dirname(NOTE_FILE), { recursive: true });
+    fs.writeFileSync(NOTE_FILE, JSON.stringify({ ...note, index, ...extra },
+      (_, v) => (typeof v === "bigint" ? v.toString() : v), 2));
+  };
+  persist({ depositBlock: 0, leftSnapshot: {}, pending: true });
+  console.log("note secrets persisted BEFORE deposit → index", index);
+
+  console.log("depositing", ethers.formatEther(value), "PAS");
+  const tx = await pool.depositNative(ethers.zeroPadValue(ethers.toBeHex(ks.commitmentOf(note)), 32),
+    { value, gasLimit: GAS_LIMIT, gasPrice: GAS.gasPrice });
+  const receipt = await tx.wait();
+  console.log("deposit", receipt.hash, "gasUsed", receipt.gasUsed.toString());
+
+  const leftSnapshot = {};
+  for (let lv = 0; lv < 128; lv++) if (bit(index, lv)) leftSnapshot[lv] = (await pool.sideNodes(lv)).toString();
+  const depositBlock = Math.max(0, Number(receipt.blockNumber) - 1);
+  persist({ depositBlock, leftSnapshot });
+  record = { ...note, index, leftSnapshot, depositBlock };
+  console.log("note complete →", path.relative(ROOT, NOTE_FILE), "index", index);
 }
 
 const recipient = ethers.Wallet.createRandom().address;
