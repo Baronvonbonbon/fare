@@ -117,6 +117,25 @@ export async function fetchCapsules(
     .map((e) => ({ from: e.from, capsule: { epk: e.pub!, iv: e.iv!, ct: e.ct! } }));
 }
 
+/// A ticket's identity on the relay, derived from its ciphertext.
+///
+/// The relay dedupes on `(from, seq, kind)` and a repost REPLACES. Tickets are
+/// posted anonymously — `from` is always "" — so a fixed `seq` would give an
+/// order ONE ticket slot, and the last writer would win it: anyone who knows the
+/// topic could overwrite the real ticket with noise and leave the kitchen with
+/// nothing, which is the opposite of the open-mailbox reasoning in `fetchTicket`
+/// (a hostile ticket should fail to decrypt, not erase the real one).
+///
+/// Keying on the content instead makes distinct tickets append while a RETRY of
+/// the same ticket still collapses onto itself, which is the idempotency the
+/// endpoint is offering. A collision would merely replace one ticket with
+/// another — the behaviour we already had, not a new failure.
+function ticketSeq(ct: string): number {
+  let h = 0;
+  for (let i = 0; i < ct.length; i++) h = (Math.imul(h, 31) + ct.charCodeAt(i)) | 0;
+  return h >>> 0;
+}
+
 /// Drop an order ticket (the line items, sealed to the venue's hot signer — see
 /// ticket.ts) on the order's thread. Standalone rather than an `OrderThread`
 /// method because the venue is a THIRD party: the thread's shared key is derived
@@ -128,7 +147,7 @@ export async function postTicket(
 ): Promise<boolean> {
   return post(topicOf(orderId), {
     from: "", // anonymous by construction: the seal carries the only key that matters
-    seq: 0,
+    seq: ticketSeq(sealed.ct),
     kind: "ticket",
     ts: Date.now(),
     pub: sealed.epk,

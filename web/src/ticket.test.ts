@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 import { Wallet, SigningKey, parseEther } from "ethers";
 import { sealAnon, openAnon } from "./msg";
 import type { OrderTicket, TicketLine } from "./ticket";
@@ -15,7 +15,47 @@ class MemStorage {
 }
 (globalThis as any).localStorage = new MemStorage();
 
-const { ticketTotalWei, verifyTicketTotal, venueKeyMatches } = await import("./ticket");
+// The venue-registry read and the relay hop are the only two things the
+// send/receive half touches, and both are stubbed: what is under test is the
+// fail-closed rule (no verifiable key → no ticket, never plaintext) and the
+// venue-side selection. ethers and the channel have their own suites, and the
+// SEALING here is real crypto — msg.ts is not stubbed.
+let registeredSigner: string | null = null;
+let registryThrows = false;
+
+vi.mock("./chain", () => ({
+  ADDRESSES: { venues: "0x" + "22".repeat(20) },
+  readProvider: {},
+}));
+
+vi.mock("ethers", async (orig) => {
+  const actual = await orig<typeof import("ethers")>();
+  return {
+    ...actual,
+    Contract: vi.fn(function () {
+      return {
+        venues: async () => {
+          if (registryThrows) throw new Error("no chain in this test");
+          return { signer: registeredSigner };
+        },
+      };
+    }),
+  };
+});
+
+// An in-memory order thread. Deliberately an append-only mailbox anyone can
+// write to, which is what the real relay is.
+const inbox = new Map<string, { epk: string; iv: string; ct: string }[]>();
+vi.mock("./channel", () => ({
+  postTicket: async (orderId: bigint | string, sealed: { epk: string; iv: string; ct: string }) => {
+    inbox.set(String(orderId), [...(inbox.get(String(orderId)) ?? []), sealed]);
+    return true;
+  },
+  fetchTickets: async (orderId: bigint | string) => inbox.get(String(orderId)) ?? [],
+}));
+
+const { ticketTotalWei, verifyTicketTotal, venueKeyMatches, verifiedVenueKey, sendTicket, fetchTicket } =
+  await import("./ticket");
 
 const lines: TicketLine[] = [
   { name: "Pad Thai", price: "1.5", qty: 2 },
@@ -119,5 +159,137 @@ describe("sealing to the venue", () => {
     const a = await sealAnon(pub, context, JSON.stringify(ticket()));
     const b = await sealAnon(pub, context, JSON.stringify(ticket()));
     expect(a.epk).not.toBe(b.epk);
+  });
+});
+
+// ── the send/receive half ────────────────────────────────────────────────────
+
+const pubOf = (w: { privateKey: string }) => new SigningKey(w.privateKey).publicKey;
+
+describe("resolving the venue's key against the registry", () => {
+  beforeEach(() => { registeredSigner = null; registryThrows = false; });
+
+  it("returns the key when it derives to the signer the registry names", async () => {
+    const venue = Wallet.createRandom();
+    registeredSigner = venue.address;
+    expect(await verifiedVenueKey(1n, pubOf(venue))).toBe(pubOf(venue));
+  });
+
+  // A menu is public and mutable, so its signerPub is a claim. Trusting it would
+  // hand the order to whoever published the menu.
+  it("refuses a key the registry does not name", async () => {
+    registeredSigner = Wallet.createRandom().address;
+    expect(await verifiedVenueKey(1n, pubOf(Wallet.createRandom()))).toBeNull();
+  });
+
+  it("is null for a venue that has published no signer key at all", async () => {
+    registeredSigner = Wallet.createRandom().address;
+    expect(await verifiedVenueKey(1n, undefined)).toBeNull();
+  });
+
+  // Can't verify → don't encrypt. An unreachable registry must not degrade into
+  // trusting the menu.
+  it("is null when the registry read fails", async () => {
+    registryThrows = true;
+    const venue = Wallet.createRandom();
+    registeredSigner = venue.address;
+    expect(await verifiedVenueKey(1n, pubOf(venue))).toBeNull();
+  });
+});
+
+describe("sending a ticket", () => {
+  beforeEach(() => { registeredSigner = null; registryThrows = false; inbox.clear(); });
+
+  it("seals to the verified venue key and drops it on the thread", async () => {
+    const venue = Wallet.createRandom();
+    registeredSigner = venue.address;
+
+    expect(await sendTicket(ticket(), pubOf(venue))).toBe(true);
+    const posted = inbox.get("7")!;
+    expect(posted).toHaveLength(1);
+    // what went on the wire is ciphertext, not the menu
+    expect(JSON.stringify(posted[0])).not.toContain("Pad Thai");
+  });
+
+  // The escrow and the delivery still work without a ticket, so this reports
+  // false rather than failing the order — but it must never fall back to
+  // posting the items in the clear.
+  it("fails closed when there is no verifiable key — and posts nothing", async () => {
+    registeredSigner = Wallet.createRandom().address;
+    expect(await sendTicket(ticket(), pubOf(Wallet.createRandom()))).toBe(false);
+    expect(inbox.get("7")).toBeUndefined();
+  });
+});
+
+describe("the venue reading its thread", () => {
+  const venue = Wallet.createRandom();
+
+  beforeEach(() => { registeredSigner = venue.address; registryThrows = false; inbox.clear(); });
+
+  const send = async (t: OrderTicket, to = venue) => {
+    registeredSigner = to.address;
+    const ok = await sendTicket(t, pubOf(to));
+    registeredSigner = venue.address;
+    return ok;
+  };
+
+  it("opens the ticket and reports it bound to the escrow", async () => {
+    await send(ticket());
+    const got = await fetchTicket(7n, venue.privateKey, parseEther("4"));
+    expect(got!.verdict).toBe("bound");
+    expect(got!.totalWei).toBe(parseEther("4"));
+    expect(got!.ticket.lines).toEqual(lines);
+  });
+
+  it("surfaces a mismatch rather than hiding it — the kitchen decides", async () => {
+    await send(ticket());
+    const got = await fetchTicket(7n, venue.privateKey, parseEther("9"));
+    expect(got!.verdict).toBe("mismatch");
+  });
+
+  // The thread is an open mailbox. A ticket sealed to someone else is noise:
+  // it must not decrypt, and it must not displace the real one.
+  it("skips a ticket sealed to another key", async () => {
+    await send(ticket({ lines: [{ name: "forged", price: "99", qty: 1 }] }), Wallet.createRandom());
+    expect(await fetchTicket(7n, venue.privateKey, parseEther("4"))).toBeNull();
+
+    await send(ticket());
+    const got = await fetchTicket(7n, venue.privateKey, parseEther("4"));
+    expect(got!.verdict).toBe("bound");
+    expect(got!.ticket.lines).toEqual(lines);
+  });
+
+  it("takes the bound ticket even when a mismatching one was posted after it", async () => {
+    await send(ticket());
+    await send(ticket({ lines: [{ name: "cheap", price: "0.01", qty: 1 }], placedAt: 99 }));
+    expect((await fetchTicket(7n, venue.privateKey, parseEther("4")))!.verdict).toBe("bound");
+  });
+
+  it("keeps the latest when none of them match — a re-send supersedes", async () => {
+    await send(ticket({ lines: [{ name: "old", price: "1", qty: 1 }], placedAt: 1 }));
+    await send(ticket({ lines: [{ name: "new", price: "2", qty: 1 }], placedAt: 2 }));
+    const got = await fetchTicket(7n, venue.privateKey, parseEther("4"));
+    expect(got!.verdict).toBe("mismatch");
+    expect(got!.ticket.lines[0].name).toBe("new");
+  });
+
+  // Replaying order 8's ticket onto order 7's thread. It decrypts — same venue
+  // key — so only the orderId check inside the payload stops it being read as
+  // this order's food.
+  it("ignores a ticket addressed to a different order", async () => {
+    const replayed = await sealAnon(
+      pubOf(venue), "fare-ticket:v1:7", JSON.stringify(ticket({ orderId: "8" }))
+    );
+    inbox.set("7", [replayed]);
+    expect(await fetchTicket(7n, venue.privateKey, parseEther("4"))).toBeNull();
+  });
+
+  it("ignores a decryptable payload that isn't a ticket", async () => {
+    await send({ orderId: "7", venueId: "1", placedAt: 1 } as any); // no lines
+    expect(await fetchTicket(7n, venue.privateKey, parseEther("4"))).toBeNull();
+  });
+
+  it("is null for a thread with nothing on it", async () => {
+    expect(await fetchTicket(7n, venue.privateKey, parseEther("4"))).toBeNull();
   });
 });

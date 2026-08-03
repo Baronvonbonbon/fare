@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, vi } from "vitest";
 
 class MemStorage {
   private m = new Map<string, string>();
@@ -9,7 +9,7 @@ class MemStorage {
 }
 (globalThis as any).localStorage = new MemStorage();
 
-const { prepOf, setPrep, advancePrep, prunePrep, kitchenBoard } = await import("./kitchen");
+const { prepOf, setPrep, advancePrep, prunePrep, kitchenBoard, chime } = await import("./kitchen");
 
 type O = { id: bigint; venueId: bigint; status: number; createdAt: bigint };
 const order = (id: number, over: Partial<O> = {}): O => ({
@@ -97,5 +97,82 @@ describe("the kitchen board", () => {
     setPrep(2n, "cooking");
     const board = kitchenBoard([order(1), order(2)], MINE, 1000);
     expect(board.map((t) => t.prep)).toEqual(["new", "cooking"]);
+  });
+
+  // A tablet that never reloads can accumulate a corrupt record. Losing the prep
+  // flags is survivable; a board that throws on render is not.
+  it("starts from empty if the stored record is corrupt", () => {
+    (globalThis as any).localStorage.setItem("fare.kitchen.prep", "{not json");
+    expect(prepOf(1n)).toBe("new");
+    expect(kitchenBoard([order(1)], MINE, 1000)).toHaveLength(1);
+  });
+});
+
+// The chime is the whole point of tablet mode: nobody is watching the screen.
+// Its failure mode matters more than its sound — a kitchen with no audio must
+// still get the board, so every path here is about not throwing.
+describe("the counter chime", () => {
+  const oscillators: any[] = [];
+  let closed = false;
+
+  class FakeAudioContext {
+    currentTime = 0;
+    destination = {};
+    createOscillator() {
+      const osc = {
+        frequency: { value: 0 },
+        type: "",
+        started: [] as number[],
+        stopped: [] as number[],
+        connect: (dst: any) => dst,
+        start(t: number) { osc.started.push(t); },
+        stop(t: number) { osc.stopped.push(t); },
+      };
+      oscillators.push(osc);
+      return osc;
+    }
+    createGain() {
+      return {
+        gain: { setValueAtTime: vi.fn(), exponentialRampToValueAtTime: vi.fn() },
+        connect: (dst: any) => dst,
+      };
+    }
+    close() { closed = true; return Promise.resolve(); }
+  }
+
+  beforeEach(() => {
+    oscillators.length = 0;
+    closed = false;
+    (globalThis as any).window = { AudioContext: FakeAudioContext };
+  });
+
+  it("plays two tones and releases the audio context", async () => {
+    vi.useFakeTimers();
+    try {
+      chime();
+      expect(oscillators.map((o) => o.frequency.value)).toEqual([880, 1320]);
+      // the second tone follows the first rather than sounding on top of it
+      expect(oscillators[1].started[0]).toBeGreaterThan(oscillators[0].started[0]);
+      for (const o of oscillators) expect(o.stopped[0]).toBeGreaterThan(o.started[0]);
+
+      expect(closed).toBe(false); // still playing
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(closed).toBe(true); // a context per chime would exhaust the tab
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("is a no-op on a device with no WebAudio", () => {
+    (globalThis as any).window = {};
+    expect(() => chime()).not.toThrow();
+    expect(oscillators).toHaveLength(0);
+  });
+
+  it("swallows an AudioContext that refuses to construct", () => {
+    (globalThis as any).window = {
+      AudioContext: function () { throw new Error("autoplay blocked"); },
+    };
+    expect(() => chime()).not.toThrow();
   });
 });

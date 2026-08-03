@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { Wallet } from "ethers";
-import { topicOf, OrderThread } from "./channel";
+import { topicOf, OrderThread, postTicket, fetchTickets } from "./channel";
 
 // The relay channel (B3) end-to-end over an in-memory mock of /api/msg — proves
 // the pubkey handshake, peer authentication, and E2E round-trip without a server.
@@ -191,6 +191,51 @@ describe("relay channel (B3)", () => {
       await drvThread.poll();
       expect(drvThread.peerCommitment).toBeNull();
       expect(drvThread.ready).toBe(false); // nor is the impostor's key adopted
+    });
+  });
+
+  // Tickets ride the same mailbox but carry their own ephemeral key rather than
+  // the thread's derived one, because the venue is a third party (ticket.ts).
+  // What matters here is the TRANSPORT: the relay's message identity is
+  // (from, seq, kind) and a repost replaces, so an anonymous ticket needs a seq
+  // that distinguishes it from the next one.
+  describe("tickets on the thread", () => {
+    const sealed = (ct: string) => ({ epk: "0x" + "ee".repeat(33), iv: "0x" + "11".repeat(12), ct });
+
+    it("carries the sealed items and names no sender", async () => {
+      expect(await postTicket(21n, sealed("0xdeadbeef"))).toBe(true);
+      expect(await fetchTickets(21n)).toEqual([sealed("0xdeadbeef")]);
+      expect(store.get(topicOf(21n))![0].from).toBe(""); // no sender identity on the wire
+    });
+
+    // The regression: with a fixed seq every ticket landed in one slot, so a
+    // stranger who knew the topic could overwrite the real one and leave the
+    // kitchen with nothing — fetchTicket's "a ticket not sealed to us won't
+    // decrypt" only holds if hostile tickets are ADDED, not substituted.
+    it("a second ticket appends rather than erasing the first", async () => {
+      await postTicket(22n, sealed("0xaaaa"));
+      await postTicket(22n, sealed("0xbbbb"));
+      expect((await fetchTickets(22n)).map((t) => t.ct)).toEqual(["0xaaaa", "0xbbbb"]);
+    });
+
+    it("but a retry of the same ticket collapses onto itself", async () => {
+      await postTicket(23n, sealed("0xcccc"));
+      await postTicket(23n, sealed("0xcccc"));
+      expect(await fetchTickets(23n)).toHaveLength(1);
+    });
+
+    it("reads back only well-formed tickets, ignoring the rest of the thread", async () => {
+      const a = Wallet.createRandom();
+      const b = Wallet.createRandom();
+      await new OrderThread(24n, a.privateKey, a.address, b.address).open(); // a hello
+      await postTicket(24n, sealed("0xfeed"));
+      store.get(topicOf(24n))!.push({ from: "", seq: 9, kind: "ticket", ts: Date.now() }); // no ct
+
+      expect((await fetchTickets(24n)).map((t) => t.ct)).toEqual(["0xfeed"]);
+    });
+
+    it("is empty for an order nobody has ticketed", async () => {
+      expect(await fetchTickets(25n)).toEqual([]);
     });
   });
 });
