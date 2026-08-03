@@ -321,16 +321,29 @@ event logs, which is not an observer worth 0.742 PAS.
 - Neither reveals the funder. The customer→burner edge that per-order burners
   exist to break is broken identically by both.
 
-**Recommendation: switch `web/src/shieldpool.ts` and the relay's
-`/shield-withdraw` to `withdraw`.** The call takes byte-identical arguments —
-`withdraw(uint[2],uint[2][2],uint[2],uint[8],address)` — so it is a one-word
-change with no proof, circuit or client-model impact. It takes the single most
-expensive action in FARE (0.773 PAS, 40× a ZK dropoff) down to 0.031 PAS,
-roughly the cost of creating an order.
+### ✅ Switched (2026-08-03) — confirmed live through the production relay
 
-Not done unilaterally: it is a live privacy-surface change and belongs to whoever
-owns that call. The measurement is `scripts/shield/pool-withdraw-probe.mjs`
-(`MODE=withdraw|proxy`), and it is cheap to re-run.
+`venue-node/relay.mjs` `/shield-withdraw` now calls `withdraw`. Verified by
+selector on the resulting transaction rather than by reading the diff:
+
+```
+tx 0xd0fc0eca…  selector 0x613ce157 = withdraw        ✓
+                (proxy_withdraw would be 0x82fcfd95)
+gasUsed 31,287   fee 0.031287 PAS   status 1
+burner 0x1fD8C0e3…  0.0 → 0.5 PAS
+```
+
+**0.773 → 0.031 PAS, a 96% cut on the most expensive action in FARE**, with the
+burner funded exactly as before. Nothing else moved: the client still only
+proves and never submits, the relay still pays gas in sponsor mode, and the
+proof, circuit and 8-signal layout are untouched — the two calls take identical
+arguments, so this was a one-word change.
+
+`web/src/shieldpool.ts` keeps both entries in `KS_POOL_ABI` with the reasoning
+attached, since the client builds proofs that either submitter could relay.
+
+The measurement is reproducible: `scripts/shield/pool-withdraw-probe.mjs`
+(`MODE=withdraw|proxy`).
 
 ## PoseidonPolkaVM — already in use, no change needed (2026-08-01)
 

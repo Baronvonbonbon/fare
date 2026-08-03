@@ -61,7 +61,7 @@ const GAS_FUND = 100_000n; // a plain transfer; keeps the fee reservation small
 const RATE_WINDOW_MS = 60_000;
 const RATE_MAX = Number(process.env.RATE_MAX || 20); // requests / IP / window
 
-// ── Shielded funding (C4): relay a KS proxy_withdraw that funds a fresh burner ─
+// ── Shielded funding (C4): relay a KS withdrawal that funds a fresh burner ────
 // The client builds the withdrawal proof; the relay submits it and pays gas. Two
 // modes, selected by whether the proof's recipient is the relay or the burner:
 //   • sponsor mode (recipient = burner): the pool pays the burner directly; the
@@ -72,9 +72,16 @@ const RATE_MAX = Number(process.env.RATE_MAX || 20); // requests / IP / window
 //     Requires SHIELD_FEE_PAS > 0. Fee must clear gas × margin. Trust note: in
 //     fee mode the relay briefly holds the withdrawal, so it must be forwarded —
 //     a stronger trust assumption than sponsor mode (documented in the README).
-const SHIELD_POOL = process.env.SHIELD_POOL || "0x3068490C79708D0725E3D4Aa9C35Da708f09071e";
+// NOT 0x3068490C… — that pool's isKnownRoot panics for every non-zero root, so
+// it takes deposits and reverts every withdrawal. It was this default, plus the
+// address book, that pointed the relay at it. See KUSAMA-SHIELD-FINDINGS Issue 7.
+const SHIELD_POOL = process.env.SHIELD_POOL || "0x7d5a496bD61b631025A828d9049f6A68e007e0dC";
 const SHIELD_FEE = parseEther(process.env.SHIELD_FEE_PAS || "0"); // relayer fee (fee mode)
-const GAS_SHIELD = 8_000_000n; // proxy_withdraw is a Groth16 verify + tree insert
+// A Groth16 verify + tree insert. Measured 31,141 on Paseo via `withdraw`; this
+// limit was sized for `proxy_withdraw` (773,079, almost all of it the forwarder
+// CREATE) and is left generous rather than retuned — on Paseo gasLimit × gasPrice
+// is reserved up front, so the cost of slack is locked funds, not spent ones.
+const GAS_SHIELD = 8_000_000n;
 const GAS_FORWARD_PAS = 100_000n; // plain transfer of the net to the burner
 
 // ── Sponsored onboarding (POST /onboard) — seed a fresh driver/venue wallet ──
@@ -215,7 +222,15 @@ setInterval(() => { const now = Date.now(); for (const [k, v] of bidBox) if (v.e
 
 // ── Kusama Shield pool (C4 shielded funding) ─────────────────────────────────
 const SHIELD_ABI = [
-  "function proxy_withdraw(uint[2] pA, uint[2][2] pB, uint[2] pC, uint[8] pubSignals, address recipient)",
+  // `withdraw`, not `proxy_withdraw`. Identical arguments; the only difference
+  // is that proxy_withdraw routes the payout through a freshly deployed
+  // SimpleTokenForwarder. Measured on Paseo that CREATE is 741,938 gas — 96% of
+  // the whole withdrawal, 24× everything else combined — and it hides nothing,
+  // because BOTH paths end with the same
+  // `emit Withdrawal(asset, value, recipient, …)` naming the recipient in the
+  // pool's own log (the forwarder then emits it a second time). See
+  // docs/SHIELDED-POOL-INTEGRATION.md.
+  "function withdraw(uint[2] pA, uint[2][2] pB, uint[2] pC, uint[8] pubSignals, address recipient)",
   // Tree reads + insert events for the batch keeper's pre-batch snapshot.
   "function treeSize() view returns (uint256)",
   "function sideNodes(uint256) view returns (uint256)",
@@ -947,7 +962,7 @@ async function handler(req, res) {
 
       // Economics: fee mode must clear (submit+forward gas) × margin from the fee;
       // sponsor mode is a loss-leader gated on the subsidy budget.
-      const submitCost = await estCostWei(() => shieldPool.proxy_withdraw.estimateGas(pA, pB, pC, pubSignals, recipient), GAS_SHIELD);
+      const submitCost = await estCostWei(() => shieldPool.withdraw.estimateGas(pA, pB, pC, pubSignals, recipient), GAS_SHIELD);
       let hold = null; // sponsor mode draws on the subsidy; fee mode pays its own way
       if (feeMode) {
         const forwardCost = await estCostWei(async () => GAS_FORWARD_PAS, GAS_FORWARD_PAS);
@@ -965,7 +980,7 @@ async function handler(req, res) {
       try {
         tx = await serialize(async () => {
           const nonce = await allocNonce();
-          return shieldPool.proxy_withdraw(pA, pB, pC, pubSignals, recipient, { gasLimit: GAS_SHIELD, nonce });
+          return shieldPool.withdraw(pA, pB, pC, pubSignals, recipient, { gasLimit: GAS_SHIELD, nonce });
         });
       } catch (e) {
         hold?.release();
