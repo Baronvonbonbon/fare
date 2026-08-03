@@ -191,7 +191,9 @@ const KS_FUND_ABI = [
   "function depositNative(bytes32 commitment) payable",
   // First arg is the ASSET ID, not the address — see ksPrecompileFor.
   "function depositAsset(uint256 assetId, uint256 amount, bytes32 commitment)",
-  "function proxy_withdraw(uint[2],uint[2][2],uint[2],uint[8],address)",
+  // `withdraw`, matching the relay. See docs/SHIELDED-POOL-INTEGRATION.md — the
+  // forwarder in proxy_withdraw is 96% of a withdrawal's gas and hides nothing.
+  "function withdraw(uint[2],uint[2][2],uint[2],uint[8],address)",
   "function currentRoot() view returns (uint256)",
   "function treeSize() view returns (uint256)",
   "function sideNodes(uint256) view returns (uint256)",
@@ -266,11 +268,11 @@ export async function ksShieldedFund({
   }, wasm, zkey);
 
   const pB = [[proof.pi_b[0][1], proof.pi_b[0][0]], [proof.pi_b[1][1], proof.pi_b[1][0]]];
-  const withdrawTx = await new ethers.Contract(pool, KS_FUND_ABI, submitter).proxy_withdraw(
+  const withdrawTx = await new ethers.Contract(pool, KS_FUND_ABI, submitter).withdraw(
     [proof.pi_a[0], proof.pi_a[1]], pB, [proof.pi_c[0], proof.pi_c[1]], publicSignals, recipient,
     { gasLimit: withdrawGas, nonce: await provider.getTransactionCount(submitter.address, "latest") }
   );
   await withdrawTx.wait();
-  log(`KS proxy_withdraw ${withdrawTx.hash} → ${recipient}`);
+  log(`KS withdraw ${withdrawTx.hash} → ${recipient}`);
   return { depositHash: depositTx.hash, withdrawHash: withdrawTx.hash, leafIndex: idx, asset };
 }

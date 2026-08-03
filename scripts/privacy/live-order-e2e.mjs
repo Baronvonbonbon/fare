@@ -110,7 +110,12 @@ const VAULT_ABI = [
 ];
 const POOL_ABI = [
   "function depositNative(bytes32 commitment) payable",
-  "function proxy_withdraw(uint[2] pA, uint[2][2] pB, uint[2] pC, uint[8] pubSignals, address recipient)",
+  // `withdraw`, matching what the relay actually submits. proxy_withdraw takes
+  // identical arguments but routes through a freshly deployed forwarder, which
+  // costs 741,938 extra gas and conceals nothing (both emit the same
+  // Withdrawal(…, recipient, …) from the pool). Exercising it here would test a
+  // path production no longer takes — and it was 90% of this script's gas bill.
+  "function withdraw(uint[2] pA, uint[2][2] pB, uint[2] pC, uint[8] pubSignals, address recipient)",
   "function treeSize() view returns (uint256)",
   "function sideNodes(uint256) view returns (uint256)",
   "function currentRoot() view returns (uint256)",
@@ -187,7 +192,7 @@ async function main() {
   rec("KS deposit", { value: ethers.formatEther(fundAmount) });
   const wd = await ksWithdraw(prov, ksNote, customer.address, fundAmount);
   const before = await prov.getBalance(customer.address);
-  await send("proxy_withdraw → burner", pool.proxy_withdraw(wd.pA, wd.pB, wd.pC, wd.pubSignals, customer.address, { gasLimit: GAS }));
+  await send("withdraw → burner", pool.withdraw(wd.pA, wd.pB, wd.pC, wd.pubSignals, customer.address, { gasLimit: GAS }));
   const funded = await prov.getBalance(customer.address);
   if (funded <= before) throw new Error("burner was not funded");
   log(`   burner ${customer.address} holds ${ethers.formatEther(funded)} PAS (no edge from the deployer)`);
@@ -360,7 +365,7 @@ async function main() {
   const recipient = ethers.Wallet.createRandom().address;
   const w = await ksWithdraw(prov, outRec, recipient, BUCKET);
   const rb = await prov.getBalance(recipient);
-  await send("proxy_withdraw → fresh address", pool.proxy_withdraw(w.pA, w.pB, w.pC, w.pubSignals, recipient, { gasLimit: GAS }));
+  await send("withdraw → fresh address", pool.withdraw(w.pA, w.pB, w.pC, w.pubSignals, recipient, { gasLimit: GAS }));
   const ra = await prov.getBalance(recipient);
   if (ra <= rb) throw new Error("fresh address received nothing");
 
