@@ -34,8 +34,14 @@ const b32 = (x) => ethers.zeroPadValue(ethers.toBeHex(x), 32);
 const key = () => process.env.DEPLOYER_PRIVATE_KEY
   || fs.readFileSync(path.join(ROOT, ".env"), "utf8").match(/DEPLOYER_PRIVATE_KEY=(\S+)/)[1];
 
-const prov = new ethers.JsonRpcProvider("https://eth-rpc-testnet.polkadot.io/", undefined,
-  { staticNetwork: true, batchMaxCount: 1 });
+// ethers has no socket timeout, so a stalled Paseo RPC hangs the run forever
+// rather than failing — a documented recurring failure mode in this repo. It
+// bit this very script: a deposit confirmed, the snapshot call then hung, and
+// the note was never persisted, stranding the leaf. Bound every request.
+const REQUEST_TIMEOUT_MS = Number(process.env.RPC_TIMEOUT_MS || 45_000);
+const req = new ethers.FetchRequest(process.env.TESTNET_RPC || "https://eth-rpc-testnet.polkadot.io/");
+req.timeout = REQUEST_TIMEOUT_MS;
+const prov = new ethers.JsonRpcProvider(req, undefined, { staticNetwork: true, batchMaxCount: 1 });
 const D0 = new ethers.Wallet(key(), prov);
 const pool = new ethers.Contract(POOL, POOL_ABI, D0);
 const GAS_LIMIT = 500_000_000n; // matches the e2e scripts; reserved up front on Paseo
