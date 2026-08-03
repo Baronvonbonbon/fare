@@ -22,6 +22,7 @@ Ordered by what a reader should act on, not by discovery order.
 | 23 | Two state-matrix rows would have been refused before the guard they test | — | ✅ Fixed |
 | 24 | `regionsCovering` returned 3.6M cells near a pole, hanging the tab | **Medium** | ✅ Fixed |
 | 25 | New tests passed but broke `npm run build`, which CI gates on | Medium (process) | ✅ Fixed |
+| 26 | Every order ticket was posted into the same relay slot, so any stranger could erase one | **Medium** | ✅ Fixed |
 | 2 | `/fund` can double-fund inside a 250 ms window | Low → **Medium** once the relay went public | ✅ Fixed |
 | 3 | Oversized request body returns 500, not 413 | Cosmetic | ✅ Fixed |
 | 4 | CI ran nothing but Slither, path-filtered to `contracts/**` | **High** (process) | ✅ Fixed |
@@ -631,6 +632,54 @@ themselves, so typechecking them is what catches a prop contract drifting.
 **The lesson is about the command, not the types.** "The tests pass" is not the
 same claim as "the tier passes", whenever a tier's CI job runs more than its
 test runner. Run what CI runs.
+
+---
+
+## 26. Every order ticket was posted into the same relay slot — **fixed**
+
+Found by writing the tests for the send/receive half of `ticket.ts`, which the
+kitchen work had shipped uncovered.
+
+The relay's message identity is `(from, seq, kind)` and a repost **replaces** —
+that is the idempotent-retry contract in `functions/api/msg.ts`. `postTicket`
+posted every ticket as `from: ""` (anonymous by design, correctly) and
+`seq: 0` (hardcoded). So all three fields were constant per order: an order's
+thread had exactly **one** ticket slot, and the last writer won it.
+
+Two consequences, neither visible from the ticket suite as it stood:
+
+- **The open mailbox stopped being safe.** `fetchTicket` is written for a
+  mailbox anyone can post to, and its comment says so: a hostile ticket "won't
+  decrypt", so it is harmless. That reasoning holds only if hostile tickets are
+  *added alongside* the real one. Under replacement, anyone who knew the topic
+  could overwrite the real ticket with noise; the venue then decrypts nothing,
+  `fetchTicket` returns `null`, and the kitchen has no idea what to cook. A
+  denial of service on the food, from an unauthenticated stranger.
+- **The selection logic was unreachable.** `fetchTicket` loops over tickets,
+  returns a `bound` one outright, and otherwise keeps the latest so "a re-send
+  supersedes". None of that could ever run against the real relay, because the
+  list it iterates could not hold more than one entry. A legitimate re-send —
+  the customer amending an order — also silently replaced rather than
+  superseding, which happens to look the same and is not.
+
+**Fixed** by deriving `seq` from the ciphertext (`ticketSeq`). Distinct tickets
+now append; a genuine retry of the *same* ticket still collapses onto itself, so
+the endpoint's idempotency is preserved rather than traded away. `from` stays
+`""` — the anonymity is the point of it.
+
+Pinned by `channel.test.ts` → "a second ticket appends rather than erasing the
+first" (fails against the old `seq: 0`) and "but a retry of the same ticket
+collapses onto itself".
+
+**The lesson is about what a mock is allowed to be convenient about.** The
+in-memory relay in `channel.test.ts` already reproduced the `(from, seq, kind)`
+dedupe faithfully, which is the only reason the regression test could fail
+honestly. A mock that had just appended — the obvious simplification — would
+have made the broken code pass and the fix look like a no-op.
+
+Untouched and still true: an attacker can flood a thread to the `THREAD_MAX`
+200-envelope cap and push a real ticket out. That is a property of the channel,
+not of tickets, and it costs the attacker 200 posts instead of one.
 
 ---
 

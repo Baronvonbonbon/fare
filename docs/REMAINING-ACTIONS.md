@@ -48,13 +48,17 @@ The full protocol (incl. F6/F8) is deployed + seeded on Paseo. Remaining ops:
   above); ESCROW funding comes only from the shielded pool, and `fundBurner`
   throws rather than falling back — a burner funded any other way would carry an
   on-chain edge back to the customer. See [TEST-FINDINGS.md](TEST-FINDINGS.md) #14.
-- ☐ **IPFS (optional, shared menus)** — set `IPFS_ADD_URL` / `IPFS_API_KEY` /
-  `VITE_IPFS_GATEWAY`. Without it, published menus are device-local (`local://`),
-  single-device only. **Needs a new host:** this used to point at the DATUM node
-  on `ipfs-datum.javcon.io`, which was decommissioned 2026-07-28 along with the
-  rest of DATUM — that hostname now 404s. The options are the Kubo service in
-  `venue-node/docker-compose.yml` (written, never run) or a hosted pinning
-  service.
+- ☐ **IPFS — REQUIRED for a live venue, no longer optional.** Set `IPFS_ADD_URL` /
+  `IPFS_API_KEY` / `VITE_IPFS_GATEWAY`. Without it, published menus are
+  device-local (`local://`) and invisible to every customer, and **menu artwork
+  cannot be published at all** — `/api/asset` returns `{configured:false}` and
+  `publishImage` throws, because a `local://` photo would render for the venue
+  that uploaded it and be a broken box for everyone else. **Needs a new host:**
+  this used to point at the DATUM node on `ipfs-datum.javcon.io`, which was
+  decommissioned 2026-07-28 along with the rest of DATUM — that hostname now
+  404s. The options are the Kubo service in `venue-node/docker-compose.yml`
+  (written, never run) or a hosted pinning service. Both `/api/menu` and
+  `/api/asset` read the same two secrets.
 - ☐ **Channel KV (optional; chat / tracking / photo)** — bind `MSG_KV` and
   `PHOTO_KV` namespaces in Cloudflare Pages (Settings → Functions → KV) so
   `/api/msg` and `/api/photo` back the order channel + delivery-photo store.

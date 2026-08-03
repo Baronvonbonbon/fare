@@ -43,7 +43,7 @@ export default defineConfig({
       reporter: ["text", "json-summary", "lcov"],
 
       // `include` is the load-bearing line. By default v8 reports only files a
-      // test actually imported, which would leave App.tsx — 2,689 lines with no
+      // test actually imported, which would leave App.tsx — 3,132 lines with no
       // tests — out of the denominator entirely, so the percentage would RISE
       // when someone added untested code. Naming the sources instead makes an
       // untested file count as the zero it is.
@@ -59,16 +59,22 @@ export default defineConfig({
       // work lands; never lower one to make a build pass, because a ratchet
       // that turns both ways is a comment.
       //
-      // Raised six times: 17.40 → 20.19 → 22.25 (D2) → 30.42 (D1) → 33.19 →
-      // 34.56 (App.tsx) → 38.16 (shieldnote.ts, shield.ts). What is left below
-      // is App.tsx's remaining ~2,400 lines, which are rendering rather than
-      // decisions, and the chain-touching halves of the shield modules —
-      // proving, submitting and log-scanning, which need a node.
+      // Raised seven times: 17.40 → 20.19 → 22.25 (D2) → 30.42 (D1) → 33.19 →
+      // 34.56 (App.tsx) → 38.16 (shieldnote.ts, shield.ts) → 39.41 (ticket.ts,
+      // kitchen.ts). What is left below is App.tsx's ~3,000 uncovered lines,
+      // which are rendering rather than decisions, and the chain-touching
+      // halves of the shield modules — proving, submitting and log-scanning,
+      // which need a node.
+      //
+      // The kitchen work is a worked example of why the ratchet is measured
+      // against ALL sources: it added ~900 lines to App.tsx, which pushed the
+      // global number DOWN through the floor even though the modules it
+      // introduced were tested. That is the gate doing its job.
       thresholds: {
-        statements: 38,
-        branches: 33,
+        statements: 39,
+        branches: 34,
         functions: 35,
-        lines: 39,
+        lines: 40,
       },
     },
   },

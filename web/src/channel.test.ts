@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { Wallet } from "ethers";
-import { topicOf, OrderThread } from "./channel";
+import { topicOf, OrderThread, postTicket, fetchTickets } from "./channel";
 
 // The relay channel (B3) end-to-end over an in-memory mock of /api/msg — proves
 // the pubkey handshake, peer authentication, and E2E round-trip without a server.
@@ -138,5 +138,104 @@ describe("relay channel (B3)", () => {
     const b = Wallet.createRandom();
     const t = new OrderThread(1n, a.privateKey, a.address, b.address);
     await expect(t.send("hi")).rejects.toThrow(/waiting/);
+  });
+
+  // A customer has no registry slot to publish a profile commitment in, so it
+  // rides the `hello`. The pubkey there is self-authenticating; the commitment
+  // is not, so it is signed — otherwise a relay could swap it and make every
+  // honest profile reveal fail verification.
+  describe("profile commitments on the hello", () => {
+    const COMMIT = "fare-meta:v1:" + "ab".repeat(32);
+
+    it("adopts a commitment whose signature recovers to the peer", async () => {
+      const cust = Wallet.createRandom();
+      const drv = Wallet.createRandom();
+      const custThread = new OrderThread(3n, cust.privateKey, cust.address, drv.address);
+      const drvThread = new OrderThread(3n, drv.privateKey, drv.address, cust.address);
+
+      await custThread.open(COMMIT);
+      await drvThread.poll();
+      expect(drvThread.peerCommitment).toBe(COMMIT);
+    });
+
+    it("is null when the peer announced no commitment — not a false 'none'", async () => {
+      const cust = Wallet.createRandom();
+      const drv = Wallet.createRandom();
+      await new OrderThread(4n, cust.privateKey, cust.address, drv.address).open();
+      const drvThread = new OrderThread(4n, drv.privateKey, drv.address, cust.address);
+      await drvThread.poll();
+      expect(drvThread.peerCommitment).toBeNull();
+    });
+
+    it("ignores a commitment a relay rewrote in place", async () => {
+      const cust = Wallet.createRandom();
+      const drv = Wallet.createRandom();
+      await new OrderThread(5n, cust.privateKey, cust.address, drv.address).open(COMMIT);
+      // The relay tampers: same envelope, different commitment, original signature.
+      const thread = store.get(topicOf(5n))!;
+      thread[0].commit = "fare-meta:v1:" + "cd".repeat(32);
+
+      const drvThread = new OrderThread(5n, drv.privateKey, drv.address, cust.address);
+      await drvThread.poll();
+      expect(drvThread.peerCommitment).toBeNull();
+    });
+
+    it("ignores a commitment signed by someone other than the peer", async () => {
+      const cust = Wallet.createRandom();
+      const drv = Wallet.createRandom();
+      const impostor = Wallet.createRandom();
+      // A stranger posts a well-formed hello claiming to be the customer.
+      await new OrderThread(6n, impostor.privateKey, cust.address, drv.address).open(COMMIT);
+
+      const drvThread = new OrderThread(6n, drv.privateKey, drv.address, cust.address);
+      await drvThread.poll();
+      expect(drvThread.peerCommitment).toBeNull();
+      expect(drvThread.ready).toBe(false); // nor is the impostor's key adopted
+    });
+  });
+
+  // Tickets ride the same mailbox but carry their own ephemeral key rather than
+  // the thread's derived one, because the venue is a third party (ticket.ts).
+  // What matters here is the TRANSPORT: the relay's message identity is
+  // (from, seq, kind) and a repost replaces, so an anonymous ticket needs a seq
+  // that distinguishes it from the next one.
+  describe("tickets on the thread", () => {
+    const sealed = (ct: string) => ({ epk: "0x" + "ee".repeat(33), iv: "0x" + "11".repeat(12), ct });
+
+    it("carries the sealed items and names no sender", async () => {
+      expect(await postTicket(21n, sealed("0xdeadbeef"))).toBe(true);
+      expect(await fetchTickets(21n)).toEqual([sealed("0xdeadbeef")]);
+      expect(store.get(topicOf(21n))![0].from).toBe(""); // no sender identity on the wire
+    });
+
+    // The regression: with a fixed seq every ticket landed in one slot, so a
+    // stranger who knew the topic could overwrite the real one and leave the
+    // kitchen with nothing — fetchTicket's "a ticket not sealed to us won't
+    // decrypt" only holds if hostile tickets are ADDED, not substituted.
+    it("a second ticket appends rather than erasing the first", async () => {
+      await postTicket(22n, sealed("0xaaaa"));
+      await postTicket(22n, sealed("0xbbbb"));
+      expect((await fetchTickets(22n)).map((t) => t.ct)).toEqual(["0xaaaa", "0xbbbb"]);
+    });
+
+    it("but a retry of the same ticket collapses onto itself", async () => {
+      await postTicket(23n, sealed("0xcccc"));
+      await postTicket(23n, sealed("0xcccc"));
+      expect(await fetchTickets(23n)).toHaveLength(1);
+    });
+
+    it("reads back only well-formed tickets, ignoring the rest of the thread", async () => {
+      const a = Wallet.createRandom();
+      const b = Wallet.createRandom();
+      await new OrderThread(24n, a.privateKey, a.address, b.address).open(); // a hello
+      await postTicket(24n, sealed("0xfeed"));
+      store.get(topicOf(24n))!.push({ from: "", seq: 9, kind: "ticket", ts: Date.now() }); // no ct
+
+      expect((await fetchTickets(24n)).map((t) => t.ct)).toEqual(["0xfeed"]);
+    });
+
+    it("is empty for an order nobody has ticketed", async () => {
+      expect(await fetchTickets(25n)).toEqual([]);
+    });
   });
 });

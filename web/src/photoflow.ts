@@ -11,10 +11,11 @@ import { relayPool } from "./pool";
 
 const PHOTO_PATH = "/api/photo";
 
-/// Downscale + re-encode an image File/Blob to a small JPEG (Uint8Array). The
-/// canvas re-encode strips EXIF/GPS by construction; keep the parcel in frame,
-/// not the person (docs/PHOTOS.md). Returns compressed JPEG bytes.
-export async function compressImage(file: Blob, maxDim = 800, quality = 0.6): Promise<Uint8Array> {
+/// Downscale + re-encode an image File/Blob to a JPEG Blob. The canvas re-encode
+/// strips EXIF/GPS by construction — which matters for a delivery photo (keep
+/// the parcel in frame, not the person; docs/PHOTOS.md) and equally for menu
+/// artwork, where a dish photo would otherwise publish the kitchen's coordinates.
+export async function compressToBlob(file: Blob, maxDim = 800, quality = 0.6): Promise<Blob> {
   const bitmap = await createImageBitmap(file);
   const scale = Math.min(1, maxDim / Math.max(bitmap.width, bitmap.height));
   const w = Math.max(1, Math.round(bitmap.width * scale));
@@ -26,10 +27,14 @@ export async function compressImage(file: Blob, maxDim = 800, quality = 0.6): Pr
   if (!ctx) throw new Error("canvas unsupported");
   ctx.drawImage(bitmap, 0, 0, w, h);
   bitmap.close?.();
-  const blob: Blob = await new Promise((res, rej) =>
+  return new Promise((res, rej) =>
     canvas.toBlob((b) => (b ? res(b) : rej(new Error("encode failed"))), "image/jpeg", quality)
   );
-  return new Uint8Array(await blob.arrayBuffer());
+}
+
+/// The same, as raw bytes — what the sealing path (photo.ts) needs.
+export async function compressImage(file: Blob, maxDim = 800, quality = 0.6): Promise<Uint8Array> {
+  return new Uint8Array(await (await compressToBlob(file, maxDim, quality)).arrayBuffer());
 }
 
 function endpoints(pathAndQuery: string): string[] {
