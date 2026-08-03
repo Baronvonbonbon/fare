@@ -1,5 +1,22 @@
 # Kusama Shield — integration findings & questions
 
+> ## Settled: FARE is on `0x7d5a496b…` and stays there
+>
+> Everything — the address books, `FareVault.shieldPool`, the relay, its
+> `.env.example`, and every script default — points at
+> `0x7d5a496bD61b631025A828d9049f6A68e007e0dC`, where the whole shielded path is
+> proven end to end: burner funding, a driver's shielded payout, and both
+> native and USDC. **The pool below is not a pending migration or an open
+> decision; it is a hazard we route around.** What follows is kept as the reason
+> the guards exist and as a report upstream can act on, not as work in progress.
+>
+> The one check that matters before ever pointing at a different pool — free, no
+> funds, no gas:
+>
+> ```js
+> pool.isKnownRoot(1n)   // must RETURN false, not revert
+> ```
+>
 > ## ⛔ 2026-08-03 — THE v7 POOL `0x3068490C…` CANNOT BE WITHDRAWN FROM. DO NOT DEPOSIT.
 >
 > `isKnownRoot(uint256)` reverts with **`Panic(0x32)` (array out-of-bounds)** for
