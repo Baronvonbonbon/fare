@@ -10,6 +10,13 @@ Living planning + tracking doc. Two questions it answers:
 Keep the checkboxes current as work lands. Source of truth for the contract
 surface is `contracts/`; for the app surface, `web/src/{abi,chain,App}.tsx`.
 
+> **Updated 2026-08-03** for the C5 landing (stablecoin shielded payouts + DEX
+> pricing), which added rows to the `FareVault` audit and moved the "Pay" and
+> "Earnings" journeys back to 🟡: the rail is built and tested but has no PWA
+> surface, so a driver paid in USDC still has only the public exit in the app.
+> It also flagged a name collision worth knowing about (`pricing.ts` vs
+> `price.ts`, C2) and corrected a cross-cutting row that contradicted the board.
+>
 > **Re-verified against the code on 2026-08-03** (commit `99b62d6`). Parts 1–3
 > had drifted badly: they still described open bids that had been deleted from
 > the contract, a menu/tracking/messaging/photo layer that had since shipped, a
@@ -103,8 +110,11 @@ surface is `contracts/`; for the app surface, `web/src/{abi,chain,App}.tsx`.
 | `withdrawToken` | ✅ | ERC-20 earnings path (C3) |
 | `claimPaseoDust` / `pendingPaseoDust` | ✅ | Surfaced + claimable (`VaultStrip`) |
 | `insertShieldNote` | ✅ | ZK shielded payout (`shieldnote.ts`); the keeper/ticket path was removed from the contract |
+| `insertShieldNoteToken` / `depositShieldNoteTokenZK` | 🟡 | The **stablecoin** shielded payout. Contract, relay (`/shield-note`, `/shield-note-spend` both take an optional `token`) and client (`shieldnote.ts`) are wired and tested; **no PWA button yet** — `VaultStrip` still offers shielding only for the native balance |
+| `withdrawForToken` | ⛔ | Gasless ERC-20 exit. The vault had `withdrawFor` for native and no token equivalent; now it has one, but `relayWithdraw` in `web/src/relay.ts` still only signs the native `Withdraw` struct |
 | `credit` / `creditToken` | ⚙️ | Authorized protocol contracts only |
 | `setShieldPool` / `setShieldVerifier` / `setShieldPoseidon` / `setShieldBuckets` | ⚙️ | Shield wiring. `setShieldPoseidon` is deliberately **one-shot** — a tree initialised against one hasher and read with another yields unverifiable roots |
+| `setShieldBucketsToken` / `setShieldAssetId` | ⚙️ | Per-asset ladder + the Asset Hub asset id. Both are required before a token can be shielded, and `setShieldBucketsToken` must follow `setShieldPoseidon` (it pre-pays that asset's tree from the shared zeros). Not in the D2 governance console yet |
 
 ### FarePauseRegistry / FareGovernanceRouter / FareLocationVerifier
 | Entry point | In PWA? | Notes |
@@ -162,7 +172,7 @@ role views. The mapping below is the target shape.
 | Browse restaurants (list, map, cuisine, search) | `FareVenues` discovery + region index | ✅ | `VenuePicker` — list + proximity sort, name search, cuisine filter; `VenueHeader` is the rich venue page (logo/banner, hours, cuisine) |
 | Restaurant page + **menu**, add to **cart** | venue `metadataURI` (IPFS) | ✅ | Menu v2: item images, categories, modifier groups, weekly hours (`menu.ts`, `MenuCart`, `MenuItemRow`). **Needs IPFS configured** — without it menus are device-local and artwork can't publish at all |
 | Checkout: address, tip, schedule | `createOrder(venueId, dropCommit, orderValue, tip, maxFare, windows)` | 🟡 | Address = ZK drop commit; tip + delivery windows supported. **No scheduled/future ordering** — the `schedule` in menu v2 is venue opening hours, not order scheduling |
-| Pay | native PAS **or** Asset Hub USDC escrow | ✅ | Dual-asset selector at checkout; fiat display captured into the receipt at checkout (C2); gasless where the relay can carry it (C1) |
+| Pay | native PAS **or** Asset Hub USDC escrow | ✅ | Dual-asset selector at checkout; fiat display captured into the receipt at checkout (C2); gasless where the relay can carry it (C1). **Still defaults to a choice, not to USDC** — the USDC-only gating in C5 is not wired, so a customer can still pick the asset whose payout side is the less private of the two |
 | Order confirmation | `OrderCreated` event | ✅ | — |
 | **Live tracking** (status, driver on map, ETA) | order `status` + E2E channel (`kind:loc`) | ✅ | Driver opt-in shares live location; customer sees driver+trace+ETA on TrackMap (off-chain, E2E) |
 | Pick a Dasher (FARE-specific: reverse auction) | `commitBid` → `fetchSealedBids` → `acceptSealedBid` | ✅ | Sealed bid cards, cheapest first, each showing the bidder's delivered/failed record and success rate (A6r) — a new driver reads as unknown rather than as perfect |
@@ -184,7 +194,7 @@ role views. The mapping below is the target shape.
 | Confirm pickup | `confirmPickup` | ✅ | Dual-sig + QR |
 | Navigate to customer | ZK — driver gets coords at handoff | 🟡 | By design coords are late-bound; still needs a nav bridge at handoff |
 | Confirm delivery | `confirmDropoffZK` (driver signs commitment) | ✅ | Gasless — the relay submits and earns the flat `relayServiceFee` |
-| **Earnings dashboard + cash out** | `FareVault.withdraw` / `withdrawToken` | 🟡 | Withdraw, cold-wallet `withdrawTo`, dust claim and gasless `withdrawFor` all wired (A5). Still **no earnings history** view |
+| **Earnings dashboard + cash out** | `FareVault.withdraw` / `withdrawToken` | 🟡 | Withdraw, cold-wallet `withdrawTo`, dust claim and gasless `withdrawFor` all wired (A5). Still **no earnings history** view, and the **private** USDC exit (C5) has no button — a driver paid in USDC can only take the public `withdrawToken` path from the UI |
 | Manage stake | `addStake`/`requestUnstake`/`withdrawStake` | ✅ | Full lifecycle + unbonding countdown (A2) |
 | Ratings / acceptance rate | `drivers(struct)` delivered/failed | 🟡 | Own stats shown; **no acceptance-rate metric** |
 | Edit profile | `setMetadata` | ✅ | Commitment-backed (`regmeta.ts`) — revealed only to the counterparty. The plaintext `demo://` "Save public" escape hatch was removed |
@@ -207,7 +217,7 @@ role views. The mapping below is the target shape.
 | Gas | relay-sponsored (C1/F8) | ✅ | The central faucet (`/api/drip`, `DRIP_PRIVATE_KEY`) was **deleted** — nothing had called it since funding went KS-only. Non-value actions go through the EIP-2771 forwarder; value actions use a gas-sponsored burner |
 | Notifications | local + region push | ✅ | B4 P1 (local, on-device) + P2 (Web Push by region, SW-filtered so the push service only ever sees "a device in region X"). **Needs a VAPID keypair** |
 | Messaging | order-scoped E2E channel | ✅ | `msg.ts` crypto + `channel.ts` transport; chat, location and photo all ride it |
-| Ratings/reputation | `FareRatings` stars + delivered/failed | 🟡 | Stars shipped (B5). Reputation is **not** on the bid cards (A6r) |
+| Ratings/reputation | `FareRatings` stars + delivered/failed | ✅ | Stars shipped (B5); reputation **is** on the sealed bid cards (A6r, `reputation.ts`). This row said the opposite — it was written while A6 was broken and not updated when A6r landed, and the board two sections down said ✅ the whole time |
 | Disputes / support | `openDispute` + evidence + arbiter | ✅ | A7 (evidence + status view) and D1 (arbiter console) |
 | Admin / governance | ops app at `/ops` | ✅ | D1–D4 shipped; D5 (offline MPC ceremony) remains |
 
@@ -303,6 +313,16 @@ Ordered roughly by leverage. Check off as landed.
   cached, `usePasUsd` hook). Fiat shown on menu items, cart total and receipts; the
   rate is **captured at checkout** into the local receipt so its fiat value is
   locked. On-chain oracle binding at bid acceptance is the mainnet successor.
+  > ⚠️ **`pricing.ts` and `price.ts` are two different modules and the names invite
+  > a mistake.** `pricing.ts` (this item) is PAS→**USD display fiat**, and it falls
+  > back to a hardcoded `DEFAULT_RATE = 4.0` so the UI always renders. `price.ts`
+  > (C5) is PAS↔**USDC** off the Asset Hub DEX, and it **fails closed** — a missing
+  > rate returns null so the figure is visibly absent. Importing the wrong one gets
+  > you an invented number where you wanted a real one, or vice versa.
+  >
+  > Note also that C2 largely **evaporates for the default path** once escrow is
+  > USDC-denominated: a USDC order needs no PAS/USD rate to show a dollar figure.
+  > `pricing.ts` remains needed for displaying **gas** costs, which stay in PAS.
 - [x] **Stablecoin escrow** (C3) — dual-mode ERC-20 escrow rail. Order carries an
   escrow `token` (address(0) = native); `createOrderERC20` / `acceptBidERC20` /
   `increaseTipERC20` pull value via `transferFrom`; every release/refund/split
@@ -340,8 +360,34 @@ Ordered roughly by leverage. Check off as landed.
   was deleted, and it now **throws**, because a fallback would quietly reintroduce
   the funder→burner edge the whole mechanism exists to remove.
   What remains is **not code**: real unlinkability needs an anonymity set and time
-  decorrelation, and the canonical v7 pool holds ~94 leaves on a testnet. That is
-  why C4 stays a mainnet-*privacy* gate with the integration finished.
+  decorrelation, and the working pool `0x7d5a496b…` holds ~353 leaves on a testnet.
+  (The *canonical* v7 pool `0x3068490C…` is **unwithdrawable** — its `isKnownRoot`
+  reverts `Panic(0x32)` for every non-zero root. `pool.isKnownRoot(1n)` is a free
+  view call and the only preflight that matters before pointing at any pool.)
+  That is why C4 stays a mainnet-*privacy* gate with the integration finished.
+
+- [~] **Stablecoin shielded payouts + DEX pricing** (C5) — the money path in the
+  middle, so a USDC order is private at BOTH ends rather than only at funding.
+  **Contract, relay, client library and migration are done and tested; the PWA
+  surface is not.**
+  - `FareVault` gained `insertShieldNoteToken` → `depositShieldNoteTokenZK`. It
+    was native-only before, so a payee settled in USDC had **no private exit at
+    all** — only `withdrawToken` to a named address. The asset is bound by giving
+    each asset **its own note tree**: `shieldnote.circom`'s public signals are
+    `[root, nullifierHash, bucket, ksCommitment]` with no asset, and a spend
+    reveals only the nullifier, so `root` is what carries it. No circuit change,
+    therefore **no second trusted setup** (D5 does not grow).
+  - **Denomination ladder** (`web/src/denominations.ts`): `decompose` rounds DOWN
+    for payouts, `cover` rounds UP for funding. `planShielding` delegates to it.
+  - **DEX pricing** (`price.ts` + relay `GET /quote`) and **pre-shield sourcing**
+    (`swap.ts` + relay `GET /swap-xcm`, a builder that never holds funds).
+  - Not done: the **PWA surface** (shield-USDC-earnings button, top-up-shielded-
+    balance flow, USDC-only checkout gating), the **note wallet** that makes the
+    ladder worth anything (deposits must happen ahead of spending, or N deposits
+    followed by N withdrawals is a fingerprint even at uniform rungs), and the
+    **live e2e**. `scripts/e2e-stablecoin.mjs` still funds its burner by direct
+    transfer from the deployer, and `e2e-combined.mjs` still calls the deleted
+    `USDC.mint`.
 
 ### Group D — Ops / governance / trust (⚙️ console, not consumer app)
 *A separate app (`web/ops.html` → `/ops`, `web/src/ops/`) — shares the chain glue
@@ -394,7 +440,8 @@ one wallet session + toast in `OpsApp.tsx`; only D5 (offline ceremony) remains.*
 | C1 | Gasless meta-tx relay | C | Infra + all views | ✅ done |
 | C2 | Fiat pricing (oracle) | C | Checkout | ✅ done (off-chain layer) |
 | C3 | Stablecoin escrow | C | Vault + checkout | ✅ done (rail + tests + PWA UI) |
-| C4 | Shielded burner funding | C | Infra | 🟡 **built + proven on Paseo** (Kusama Shield v7, native **and** USDC); remaining gate is the anonymity set, not code — see SHIELDED-POOL-INTEGRATION.md |
+| C4 | Shielded burner funding | C | Infra | 🟡 **built + proven on Paseo** (Kusama Shield, native **and** USDC); remaining gate is the anonymity set, not code — see SHIELDED-POOL-INTEGRATION.md |
+| C5 | Stablecoin shielded **payouts** + DEX pricing | C | Vault + infra + wallet chip | 🟡 contract/relay/lib/migration done + tested (`test/shieldnote-token.test.ts`, `web/src/denominations.test.ts`, `web/src/price.test.ts`); **PWA surface, note wallet and live e2e outstanding**. Closes the other end of C4: funding was private, payouts were not |
 | D1 | Arbiter console (`resolve`) | D | Ops app (`/ops`) | ✅ done |
 | D2 | Governance console | D | Ops app | ✅ done |
 | D3 | Guardian pause console | D | Ops app | ✅ done |
