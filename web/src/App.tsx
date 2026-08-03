@@ -75,6 +75,7 @@ import { pickRelayAvoiding, relaySplitAvailable } from "./relaypick";
 import {
   placeSealedBid, revokeSealedBid, fetchSealedBids, myBids, sealedBidsAvailable, type OpenedBid,
 } from "./sealedbid";
+import { fetchReputations, fmtReputation, type Reputation } from "./reputation";
 import {
   commitProfile, isCommitted, describeProfile, saveSelfProfile, loadSelfProfile,
   profilePayload, verifyPayload,
@@ -1879,6 +1880,23 @@ function CustomerOrder({ o, venues, act, busy, session, say }: any) {
     const iv = setInterval(tick, 8000);
     return () => { alive = false; clearInterval(iv); };
   }, [String(o.id), o.status, o.customer]);
+  // Who is bidding, and what is their record (A6r)? The customer is choosing who
+  // comes to their house, and on price alone that choice is blind.
+  //
+  // Keyed on the SET of bidders rather than on `sealedBids`, so the 8-second
+  // poll doesn't re-read the registry for a list that hasn't changed — a bid
+  // arriving is what should trigger a lookup, not the clock.
+  const [reps, setReps] = useState<Map<string, Reputation>>(new Map());
+  const bidderKey = useMemo(
+    () => [...new Set(sealedBids.map((b) => b.driver.toLowerCase()))].sort().join(","),
+    [sealedBids]
+  );
+  useEffect(() => {
+    if (!bidderKey) return;
+    let alive = true;
+    fetchReputations(bidderKey.split(",")).then((m) => { if (alive) setReps(m); }).catch(() => {});
+    return () => { alive = false; };
+  }, [bidderKey]);
   useEffect(() => {
     if (!o.driver || o.driver === ZeroAddress) return;
     contracts().drivers.drivers(o.driver)
@@ -1966,15 +1984,22 @@ function CustomerOrder({ o, venues, act, busy, session, say }: any) {
 
           {/* Sealed bids: readable only here, and only shown after the revealed
               terms are checked against the on-chain commitment. */}
-          {sealedBids.map((b) => (
+          {sealedBids.map((b) => {
+            // Absent (registry unreachable) is NOT the same as no history, so it
+            // renders as nothing at all rather than as "new driver".
+            const rep = reps.get(b.driver.toLowerCase());
+            return (
             <div className="kv" key={b.hash}>
               <span className="k mono">
                 {short(b.driver)}
+                {rep && (
+                  <span className={rep.banned ? "hint bad" : "hint"}> · {fmtReputation(rep)}</span>
+                )}
                 <span className="hint"> · sealed — not published on-chain</span>
               </span>
               <span className="v">
                 <span className="amount">{fmtAsset(b.amountWei, o.token)} </span>
-                <button className="btn small" disabled={busy || orphaned}
+                <button className="btn small" disabled={busy || orphaned || rep?.banned}
                   onClick={() => act("Accept sealed bid", async () => {
                     if (assetOf(o.token).isToken) {
                       // No self-mint: the escrow token is real USDC, so the
@@ -1991,7 +2016,8 @@ function CustomerOrder({ o, venues, act, busy, session, say }: any) {
                 </button>
               </span>
             </div>
-          ))}
+            );
+          })}
           <div className="btn-row">
             <button className="btn danger small" disabled={busy || orphaned}
               onClick={() => act("Cancel order", () => relayForward("orders", os!.orders, "cancelOpen", [o.id]))}>Cancel</button>
