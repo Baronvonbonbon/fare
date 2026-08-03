@@ -203,15 +203,35 @@ fund the **demo** burner's gas for free on Paseo, not for the product.
 
 ## Asset-conversion coverage layer — any asset → one shielded token → gas+fare+tip
 
-**The gap this closes.** The live Kusama Shield pool on Paseo is **native-PAS
-only** (`depositNative`). The combined e2e ([E2E-COMBINED-REPORT.md](E2E-COMBINED-REPORT.md))
-shields the burner's **gas** through it but leaves the **escrow USDC value
-linkable** — its "one genuinely-new mainnet gap": USDC can't route through a
-PAS-only pool, so the escrow traces back to `main`.
+> ⚠ **SUPERSEDED — the premise below was wrong.** This section was written on the
+> belief that the live Kusama Shield pool is **native-PAS only** (`depositNative`),
+> which would force everything to shield as PAS and be swapped back at the burner.
+> Kusama Shield is in fact a **multi-asset** pool — `depositAsset(assetId, value, commitment)`
+> — and shielding USDC directly is proven end to end on Paseo. The burner-side
+> swap is therefore not forced, and it was never desirable: a burner making a
+> distinctive-amount DEX swap correlates by amount and timing with its own funding
+> deposit, which is exactly the link the burner exists to break.
+>
+> **The swap now happens PRE-SHIELD, on the customer's own funded account:**
+> `PAS --[DEX]--> USDC --> shield as asset 1337 --> burner withdraws USDC notes`.
+> That leaves the swap fully public, which is fine — it sits on the funder's side
+> of the anonymity boundary, like a withdrawal from an exchange. The burner never
+> touches the DEX. See `venue-node/swap.mjs` `buildExchangeXcm` and the relay's
+> `GET /swap-xcm` (a builder only — it returns unsigned calldata and never holds
+> funds, because a relay that swapped on a user's behalf would learn the
+> PAS→USDC mapping per user).
+>
+> The coverage layer described below is **kept** as the recovery path for a burner
+> that ends up holding the wrong asset, and as the fallback when pre-shield
+> sourcing is unavailable. Its historical rationale follows.
 
-**The fix (`venue-node/swap.mjs`).** Normalize on the ONE asset the pool supports.
-Everything shields as **PAS**; the burner then fans that PAS out through the local
-`asset-conversion` DEX into exactly what each cost needs:
+**The gap this closes.** The combined e2e ([E2E-COMBINED-REPORT.md](E2E-COMBINED-REPORT.md))
+shields the burner's **gas** but leaves the **escrow USDC value linkable** — its
+"one genuinely-new mainnet gap", so the escrow traces back to `main`.
+
+**The fix (`venue-node/swap.mjs`).** Normalize on one asset. Everything shields as
+**PAS**; the burner then fans that PAS out through the local `asset-conversion`
+DEX into exactly what each cost needs:
 
 ```
 any user asset ─swap→ PAS ─deposit→ KS pool ─proxy_withdraw(relay)→ burner (UNLINKED)
@@ -265,7 +285,8 @@ is the one remaining confirmation, which the probe performs.
 | Relay as observer | ✗ trust point | the relay submits the withdrawal, so it learns `burner ↔ withdrawal`. A decentralized/blind relayer would close this. |
 | Anonymity set | ✗ weak (testnet) | Paseo pool ~230 leaves; real privacy needs a large set + deposit/withdraw time-decorrelation (currently last-leaf immediate pattern). |
 | Fixed denominations | ◑ required | KS notes are fixed-denom; variable escrow amounts must be quantized (deposit standard units, change stays in-pool) or amounts correlate. |
-| Single-asset notes | ◑ by design | one note = one asset; shielding PAS + USDC separately = two correlatable withdrawals. The coverage layer avoids this by shielding **only PAS**. |
+| Single-asset notes | ◑ by design | one note = one asset (the asset is bound in the commitment). A USDC order still needs a small native note for gas, because the burner must send `approve` itself — the Asset Hub ERC-20 precompile has **no `permit`** and is not EIP-2771-aware, so no forwarder can cover it. Withdrawing both to the same burner links those two notes to each other. They are both the customer's own, so this is acceptable, but it is a real edge and not zero. |
+| Quote is not an oracle | ✗ by construction | `GET /quote` serves a market rate off a thin testnet pool — no TWAP, no manipulation resistance. It may drive UI display and the sizing of a user-initiated, slippage-bounded swap, and nothing else. **No contract reads it and no payout is computed from it.** USDC-denominated escrow is what makes that possible: order values, fares, tips and the service fee are all denominated in the token directly, so none of them needs a rate. Converting a quote into an amount a contract will enforce would reintroduce an oracle dependency this design does not have. |
 
 ## Config (`venue-node/.env`)
 

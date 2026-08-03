@@ -37,6 +37,7 @@
 //   DRY_RUN=1 node scripts/swap-local-dex.mjs  # quote + simulate, send nothing
 import { ApiPromise, WsProvider } from "@polkadot/api";
 import { ethers } from "ethers";
+import { buildExchangeXcm, XCM_PRECOMPILE } from "../venue-node/swap.mjs";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -44,7 +45,6 @@ import { fileURLToPath } from "node:url";
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
 const RPC = process.env.TESTNET_RPC ?? "https://eth-rpc-testnet.polkadot.io/";
 const AH_WSS = process.env.AH_WSS ?? "wss://asset-hub-paseo-rpc.n.dwellir.com";
-const XCM_PRECOMPILE = "0x00000000000000000000000000000000000a0000";
 
 const ASSET_ID = BigInt(process.env.ASSET_ID ?? 1337);        // 1337 = USDC, 1984 = USDt
 const TOKEN_DP = Number(process.env.TOKEN_DP ?? 6);
@@ -65,8 +65,8 @@ async function main() {
   const key = process.env.DEPLOYER_PRIVATE_KEY
     ?? fs.readFileSync(path.join(ROOT, ".env"), "utf8").match(/^DEPLOYER_PRIVATE_KEY=(.+)$/m)[1].trim();
   const me = new ethers.Wallet(key, prov);
-  // pallet-revive's H160 -> AccountId32 mapping. Both the source of the PAS and
-  // the beneficiary of the USDC.
+  // pallet-revive's H160 -> AccountId32 mapping (`fallbackAccountId` in
+  // swap.mjs). Both the source of the PAS and the beneficiary of the USDC.
   const mapped = me.address.toLowerCase() + "ee".repeat(12);
 
   const token = erc20For(ASSET_ID);
@@ -84,46 +84,21 @@ async function main() {
   log(`token     ${token}  (${sym}, asset ${ASSET_ID}, ${TOKEN_DP}dp)`);
   log(`balance   ${fmtT(before)} ${sym}  ·  ${ethers.formatEther(await prov.getBalance(me.address))} PAS\n`);
 
-  // ── quote on the local DEX ────────────────────────────────────────────────
+  // ── quote + build on the local DEX ────────────────────────────────────────
+  // The quote and the XCM construction live in venue-node/swap.mjs, so this CLI
+  // and the relay's /swap-xcm builder cannot drift apart on the two encoding
+  // facts (XCM v5 minimum, Weight struct) that took the longest to find.
   const api = await ApiPromise.create({ provider: new WsProvider(AH_WSS, 3000) });
-  let givePas;
-  try {
-    const nativeDp = api.registry.chainDecimals[0]; // PAS is 10dp on substrate, 18 in the EVM
-    const PAS_LOC = { parents: 1, interior: "Here" };
-    const TOKEN_LOC = { parents: 0, interior: { X2: [{ PalletInstance: 50 }, { GeneralIndex: ASSET_ID }] } };
-    const q = await api.call.assetConversionApi.quotePriceTokensForExactTokens(
-      PAS_LOC, TOKEN_LOC, WANT.toString(), true
-    );
-    const quoted = BigInt(q.toJSON() ?? 0);
-    if (quoted <= 0n) throw new Error(`no pool/liquidity for asset ${ASSET_ID}`);
-    givePas = (quoted * (10_000n + SLIPPAGE_BPS)) / 10_000n;
-    log(`quote     ${fmtT(WANT)} ${sym} costs ${Number(quoted) / 10 ** nativeDp} PAS`);
-    log(`offering  ${Number(givePas) / 10 ** nativeDp} PAS (+${SLIPPAGE_BPS}bps slippage)\n`);
-  } finally { await api.disconnect().catch(() => {}); }
-
-  // ── build the XCM (v5 — the chain rejects v4 and below) ───────────────────
-  const api2 = await ApiPromise.create({ provider: new WsProvider(AH_WSS, 3000) });
   let hex;
   try {
-    const PAS_LOC = { parents: 1, interior: "Here" };
-    const TOKEN_LOC = { parents: 0, interior: { X2: [{ PalletInstance: 50 }, { GeneralIndex: ASSET_ID }] } };
-    hex = api2.registry.createType("XcmVersionedXcm", {
-      V5: [
-        { WithdrawAsset: [{ id: PAS_LOC, fun: { Fungible: givePas } }] },
-        // maximal:false → take exactly `want` and refund the rest of the PAS,
-        // so an over-offer is returned rather than swallowed by the pool.
-        { ExchangeAsset: {
-            give: { Definite: [{ id: PAS_LOC, fun: { Fungible: givePas } }] },
-            want: [{ id: TOKEN_LOC, fun: { Fungible: WANT } }],
-            maximal: false,
-        } },
-        { DepositAsset: {
-            assets: { Wild: "All" },
-            beneficiary: { parents: 0, interior: { X1: [{ AccountId32: { network: null, id: mapped } }] } },
-        } },
-      ],
-    }).toHex();
-  } finally { await api2.disconnect().catch(() => {}); }
+    const nativeDp = api.registry.chainDecimals[0]; // PAS is 10dp on substrate, 18 in the EVM
+    const built = await buildExchangeXcm({
+      assetId: ASSET_ID, want: WANT, beneficiaryH160: me.address, slippageBps: SLIPPAGE_BPS, api,
+    });
+    hex = built.xcm;
+    log(`quote     ${fmtT(WANT)} ${sym} costs ${Number(built.quoted) / 10 ** nativeDp} PAS`);
+    log(`offering  ${Number(built.givePas) / 10 ** nativeDp} PAS (+${SLIPPAGE_BPS}bps slippage)\n`);
+  } finally { await api.disconnect().catch(() => {}); }
 
   const iface = new ethers.Interface([
     "function weighMessage(bytes message) view returns (uint64 refTime, uint64 proofSize)",

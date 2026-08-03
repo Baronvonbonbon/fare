@@ -37,6 +37,16 @@ export const DEPOSIT_GAS = 3_000_000n;
 /// tree is warm and no note is being created for a new depositor.
 export const RETURN_GAS = 800_000n;
 
+/// PAS→USDC on the asset-conversion DEX, via the XCM precompile's ExchangeAsset.
+/// Larger than a pool deposit because the whole program — WithdrawAsset,
+/// ExchangeAsset, DepositAsset — executes inside the one call, and the measured
+/// weight on Paseo is ~4.3e10 refTime.
+///
+/// This is signed by the customer's FUNDED account, not a burner, so it is not
+/// bound by MAX_BURNER_GAS_LIMIT: the swap happens pre-shield, before any burner
+/// exists. Keep it under the oversized-limit budget all the same.
+export const SWAP_GAS = 2_000_000n;
+
 /// Headroom over the bare reservation, so rounding and a gas-price tick do not
 /// strand the transaction. Kept explicit because the relationship between this
 /// and RETURN_GAS is the thing that must hold.

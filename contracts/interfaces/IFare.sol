@@ -53,6 +53,28 @@ interface IFareVenues {
 /// docs/SHIELDED-POOL-INTEGRATION.md.
 interface IFareShieldPool {
     function depositNative(bytes32 commitment) external payable;
+
+    /// Multi-asset deposit. `asset` is the ASSET HUB ASSET ID (1337 for USDC),
+    /// NOT the ERC-20 precompile address — passing an address reverts with
+    /// "AssetId too large". The pool then credits its escrow under the
+    /// precompile ADDRESS, which is also what the commitment and the withdraw
+    /// proof must carry. Getting that pair backwards leaves the value
+    /// permanently unwithdrawable; see docs/SHIELDED-POOL-INTEGRATION.md.
+    /// Requires an ERC-20 approval first — the pool pulls via transferFrom.
+    /// NOT usable from a contract with no native balance: see depositAssetDirect.
+    function depositAsset(uint256 asset, uint256 value, bytes32 commitment) external;
+
+    /// Credit a balance the caller has ALREADY transferred in, with no approval.
+    ///
+    /// This is the only asset-deposit path a contract can rely on. pallet-assets
+    /// charges the approver a RESERVED NATIVE DEPOSIT for `approve`, so a
+    /// contract holding zero PAS cannot approve at all — it reverts with no
+    /// revert data, which reads like a decode failure and is not one. FareVault
+    /// is exactly that contract: its native balance is payees' money, not a
+    /// float, and is legitimately zero. A plain `transfer` reserves nothing.
+    /// Verified on Paseo: transfer → depositAssetDirect → ZK withdraw to a
+    /// fresh address all succeed.
+    function depositAssetDirect(uint256 asset, uint256 value, bytes32 commitment) external;
 }
 
 /// Groth16 verifier for the shield-note circuit (privacy phase 3).

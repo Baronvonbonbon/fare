@@ -31,7 +31,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { JsonRpcProvider, Wallet, Contract, Interface, parseEther, formatEther, isAddress, keccak256, solidityPacked } from "ethers";
 import { rebateWei, withdrawFeeWei, coversCost, withinBudget, windowSpent } from "./economics.mjs";
 import { rebateInNative, shouldTopUp, planSwap, assetConversionQuote, priceFraction, cfg as swapCfg } from "./treasury.mjs";
-import { executeRecoverySwap } from "./swap.mjs";
+import { executeRecoverySwap, buildExchangeXcm, XCM_PRECOMPILE } from "./swap.mjs";
 
 const PORT = Number(process.env.RELAY_PORT || 8788);
 // Bind address. Defaults to every interface because under docker-compose the
@@ -192,6 +192,12 @@ const VAULT_ABI = [
   "function insertShieldNoteFor(address account, uint96 bucket, uint256 commitment, uint256 deadline, bytes signature)",
   "function depositShieldNoteZK(bytes proof, uint256 root, uint256 nullifierHash, uint96 bucket, bytes32 ksCommitment)",
   "function isKnownNoteRoot(uint256 root) view returns (bool)",
+  // token notes — same path for a USDC payout. Each asset has its own tree, so
+  // the root check is per-asset too.
+  "function insertShieldNoteTokenFor(address token, address account, uint96 bucket, uint256 commitment, uint256 deadline, bytes signature)",
+  "function depositShieldNoteTokenZK(bytes proof, uint256 root, uint256 nullifierHash, address token, uint96 bucket, bytes32 ksCommitment)",
+  "function isKnownNoteRootFor(address asset, uint256 root) view returns (bool)",
+  "function withdrawForToken(address token, address account, address recipient, uint256 deadline, bytes signature)",
 ];
 const vault = vaultAddr ? new Contract(vaultAddr, VAULT_ABI, relay) : null;
 const GAS_WITHDRAW = 200_000n;
@@ -563,6 +569,73 @@ async function handler(req, res) {
       return send(res, 200, { ok: true, relay: relay.address, balance: formatEther(bal), settlement: settlementAddr, forwarder: forwarderAddr ?? null, shieldPool: SHIELD_POOL, shieldFeePAS: formatEther(SHIELD_FEE), shieldMode: SHIELD_FEE > 0n ? "fee" : "sponsor", onboarding: ONBOARD_ENABLED ? { seedPAS: formatEther(ONBOARD_SEED), region: ONBOARD_LAT != null ? { lat: ONBOARD_LAT, lon: ONBOARD_LON, radiusKm: ONBOARD_RADIUS_KM } : null } : null }, origin);
     }
 
+    // ── Price quote from Asset Hub's asset-conversion DEX ────────────────────
+    // The PWA cannot open a Substrate WebSocket, so the relay is the only way a
+    // browser sees a PAS/USDC rate. Read-only, no signer, served from the same
+    // QUOTE_TTL_MS cache the profitability guard uses.
+    //
+    // ⚠ This is a MARKET RATE off a thin testnet pool, NOT an oracle. It may
+    // drive UI display and the sizing of a user-initiated, slippage-bounded
+    // swap, and nothing else. No contract reads it and no payout is computed
+    // from it — see docs/RELAY-TREASURY.md.
+    if (req.method === "GET" && url.pathname === "/quote") {
+      const token = url.searchParams.get("token");
+      const dec = Number(url.searchParams.get("decimals") ?? 6);
+      if (!isAddress(token)) return send(res, 400, { error: "bad token" }, origin);
+      if (!Number.isInteger(dec) || dec < 0 || dec > 36) return send(res, 400, { error: "bad decimals" }, origin);
+      const assetId = assetIdOf(token);
+      if (assetId === null) return send(res, 400, { error: "not an Asset Hub asset precompile" }, origin);
+      const price = await livePrice(token, dec);
+      if (!price) return send(res, 503, { error: "no quote", detail: "no pool, no liquidity, or Asset Hub unreachable" }, origin);
+      const cached = _quotes.get(assetId);
+      return send(res, 200, {
+        token, assetId, decimals: dec,
+        // native (PAS, 18dp in the EVM view) per ONE whole token, exact fraction.
+        nativePerToken: { num: price.num.toString(), den: price.den.toString() },
+        quotedAt: cached?.at ?? Date.now(), ttlMs: QUOTE_TTL_MS,
+        source: "assetConversion.quotePriceExactTokensForTokens",
+        oracle: false,
+      }, origin);
+    }
+
+    // ── Build (do NOT submit) the PAS→token swap ─────────────────────────────
+    // A BUILDER ONLY: it quotes, encodes the XCM, and hands back calldata. The
+    // relay never holds, moves, or sees the funds — the customer signs and sends
+    // it from their OWN funded account, pre-shield. Making the relay swap on a
+    // user's behalf would hand it the PAS→USDC mapping per user, which is the
+    // exact link the shielded pool exists to break.
+    if (req.method === "GET" && url.pathname === "/swap-xcm") {
+      const token = url.searchParams.get("token");
+      const want = url.searchParams.get("want");
+      const from = url.searchParams.get("from");
+      const slippageBps = BigInt(url.searchParams.get("slippageBps") ?? 500);
+      if (!isAddress(token)) return send(res, 400, { error: "bad token" }, origin);
+      if (!isAddress(from)) return send(res, 400, { error: "bad from address" }, origin);
+      const assetId = assetIdOf(token);
+      if (assetId === null) return send(res, 400, { error: "not an Asset Hub asset precompile" }, origin);
+      let wantN;
+      try { wantN = BigInt(want); } catch { return send(res, 400, { error: "bad want amount" }, origin); }
+      if (wantN <= 0n) return send(res, 400, { error: "want must be > 0" }, origin);
+      if (slippageBps < 0n || slippageBps > 5000n) return send(res, 400, { error: "slippageBps out of range" }, origin);
+
+      let built;
+      try {
+        built = await buildExchangeXcm({ assetId, want: wantN, beneficiaryH160: from, slippageBps });
+      } catch (e) {
+        return send(res, 503, { error: e?.message ?? String(e) }, origin);
+      }
+      // `execute(bytes,Weight)` takes a Weight STRUCT — a bare uint64 reverts as
+      // OUT_OF_MEMORY, a decode failure with a misleading name. The caller must
+      // weigh the message itself (weighMessage on the same precompile) and
+      // simulate with eth_call before sending; both are free.
+      return send(res, 200, {
+        to: XCM_PRECOMPILE, xcm: built.xcm, assetId,
+        want: built.want.toString(), quotedPas: built.quoted.toString(),
+        givePas: built.givePas.toString(), slippageBps: built.slippageBps.toString(),
+        note: "unsigned; weigh with weighMessage, simulate with eth_call, then send from `from`",
+      }, origin);
+    }
+
     // ── Message channel: fetch a thread (cheap read, not rate-limited) ───────
     if (req.method === "GET" && url.pathname === "/msg") {
       const topic = url.searchParams.get("topic");
@@ -850,17 +923,24 @@ async function handler(req, res) {
     // commitment, so this relay cannot substitute a note of its own.
     if (req.method === "POST" && url.pathname === "/shield-note") {
       if (!vault) return send(res, 503, { error: "vault not configured" }, origin);
-      const { account, bucket, commitment, deadline, signature } = await readJson(req);
+      const { account, bucket, commitment, deadline, signature, token } = await readJson(req);
       if (!isAddress(account)) return send(res, 400, { error: "bad account" }, origin);
       if (typeof signature !== "string") return send(res, 400, { error: "missing signature" }, origin);
+      // `token` present = shield an ERC-20 balance (USDC) instead of native. The
+      // contract checks a DIFFERENT typehash for it, so a signature meant for one
+      // cannot be replayed as the other; the relay just routes.
+      if (token !== undefined && !isAddress(token)) return send(res, 400, { error: "bad token" }, origin);
       let bucketWei, commit;
       try { bucketWei = BigInt(bucket); commit = BigInt(commitment); }
       catch { return send(res, 400, { error: "bad bucket/commitment" }, origin); }
       if (commit === 0n) return send(res, 400, { error: "zero commitment" }, origin);
 
-      const cost = await estCostWei(
-        () => vault.insertShieldNoteFor.estimateGas(account, bucketWei, commit, deadline, signature), GAS_NOTE
-      );
+      const args = token
+        ? [token, account, bucketWei, commit, deadline, signature]
+        : [account, bucketWei, commit, deadline, signature];
+      const fn = token ? vault.insertShieldNoteTokenFor : vault.insertShieldNoteFor;
+
+      const cost = await estCostWei(() => fn.estimateGas(...args), GAS_NOTE);
       const hold = reserveBudget(cost);
       if (PROFIT_GUARD && !hold.ok) {
         hold.release();
@@ -870,7 +950,7 @@ async function handler(req, res) {
       try {
         tx = await serialize(async () => {
           const nonce = await allocNonce();
-          return vault.insertShieldNoteFor(account, bucketWei, commit, deadline, signature, { gasLimit: GAS_NOTE, nonce });
+          return fn(...args, { gasLimit: GAS_NOTE, nonce });
         });
       } catch (e) {
         hold.release();
@@ -885,24 +965,34 @@ async function handler(req, res) {
     // phase 3: no keeper trust, no account named.
     if (req.method === "POST" && url.pathname === "/shield-note-spend") {
       if (!vault) return send(res, 503, { error: "vault not configured" }, origin);
-      const { proof, root, nullifierHash, bucket, ksCommitment } = await readJson(req);
+      const { proof, root, nullifierHash, bucket, ksCommitment, token } = await readJson(req);
       if (typeof proof !== "string" || !/^0x[0-9a-fA-F]+$/.test(proof))
         return send(res, 400, { error: "bad proof" }, origin);
       if (typeof ksCommitment !== "string" || !/^0x[0-9a-fA-F]{64}$/.test(ksCommitment))
         return send(res, 400, { error: "ksCommitment must be a 32-byte hex string" }, origin);
+      if (token !== undefined && !isAddress(token)) return send(res, 400, { error: "bad token" }, origin);
       let rootN, nh, bucketWei;
       try { rootN = BigInt(root); nh = BigInt(nullifierHash); bucketWei = BigInt(bucket); }
       catch { return send(res, 400, { error: "bad numeric field" }, origin); }
 
       // A stale root is the common failure (the tree moves while the payee
       // proves), and it is recoverable client-side — say so rather than burning
-      // gas on a revert.
-      if (!(await vault.isKnownNoteRoot(rootN)))
+      // gas on a revert. Each asset has its OWN tree, so the root must be checked
+      // against the tree the note actually came from: a native root is not a
+      // known USDC root, and that mismatch is exactly what stops a note being
+      // spent against the wrong buffer.
+      const knownRoot = token
+        ? await vault.isKnownNoteRootFor(token, rootN)
+        : await vault.isKnownNoteRoot(rootN);
+      if (!knownRoot)
         return send(res, 409, { error: "unknown root", retry: true, detail: "rebuild the proof against a current root" }, origin);
 
-      const cost = await estCostWei(
-        () => vault.depositShieldNoteZK.estimateGas(proof, rootN, nh, bucketWei, ksCommitment), GAS_NOTE_SPEND
-      );
+      const args = token
+        ? [proof, rootN, nh, token, bucketWei, ksCommitment]
+        : [proof, rootN, nh, bucketWei, ksCommitment];
+      const fn = token ? vault.depositShieldNoteTokenZK : vault.depositShieldNoteZK;
+
+      const cost = await estCostWei(() => fn.estimateGas(...args), GAS_NOTE_SPEND);
       const hold = reserveBudget(cost);
       if (PROFIT_GUARD && !hold.ok) {
         hold.release();
@@ -912,7 +1002,7 @@ async function handler(req, res) {
       try {
         tx = await serialize(async () => {
           const nonce = await allocNonce();
-          return vault.depositShieldNoteZK(proof, rootN, nh, bucketWei, ksCommitment, { gasLimit: GAS_NOTE_SPEND, nonce });
+          return fn(...args, { gasLimit: GAS_NOTE_SPEND, nonce });
         });
       } catch (e) {
         hold.release();

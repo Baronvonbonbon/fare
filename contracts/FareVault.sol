@@ -65,11 +65,6 @@ contract FareVault is Ownable2Step, PaseoSafeSender, FareUpgradable, EIP712 {
     //     guarantee one owner transaction away from being void is not one.
     // The ZK path needs no keeper and is permissionless, so nothing is lost.
     IFareShieldPool public shieldPool; // address(0) = shielded payouts off
-    uint96[] public shieldBuckets; // allowed denominations, ascending
-    // Value moved out of balanceOf and held against un-deposited notes. Shared
-    // accounting for the ZK path: insertShieldNote adds, depositShieldNoteZK
-    // subtracts. (It backed the keeper tickets too, which is why it predates them.)
-    uint256 public shieldBuffer;
     mapping(address => uint256) public shieldNonce; // separate from withdrawNonce
 
     // ── ZK note pool (privacy phase 3) — the ONLY shielding path ─────────────
@@ -86,22 +81,69 @@ contract FareVault is Ownable2Step, PaseoSafeSender, FareUpgradable, EIP712 {
     IFarePoseidonT3 public shieldPoseidon;
 
     uint256[NOTE_DEPTH] public noteZeros; // empty-subtree roots, set with the hasher
-    uint256[NOTE_DEPTH] private _filledSubtrees;
-    uint256[ROOT_HISTORY] public noteRoots;
-    uint32 public noteRootIndex;
-    uint32 public nextNoteIndex;
-    mapping(uint256 => bool) public shieldNullifierSpent;
+    uint256 public emptyNoteRoot; // root of a tree with no leaves, shared by every asset
+
+    // ── one note tree PER ASSET, `address(0)` = native ───────────────────────
+    // The circuit's public signals are [root, nullifierHash, bucket,
+    // ksCommitment] — there is NO asset signal, and a spend reveals only the
+    // nullifier, never the commitment, so the vault cannot look up which asset a
+    // spent note was inserted for. Without binding, a note inserted for 1 USDC
+    // could be spent against the native buffer for 1 PAS.
+    //
+    // Separate trees are the binding: `root` is already a public signal, so a
+    // proof built against the USDC tree cannot satisfy the native root window
+    // and vice versa. This needs NO circuit change and therefore no second
+    // trusted setup — `setVerifyingKey` is lock-once and the existing
+    // single-party ceremony is already the top mainnet blocker
+    // (docs/PRIVACY-STATUS.md). The cost is that each asset's anonymity set is
+    // its own tree, which the shielded pool's per-asset escrow implies anyway.
+    struct NoteTree {
+        uint256[ROOT_HISTORY] roots;
+        uint256[NOTE_DEPTH] filledSubtrees;
+        uint32 rootIndex;
+        uint32 nextIndex;
+        bool warmed; // packs with the two uint32s above — free
+    }
+
+    mapping(address => NoteTree) private _noteTrees;
+    mapping(address => uint96[]) private _shieldBuckets; // asset => denominations, ascending
+    // Value moved out of balanceOf/tokenBalanceOf and held against un-deposited
+    // notes, per asset: insert adds, the ZK spend subtracts.
+    mapping(address => uint256) private _shieldBuffer;
+    mapping(address => mapping(uint256 => bool)) private _nullifierSpent;
+
+    // Asset Hub asset id for an accepted ERC-20 (1337 = USDC). `depositAsset`
+    // takes the ID while the escrow ledger and the note commitment key on the
+    // precompile ADDRESS, so the two are set explicitly rather than derived —
+    // a change in the precompile address scheme must not silently misroute.
+    mapping(address => uint64) public shieldAssetId;
 
     bytes32 private constant NOTE_TYPEHASH =
         keccak256("ShieldNote(address account,uint96 bucket,uint256 commitment,uint256 nonce,uint256 deadline)");
+    bytes32 private constant NOTE_TOKEN_TYPEHASH = keccak256(
+        "ShieldNoteToken(address token,address account,uint96 bucket,uint256 commitment,uint256 nonce,uint256 deadline)"
+    );
+    bytes32 private constant WITHDRAW_TOKEN_TYPEHASH = keccak256(
+        "WithdrawToken(address token,address account,address recipient,uint256 nonce,uint256 deadline)"
+    );
 
     event ShieldNoteInserted(address indexed account, uint96 indexed bucket, uint256 commitment, uint32 index);
     event ShieldNoteSpent(uint256 indexed nullifierHash, uint96 indexed bucket, bytes32 ksCommitment);
+    // Token variants index the ASSET FIRST and leave the rest unindexed on
+    // purpose: Paseo's eth_getLogs rejects `null` topic placeholders and
+    // mishandles the `[]` wildcard, so only a LEADING indexed param is
+    // server-side filterable. Same reason FareOrders indexes `region` first.
+    event ShieldNoteInsertedToken(
+        address indexed token, address account, uint96 bucket, uint256 commitment, uint32 index
+    );
+    event ShieldNoteSpentToken(address indexed token, uint256 nullifierHash, uint96 bucket, bytes32 ksCommitment);
     event ShieldVerifierSet(address indexed verifier);
     event ShieldPoseidonSet(address indexed poseidon);
 
     event ShieldPoolSet(address indexed pool);
     event ShieldBucketsSet(uint96[] buckets);
+    event ShieldBucketsTokenSet(address indexed token, uint96[] buckets);
+    event ShieldAssetIdSet(address indexed token, uint64 assetId);
 
     event Credited(address indexed to, address indexed from, uint256 amount, uint256 newBalance);
     event Withdrawn(address indexed account, address indexed to, uint256 amount);
@@ -141,14 +183,46 @@ contract FareVault is Ownable2Step, PaseoSafeSender, FareUpgradable, EIP712 {
     /// @dev Buckets must clear the Paseo eth-rpc rounding bug (PaseoSafeSender)
     ///      or every deposit in that denomination would revert at submission.
     function setShieldBuckets(uint96[] calldata buckets) external onlyOwner {
+        _setShieldBuckets(address(0), buckets);
+        emit ShieldBucketsSet(buckets);
+    }
+
+    /// @notice Set the allowed denominations for an ERC-20 asset's notes.
+    /// @dev Deliberately does NOT apply the PaseoSafeSender rounding check the
+    ///      native path uses. That bug is in the eth-rpc denomination conversion
+    ///      for `msg.value`; an ERC-20 transfer never touches it. Applying it
+    ///      here would reject legitimate 6-decimal rungs — 0.5 USDC is 500_000,
+    ///      which fails `% 10**6 < 500_000` while being perfectly sendable.
+    function setShieldBucketsToken(address token, uint96[] calldata buckets) external onlyOwner {
+        require(token != address(0), "zero-addr");
+        // A token note is unreachable until its ladder is set, so this is the
+        // one call guaranteed to precede the first insert — the right place to
+        // pre-pay the tree. Idempotent, so re-tuning a ladder costs nothing.
+        require(address(shieldPoseidon) != address(0), "poseidon-unset");
+        _setShieldBuckets(token, buckets);
+        _warmTree(token);
+        emit ShieldBucketsTokenSet(token, buckets);
+    }
+
+    /// @notice Bind an accepted ERC-20 to its Asset Hub asset id, so the vault
+    ///         can call `depositAsset(id, …)` while everything else keys on the
+    ///         precompile address. Required before that token can be shielded.
+    function setShieldAssetId(address token, uint64 assetId) external onlyOwner {
+        require(token != address(0), "zero-addr");
+        shieldAssetId[token] = assetId;
+        emit ShieldAssetIdSet(token, assetId);
+    }
+
+    function _setShieldBuckets(address asset, uint96[] calldata buckets) internal {
         require(buckets.length > 0, "no-buckets");
         for (uint256 i = 0; i < buckets.length; i++) {
             require(buckets[i] > 0, "zero-bucket");
             require(i == 0 || buckets[i] > buckets[i - 1], "not-ascending");
-            require(uint256(buckets[i]) % PASEO_UNIT < PASEO_REJECT_THRESHOLD, "bucket-unsendable");
+            if (asset == address(0)) {
+                require(uint256(buckets[i]) % PASEO_UNIT < PASEO_REJECT_THRESHOLD, "bucket-unsendable");
+            }
         }
-        shieldBuckets = buckets;
-        emit ShieldBucketsSet(buckets);
+        _shieldBuckets[asset] = buckets;
     }
 
     /// @notice Point at the shield-note Groth16 verifier. address(0) disables the
@@ -171,33 +245,103 @@ contract FareVault is Ownable2Step, PaseoSafeSender, FareUpgradable, EIP712 {
         uint256 z = 0;
         for (uint256 i = 0; i < NOTE_DEPTH; i++) {
             noteZeros[i] = z;
-            _filledSubtrees[i] = z;
             z = _poseidon(z, z);
         }
-        noteRoots[0] = z; // the empty tree's root
+        // Shared by every asset's tree — one hasher, one depth, one empty root.
+        emptyNoteRoot = z;
+        _warmTree(address(0));
         emit ShieldPoseidonSet(poseidon);
     }
 
-    /// @notice The current note-tree root.
-    function noteRoot() public view returns (uint256) {
-        return noteRoots[noteRootIndex];
+    /// @dev Pre-pay a tree's storage. `filledSubtrees[i]` is always written by an
+    ///      earlier left-child insert before any right child reads it, so these
+    ///      values are never actually read — the write buys nothing semantically
+    ///      and exists only to make the slots non-zero. Without it the FIRST
+    ///      insert into a tree pays 16 cold zero→non-zero SSTOREs instead of
+    ///      warm ones, ~280k extra gas. That is a setup cost, so governance pays
+    ///      it here rather than charging it to whichever payee shields first.
+    function _warmTree(address asset) internal {
+        NoteTree storage t = _noteTrees[asset];
+        if (t.warmed) return;
+        for (uint256 i = 0; i < NOTE_DEPTH; i++) t.filledSubtrees[i] = noteZeros[i];
+        t.roots[0] = emptyNoteRoot;
+        t.warmed = true;
     }
 
-    /// @notice Is `root` within the retained window? Proofs are built off-chain
-    ///         against a root that may be a few inserts stale by the time they
-    ///         land, so a window is required for the path to be usable at all.
-    function isKnownNoteRoot(uint256 root) public view returns (bool) {
+    // ── note-tree views ──────────────────────────────────────────────────────
+    // The native-asset accessors keep their exact pre-existing signatures:
+    // web/src/abi.ts, venue-node/relay.mjs and the live scripts all read them.
+
+    /// @notice The current note-tree root for `asset` (address(0) = native).
+    function noteRootOf(address asset) public view returns (uint256) {
+        NoteTree storage t = _noteTrees[asset];
+        return t.nextIndex == 0 ? emptyNoteRoot : t.roots[t.rootIndex];
+    }
+
+    /// @notice The current native note-tree root.
+    function noteRoot() external view returns (uint256) {
+        return noteRootOf(address(0));
+    }
+
+    /// @notice Is `root` within `asset`'s retained window? Proofs are built
+    ///         off-chain against a root that may be a few inserts stale by the
+    ///         time they land, so a window is required for the path to be usable
+    ///         at all. This is also what binds a note to its asset: a USDC-tree
+    ///         root can never be known to the native tree.
+    function isKnownNoteRootFor(address asset, uint256 root) public view returns (bool) {
         if (root == 0) return false;
-        uint32 i = noteRootIndex;
+        NoteTree storage t = _noteTrees[asset];
+        if (t.nextIndex == 0) return root == emptyNoteRoot;
+        uint32 i = t.rootIndex;
         for (uint256 n = 0; n < ROOT_HISTORY; n++) {
-            if (noteRoots[i] == root) return true;
+            if (t.roots[i] == root) return true;
             i = i == 0 ? uint32(ROOT_HISTORY - 1) : i - 1;
         }
         return false;
     }
 
+    function isKnownNoteRoot(uint256 root) external view returns (bool) {
+        return isKnownNoteRootFor(address(0), root);
+    }
+
+    function noteIndexOf(address asset) public view returns (uint32) {
+        return _noteTrees[asset].nextIndex;
+    }
+
+    function nextNoteIndex() external view returns (uint32) {
+        return _noteTrees[address(0)].nextIndex;
+    }
+
+    function shieldBufferOf(address asset) public view returns (uint256) {
+        return _shieldBuffer[asset];
+    }
+
+    function shieldBuffer() external view returns (uint256) {
+        return _shieldBuffer[address(0)];
+    }
+
+    function nullifierSpentOf(address asset, uint256 nullifierHash) public view returns (bool) {
+        return _nullifierSpent[asset][nullifierHash];
+    }
+
+    function shieldNullifierSpent(uint256 nullifierHash) external view returns (bool) {
+        return _nullifierSpent[address(0)][nullifierHash];
+    }
+
+    function shieldBuckets(uint256 i) external view returns (uint96) {
+        return _shieldBuckets[address(0)][i];
+    }
+
     function shieldBucketCount() external view returns (uint256) {
-        return shieldBuckets.length;
+        return _shieldBuckets[address(0)].length;
+    }
+
+    function shieldBucketsToken(address token, uint256 i) external view returns (uint96) {
+        return _shieldBuckets[token][i];
+    }
+
+    function shieldBucketCountToken(address token) external view returns (uint256) {
+        return _shieldBuckets[token].length;
     }
 
     function setAuthorized(address account, bool enabled) external onlyOwner {
@@ -293,6 +437,46 @@ contract FareVault is Ownable2Step, PaseoSafeSender, FareUpgradable, EIP712 {
         _safeSend(recipient, toRecipient);
     }
 
+    /// @notice Relay-submitted gasless ERC-20 withdrawal — the token analogue of
+    ///         `withdrawFor`, which only ever covered native.
+    /// @dev This is the PUBLIC exit, kept for the residue a denomination ladder
+    ///      always leaves below its smallest rung. It names the account and the
+    ///      recipient; the private exit is insertShieldNoteToken →
+    ///      depositShieldNoteTokenZK. Distinct typehash from the native
+    ///      `Withdraw`, so neither signature can stand in for the other.
+    function withdrawForToken(
+        address token,
+        address account,
+        address recipient,
+        uint256 deadline,
+        bytes calldata signature
+    ) external nonReentrant {
+        require(block.timestamp <= deadline, "expired");
+        require(recipient != address(0), "zero-addr");
+        bytes32 digest = _hashTypedDataV4(
+            keccak256(
+                abi.encode(WITHDRAW_TOKEN_TYPEHASH, token, account, recipient, withdrawNonce[account], deadline)
+            )
+        );
+        require(digest.recover(signature) == account, "bad-sig");
+        withdrawNonce[account] += 1;
+
+        uint256 amount = tokenBalanceOf[token][account];
+        require(amount > 0, "zero-balance");
+        tokenBalanceOf[token][account] = 0;
+
+        uint256 fee = (amount * withdrawFeeBps) / 10_000;
+        uint256 toRecipient = amount - fee;
+        if (fee > 0) {
+            // Same shape as the native path: the fee becomes the relay's own
+            // vault balance rather than a push, so there is still one money-out.
+            tokenBalanceOf[token][msg.sender] += fee;
+            emit RelayWithdrawFee(msg.sender, account, fee);
+        }
+        emit TokenWithdrawn(token, account, recipient, toRecipient);
+        IERC20(token).safeTransfer(recipient, toRecipient);
+    }
+
     // ── ZK note pool: insert → prove → deposit ───────────────────────────────
 
     /// @notice Convert `bucket` of your balance into a shielded note.
@@ -300,7 +484,16 @@ contract FareVault is Ownable2Step, PaseoSafeSender, FareUpgradable, EIP712 {
     ///      fine: the anonymity comes from spending, which reveals only a
     ///      nullifier. It is the same shape as any pool deposit.
     function insertShieldNote(uint96 bucket, uint256 commitment) external nonReentrant {
-        _insertShieldNote(msg.sender, bucket, commitment);
+        _insertShieldNote(address(0), msg.sender, bucket, commitment);
+    }
+
+    /// @notice Convert `bucket` of your `token` balance into a shielded note.
+    ///         The stablecoin analogue of `insertShieldNote` — without it a
+    ///         payee settled in USDC has no private exit at all, only
+    ///         `withdrawToken` to a named address.
+    function insertShieldNoteToken(address token, uint96 bucket, uint256 commitment) external nonReentrant {
+        require(token != address(0), "zero-addr");
+        _insertShieldNote(token, msg.sender, bucket, commitment);
     }
 
     /// @notice Relay-submitted note insertion, so a payee with no gas can shield
@@ -320,7 +513,31 @@ contract FareVault is Ownable2Step, PaseoSafeSender, FareUpgradable, EIP712 {
         );
         require(digest.recover(signature) == account, "bad-sig");
         shieldNonce[account] += 1;
-        _insertShieldNote(account, bucket, commitment);
+        _insertShieldNote(address(0), account, bucket, commitment);
+    }
+
+    /// @notice Relay-submitted token note insertion.
+    /// @dev A DISTINCT typehash ("ShieldNoteToken", and it carries `token`), so
+    ///      a signature authorizing a native insert can never be replayed as a
+    ///      token insert. The shared `shieldNonce` still makes each single-use.
+    function insertShieldNoteTokenFor(
+        address token,
+        address account,
+        uint96 bucket,
+        uint256 commitment,
+        uint256 deadline,
+        bytes calldata signature
+    ) external nonReentrant {
+        require(token != address(0), "zero-addr");
+        require(block.timestamp <= deadline, "expired");
+        bytes32 digest = _hashTypedDataV4(
+            keccak256(
+                abi.encode(NOTE_TOKEN_TYPEHASH, token, account, bucket, commitment, shieldNonce[account], deadline)
+            )
+        );
+        require(digest.recover(signature) == account, "bad-sig");
+        shieldNonce[account] += 1;
+        _insertShieldNote(token, account, bucket, commitment);
     }
 
     /// @notice Spend a note into the shielded pool. PERMISSIONLESS by design:
@@ -335,41 +552,102 @@ contract FareVault is Ownable2Step, PaseoSafeSender, FareUpgradable, EIP712 {
         uint96 bucket,
         bytes32 ksCommitment
     ) external nonReentrant {
+        _verifyAndBurn(address(0), proof, root, nullifierHash, bucket, ksCommitment);
+        emit ShieldNoteSpent(nullifierHash, bucket, ksCommitment);
+        shieldPool.depositNative{value: bucket}(ksCommitment);
+    }
+
+    /// @notice Spend a TOKEN note into the shielded pool. Permissionless on the
+    ///         same terms as the native path — the proof binds `ksCommitment`.
+    /// @dev The asset binding is `root`: `_verifyAndBurn` checks the root against
+    ///      `token`'s own tree, so a proof built over the native tree (or any
+    ///      other token's) fails "unknown-root" before the verifier is reached.
+    function depositShieldNoteTokenZK(
+        bytes calldata proof,
+        uint256 root,
+        uint256 nullifierHash,
+        address token,
+        uint96 bucket,
+        bytes32 ksCommitment
+    ) external nonReentrant {
+        require(token != address(0), "zero-addr");
+        uint64 assetId = shieldAssetId[token];
+        require(assetId != 0, "asset-unset");
+
+        _verifyAndBurn(token, proof, root, nullifierHash, bucket, ksCommitment);
+        emit ShieldNoteSpentToken(token, nullifierHash, bucket, ksCommitment);
+
+        // PUSH, then credit — deliberately NOT approve + `depositAsset`.
+        //
+        // pallet-assets charges the approver a RESERVED NATIVE DEPOSIT for an
+        // approval, so a contract holding zero PAS cannot approve at all. This
+        // vault is precisely that contract: every wei of its native balance is
+        // owed to a payee through `balanceOf`, so it is not a float it may spend
+        // and it is legitimately zero on a fresh deployment. The failure is also
+        // nasty to diagnose — the precompile reverts with NO revert data, which
+        // reads like a decode bug rather than a missing deposit. Measured on
+        // Paseo: identical `approve` calls succeed from an EOA and from a vault
+        // holding 9.275 PAS, and fail from a vault holding 0.
+        //
+        // `transfer` reserves nothing, so this path does not care what the vault
+        // holds in native.
+        IERC20(token).safeTransfer(address(shieldPool), bucket);
+        shieldPool.depositAssetDirect(uint256(assetId), bucket, ksCommitment);
+    }
+
+    /// @dev The shared half of both spends: every check, then the state effects,
+    ///      leaving only the pool call to the caller. Effects land before that
+    ///      external call — the nullifier is burned even if the pool reverts,
+    ///      and the whole call unwinds together if it does.
+    function _verifyAndBurn(
+        address asset,
+        bytes calldata proof,
+        uint256 root,
+        uint256 nullifierHash,
+        uint96 bucket,
+        bytes32 ksCommitment
+    ) internal {
         require(address(shieldVerifier) != address(0), "zk-off");
         require(address(shieldPool) != address(0), "shield-off");
-        require(!shieldNullifierSpent[nullifierHash], "note-spent");
-        require(isKnownNoteRoot(root), "unknown-root");
-        require(_isShieldBucket(bucket), "bad-bucket");
+        require(!_nullifierSpent[asset][nullifierHash], "note-spent");
+        require(isKnownNoteRootFor(asset, root), "unknown-root");
+        require(_isShieldBucket(asset, bucket), "bad-bucket");
         require(
             shieldVerifier.verifyShieldNote(proof, [root, nullifierHash, uint256(bucket), uint256(ksCommitment)]),
             "bad-proof"
         );
 
-        // Effects before the external call; the nullifier is burned even if the
-        // pool reverts, and the whole call unwinds together if it does.
-        shieldNullifierSpent[nullifierHash] = true;
-        shieldBuffer -= bucket;
-        emit ShieldNoteSpent(nullifierHash, bucket, ksCommitment);
-
-        shieldPool.depositNative{value: bucket}(ksCommitment);
+        _nullifierSpent[asset][nullifierHash] = true;
+        _shieldBuffer[asset] -= bucket;
     }
 
-    function _insertShieldNote(address account, uint96 bucket, uint256 commitment) internal {
+    function _insertShieldNote(address asset, address account, uint96 bucket, uint256 commitment) internal {
         require(address(shieldPoseidon) != address(0), "poseidon-unset");
-        require(_isShieldBucket(bucket), "bad-bucket");
-        require(balanceOf[account] >= bucket, "insufficient-balance");
+        require(_isShieldBucket(asset, bucket), "bad-bucket");
         require(commitment != 0, "zero-commitment");
 
-        balanceOf[account] -= bucket;
-        shieldBuffer += bucket;
-        uint32 index = _insertLeaf(commitment);
-        emit ShieldNoteInserted(account, bucket, commitment, index);
+        if (asset == address(0)) {
+            require(balanceOf[account] >= bucket, "insufficient-balance");
+            balanceOf[account] -= bucket;
+        } else {
+            require(tokenBalanceOf[asset][account] >= bucket, "insufficient-balance");
+            tokenBalanceOf[asset][account] -= bucket;
+        }
+        _shieldBuffer[asset] += bucket;
+
+        uint32 index = _insertLeaf(asset, commitment);
+        if (asset == address(0)) {
+            emit ShieldNoteInserted(account, bucket, commitment, index);
+        } else {
+            emit ShieldNoteInsertedToken(asset, account, bucket, commitment, index);
+        }
     }
 
     /// @dev Standard incremental Merkle insert: hash up the spine, caching the
     ///      left siblings that later leaves will need.
-    function _insertLeaf(uint256 leaf) internal returns (uint32 index) {
-        index = nextNoteIndex;
+    function _insertLeaf(address asset, uint256 leaf) internal returns (uint32 index) {
+        NoteTree storage t = _noteTrees[asset];
+        index = t.nextIndex;
         require(index < uint32(1 << NOTE_DEPTH), "tree-full");
 
         uint256 current = leaf;
@@ -380,26 +658,27 @@ contract FareVault is Ownable2Step, PaseoSafeSender, FareUpgradable, EIP712 {
             if (idx % 2 == 0) {
                 left = current;
                 right = noteZeros[i];
-                _filledSubtrees[i] = current;
+                t.filledSubtrees[i] = current;
             } else {
-                left = _filledSubtrees[i];
+                left = t.filledSubtrees[i];
                 right = current;
             }
             current = _poseidon(left, right);
             idx /= 2;
         }
 
-        noteRootIndex = uint32((noteRootIndex + 1) % ROOT_HISTORY);
-        noteRoots[noteRootIndex] = current;
-        nextNoteIndex = index + 1;
+        t.rootIndex = uint32((t.rootIndex + 1) % ROOT_HISTORY);
+        t.roots[t.rootIndex] = current;
+        t.nextIndex = index + 1;
     }
 
     function _poseidon(uint256 a, uint256 b) internal view returns (uint256) {
         return shieldPoseidon.hash([a, b]);
     }
 
-    function _isShieldBucket(uint96 bucket) internal view returns (bool) {
-        for (uint256 i = 0; i < shieldBuckets.length; i++) if (shieldBuckets[i] == bucket) return true;
+    function _isShieldBucket(address asset, uint96 bucket) internal view returns (bool) {
+        uint96[] storage b = _shieldBuckets[asset];
+        for (uint256 i = 0; i < b.length; i++) if (b[i] == bucket) return true;
         return false;
     }
 
