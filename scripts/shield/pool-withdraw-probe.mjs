@@ -6,17 +6,27 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import * as snarkjs from "snarkjs";
-import { WITHDRAW_WASM, loadWithdrawZkey } from "./scripts/shield/zkey.mjs";
+import { WITHDRAW_WASM, loadWithdrawZkey } from "./zkey.mjs";
 
-const ROOT = path.dirname(fileURLToPath(import.meta.url));
+const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 const ks = await import(pathToFileURL(path.join(ROOT, "web/src/shieldpool.ts")).href);
 const BOOK = JSON.parse(fs.readFileSync(path.join(ROOT, "deployed-addresses.json"), "utf8"));
 const POOL = process.env.SHIELD_POOL || BOOK.shieldPool;
 const NOTE_FILE = path.join(ROOT, "e2e-runs", "ks-diag-note.json");
 
+// `withdraw` and `proxy_withdraw` take IDENTICAL arguments and differ only in
+// the final step: withdraw does _transfer(asset, recipient, amount) straight
+// from the pool; proxy_withdraw does `new SimpleTokenForwarder{value}(recipient)`,
+// a full CREATE whose constructor forwards and then leaves a dead contract
+// behind. Both take `recipient`, so BOTH let a relay submit on someone else's
+// behalf — the recipient never signs either way. The forwarder's only added
+// property is that the value lands from a fresh address instead of visibly from
+// the pool. MODE=withdraw prices that difference.
+const MODE = (process.env.MODE || "proxy").toLowerCase() === "withdraw" ? "withdraw" : "proxy_withdraw";
 const POOL_ABI = [
   "function depositNative(bytes32 commitment) payable",
   "function proxy_withdraw(uint[2] pA, uint[2][2] pB, uint[2] pC, uint[8] pubSignals, address recipient)",
+  "function withdraw(uint[2] pA, uint[2][2] pB, uint[2] pC, uint[8] pubSignals, address recipient)",
   "function treeSize() view returns (uint256)",
   "function currentRoot() view returns (uint256)",
 ];
@@ -81,14 +91,16 @@ const args = [
   publicSignals, recipient,
 ];
 
-console.log("\nSTATIC CALL proxy_withdraw (no gas spent)…");
+console.log(`\nSTATIC CALL ${MODE} (no gas spent)…`);
 try {
-  await pool.proxy_withdraw.staticCall(...args);
+  await pool[MODE].staticCall(...args);
   console.log("✅ would SUCCEED");
   if (process.env.SEND) {
-    const tx = await pool.proxy_withdraw(...args, GAS);
+    const tx = await pool[MODE](...args, GAS);
     const rc = await tx.wait();
-    console.log("sent:", rc.hash, "status", rc.status, "gasUsed", rc.gasUsed.toString());
+    const feePas = ethers.formatEther(rc.gasUsed * GAS.gasPrice);
+    console.log(`sent: ${rc.hash} status ${rc.status}`);
+    console.log(`MODE=${MODE}  gasUsed=${rc.gasUsed.toString()}  fee=${feePas} PAS`);
     console.log("recipient balance:", ethers.formatEther(await prov.getBalance(recipient)));
     fs.rmSync(NOTE_FILE, { force: true });
   }

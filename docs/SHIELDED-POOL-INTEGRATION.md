@@ -222,7 +222,20 @@ Artifacts: `web/public/shield/withdraw_v7.{wasm,zkey.part*}`. Deps: `ethers`,
 
 ---
 
-## Migration to the canonical v7 pool (2026-08-01)
+## Migration to the canonical v7 pool (2026-08-01) — ⛔ REVERSED 2026-08-03
+
+> **This migration was wrong and has been undone.** The canonical pool
+> `0x3068490C…` cannot be withdrawn from: `isKnownRoot` panics for every
+> non-zero root once the tree passes 16 leaves, so every `withdraw` and
+> `proxy_withdraw` reverts *after* the proof verifies. It cost a driver's 1 PAS
+> shielded payout before we caught it. FARE is back on `0x7d5a496b…`. Full
+> analysis: [KUSAMA-SHIELD-FINDINGS.md](KUSAMA-SHIELD-FINDINGS.md) Issue 7.
+>
+> **The verification below is left verbatim as the record of what went wrong.**
+> Every claim in it is true and none of it was sufficient: hash equality and
+> selector presence are facts about *artifacts*, and "money can leave" is a
+> *behaviour*. The migration's entire risk was the behaviour, and nothing in
+> this list executed it. One free `staticCall` would have caught it.
 
 The [Kusama Shield release](https://forum.polkadot.network/t/kusama-shield-new-release/18301)
 standardised Paseo on `0x3068490C79708D0725E3D4Aa9C35Da708f09071e`. The pool FARE had been

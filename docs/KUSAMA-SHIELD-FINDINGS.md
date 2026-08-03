@@ -182,14 +182,51 @@ isKnownRoot(recentRoots[0])       -> Panic(0x32)    ← a root that IS in the bu
 isKnownRoot(currentRoot())        -> Panic(0x32)
 ```
 
-The same calls on `0x7d5a496b…` return `true`. Both report `ROOT_HISTORY_SIZE()
-= 16`, both expose `recentRoots(i)` readable for `i = 0..15` and reverting at
-16, and both have `recentRootsIndex == treeSize` (96 and 331 respectively). So
-the storage is shaped as the source says; it is the **loop inside `isKnownRoot`
-that walks past the 16-slot array**. The published source bounds it by
-`ROOT_HISTORY_SIZE`, so the deployed build does not match it — the two pools'
-runtime bytecode differs (14,335 vs 14,235 bytes, different keccak), which also
-falsifies "the interface is identical" as a statement about behaviour.
+The same calls on `0x7d5a496b…` return correctly. Both report
+`ROOT_HISTORY_SIZE() = 16`, both expose `recentRoots(i)` readable for `i = 0..15`
+and reverting at 16, and both have `recentRootsIndex == treeSize`. So the storage
+is shaped as the source says; it is the **loop inside `isKnownRoot` that walks
+past the 16-slot array**. The published source bounds it by `ROOT_HISTORY_SIZE`,
+so the deployed build does not match it — the runtime bytecode differs (14,335 vs
+14,235 bytes), which also falsifies "the interface is identical" as a statement
+about behaviour.
+
+### It only breaks after the 17th deposit — which is why it shipped
+
+A third deployment settles the shape of the bug. The v5 pool referenced by your
+own `scripts/deposit_3x10.mjs`:
+
+| pool | treeSize | bytes | `isKnownRoot(1)` |
+|---|---|---|---|
+| v5 `0x6a32147F…` | **17** | 15,156 | **Panic(0x32)** |
+| `0x7d5a496b…` (works) | 335 | 14,235 | `false` ✓ |
+| v7 `0x3068490C…` | 97 | 14,335 | **Panic(0x32)** |
+
+v5 fails at **17 leaves — one past the window**. That is the signature of a loop
+bounded by something that grows with inserts (`recentRootsIndex`) rather than by
+`ROOT_HISTORY_SIZE`: while `treeSize ≤ 16` the bound stays inside the array and
+everything works, and the 17th deposit turns the pool into a one-way door
+without any state change or error.
+
+**So a v7 pool tested end-to-end shortly after deployment would have passed.**
+Anyone validating it on a fresh deployment — as we would have, had we probed at
+the time — sees a correct withdrawal. That is how it became the canonical
+address, and it is why "we tested it once" is not sufficient for this class of
+bug: the test has to run against a pool that already holds more than
+`ROOT_HISTORY_SIZE` leaves.
+
+**A likely cause worth checking on your side:** the README directs deployment
+through Remix pinned to `soljson-v0.8.28+commit.7893614a-**revive-0.1.0-dev.12**`.
+A pre-release revive/PolkaVM backend miscompiling a bounded `for` over a
+fixed-size storage array would produce exactly this: correct source, correct
+storage layout, wrong loop bound in the emitted code. The pool that works was
+presumably built with a different compiler version. If so, the fix is a rebuild
+rather than a source change — and every contract deployed with that toolchain
+deserves the same look, not just this one.
+
+`contracts/polkadot_assethub/PolkadotShieldedPool.sol` carries the **same
+correct source** (`i < ROOT_HISTORY_SIZE`), so it will inherit the same fate if
+built the same way. We could find no deployed instance of it to probe.
 
 Because `proxy_withdraw` and `withdraw` both `require(isKnownRoot(root))` at
 step 2 — after the proof verifies — a correct proof against a correct root still
