@@ -49,7 +49,7 @@ import {
   walletFor,
   sweepToMain,
 } from "./wallets";
-import { isAddress, ZeroAddress } from "ethers";
+import { isAddress, parseEther, ZeroAddress } from "ethers";
 import { OrderThread, fetchCapsules, type ChatMsg, type LocUpdate } from "./channel";
 import { pubKeyOf } from "./msg";
 import { fetchTicket, ticketTotalWei, type ReceivedTicket } from "./ticket";
@@ -66,10 +66,12 @@ import {
 } from "./menu";
 import { proveProximity, positionCommit } from "./zk";
 import { sponsorGas, relaySettle, relayForward, relayWithdraw, ensureGas, activeRelayUrl, sponsorOnboarding, fundBurner, forwarderAvailable } from "./relay";
-import { initShieldedFunder } from "./shield";
-import { shieldBuckets, planShielding } from "./shieldpayout";
+import { initShieldedFunder, topUpShielded, shieldedNoteValues } from "./shield";
+import { precompileFor } from "./shieldpool";
+import { LADDER_NATIVE, LADDER_USDC, cover } from "./denominations";
+import { shieldBuckets, shieldBucketsToken, planShielding } from "./shieldpayout";
 import {
-  zkShieldAvailable, insertShieldNote, spendShieldNote, pendingShieldNotes,
+  zkShieldAvailable, insertShieldNote, spendShieldNote, shieldNotesFor,
 } from "./shieldnote";
 import { pickRelayAvoiding, relaySplitAvailable } from "./relaypick";
 import {
@@ -84,7 +86,7 @@ import {
 import { escrowCapsule, evidenceURI } from "./disclosure";
 import { usePasUsd, cachedRate, fiatOf, pasToUsd, formatUsd } from "./pricing";
 import {
-  tokenOrdersEnabled, stablecoinAsset, assetOf, fmtAsset, parseAsset,
+  tokenOrdersEnabled, nativeOrdersEnabled, stablecoinAsset, assetOf, assetIdOf, fmtAsset, parseAsset,
   approveToken, stablecoinBalance,
 } from "./token";
 import { MicroDeg, distanceMeters, fmtCoord, fmtDist, getPosition, snapToGrid } from "./geo";
@@ -495,12 +497,20 @@ export default function App() {
         </div>
       )}
 
-      {session && (vaultBal > 0n || pendingDust > 0n) && (
+      {session && (vaultBal > 0n || vaultTokenBal > 0n || pendingDust > 0n) && (
         <VaultStrip {...{ vaultBal, vaultTokenBal, pendingDust, busy, act, signed, say }} />
       )}
 
+      {/* One strip per asset: separate ledgers, ladders and note trees, so they
+          cannot share a plan or a button. The stablecoin one comes first — it is
+          the default escrow asset, so for most payees it is the whole balance. */}
+      {session && role !== "customer" && stablecoinAsset() && vaultTokenBal > 0n && (
+        <ShieldEarningsStrip
+          {...{ balance: vaultTokenBal, token: stablecoinAsset()!.address, busy, signed, say, refresh }}
+        />
+      )}
       {session && role !== "customer" && (
-        <ShieldEarningsStrip {...{ vaultBal, busy, signed, say, refresh }} />
+        <ShieldEarningsStrip {...{ balance: vaultBal, busy, signed, say, refresh }} />
       )}
 
       {role === "customer" && (
@@ -822,23 +832,31 @@ function VaultStrip({ vaultBal, vaultTokenBal, pendingDust, busy, act, signed, s
 
 /// Shielded earnings (docs/PRIVACY-TIERS.md §4). A driver's or venue's payouts
 /// otherwise leave the vault at a persistent address, publishing their whole
-/// revenue history. This routes them into the shielded pool instead — queue a
-/// fixed denomination now, a relay keeper deposits it in a batch with other
-/// people's, and the resulting note spends like any other.
+/// revenue history. This routes them into the shielded pool instead — cut the
+/// balance into fixed denominations now, then spend each with a proof that names
+/// nobody.
+///
+/// One strip PER ASSET. Native and stablecoin earnings are separate vault
+/// ledgers, separate denomination ladders and separate note trees, so they
+/// cannot share a plan, a note list or a button. `token` undefined = native.
 ///
 /// Hidden entirely when no pool is configured: there is nothing honest to offer
 /// without one.
-function ShieldEarningsStrip({ vaultBal, busy, signed, say, refresh }: any) {
+function ShieldEarningsStrip({ balance, token, busy, signed, say, refresh }: any) {
   const [buckets, setBuckets] = useState<bigint[]>([]);
-  const [zkNotes, setZkNotes] = useState(() => pendingShieldNotes());
+  const [zkNotes, setZkNotes] = useState(() => shieldNotesFor(token));
   const [zk, setZk] = useState(false); // ZK path wired on-chain?
   const [working, setWorking] = useState(false);
   const relay = activeRelayUrl();
+  const unit = (v: bigint) => (token ? fmtAsset(v, token) : `${fmt(v)} PAS`);
 
-  useEffect(() => { shieldBuckets().then(setBuckets).catch(() => setBuckets([])); }, []);
+  useEffect(() => {
+    const read = token ? shieldBucketsToken(token) : shieldBuckets();
+    read.then(setBuckets).catch(() => setBuckets([]));
+  }, [token]);
   useEffect(() => { zkShieldAvailable().then(setZk).catch(() => setZk(false)); }, []);
 
-  const plan = useMemo(() => planShielding(vaultBal, buckets), [vaultBal, buckets]);
+  const plan = useMemo(() => planShielding(balance, buckets), [balance, buckets]);
   if (!relay || buckets.length === 0) return null;
 
   const shieldable = plan.reduce((a, b) => a + b, 0n);
@@ -853,10 +871,10 @@ function ShieldEarningsStrip({ vaultBal, busy, signed, say, refresh }: any) {
       // account↔commitment pairing.
       if (!zk) return say("This deployment has no ZK note pool — shielding is unavailable", true);
       for (const bucket of plan) {
-        await insertShieldNote(signed.vault.runner, relay!, bucket);
-        setZkNotes(pendingShieldNotes());
+        await insertShieldNote(signed.vault.runner, relay!, bucket, token);
+        setZkNotes(shieldNotesFor(token));
       }
-      say(`Shielded ${fmt(shieldable)} PAS into ${plan.length} note${plan.length > 1 ? "s" : ""} — spend when ready`);
+      say(`Shielded ${unit(shieldable)} into ${plan.length} note${plan.length > 1 ? "s" : ""} — spend when ready`);
       await refresh();
     } catch (e: any) {
       say(e?.reason ?? e?.shortMessage ?? e?.message ?? String(e), true);
@@ -877,7 +895,7 @@ function ShieldEarningsStrip({ vaultBal, busy, signed, say, refresh }: any) {
       for (const note of zkNotes) {
         const via = pickRelayAvoiding("shield-spend", note.commitment, note.insertedVia) ?? relay!;
         await spendShieldNote(note, via, pool);
-        setZkNotes(pendingShieldNotes());
+        setZkNotes(shieldNotesFor(token));
         n++;
       }
       say(
@@ -895,8 +913,10 @@ function ShieldEarningsStrip({ vaultBal, busy, signed, say, refresh }: any) {
   return (
     <div className="vault-strip">
       <div>
-        <div className="lbl">shield earnings — unlink payouts from your address</div>
-        <div className="amt">{fmt(shieldable)} PAS shieldable</div>
+        <div className="lbl">
+          shield {token ? "stablecoin " : ""}earnings — unlink payouts from your address
+        </div>
+        <div className="amt">{unit(shieldable)} shieldable</div>
         {zkNotes.length > 0 && (
           <div className="hint">
             {zkNotes.length} shielded note{zkNotes.length > 1 ? "s" : ""} held — spend them into the pool when you like
@@ -909,13 +929,21 @@ function ShieldEarningsStrip({ vaultBal, busy, signed, say, refresh }: any) {
         )}
         {shieldable === 0n && (
           <div className="hint">
-            below the smallest denomination ({fmt(buckets[0])} PAS) — earn a little more to shield
+            below the smallest denomination ({unit(buckets[0])}) — earn a little more to shield.
+            The remainder is deliberate: a one-off amount would be unique, and a
+            unique note identifies itself.
+          </div>
+        )}
+        {balance > shieldable && shieldable > 0n && (
+          <div className="hint">
+            {unit(balance - shieldable)} stays unshielded — below the smallest rung.
+            It keeps accruing, so it will clear one in time.
           </div>
         )}
       </div>
       <div className="btn-row" style={{ flexWrap: "wrap" }}>
         <button className="btn small" disabled={busy || working || shieldable === 0n} onClick={shieldAll}>
-          {working ? "Working…" : `Shield ${fmt(shieldable)} PAS`}
+          {working ? "Working…" : `Shield ${unit(shieldable)}`}
         </button>
         {zk && zkNotes.length > 0 && (
           <button className="btn ghost small" disabled={busy || working} onClick={spendAll}>
@@ -923,6 +951,130 @@ function ShieldEarningsStrip({ vaultBal, busy, signed, say, refresh }: any) {
           </button>
         )}
       </div>
+    </div>
+  );
+}
+
+/// The shielded note wallet — top up ahead of ordering, spend later.
+///
+/// THE SEPARATION IS THE FEATURE. An order funded by depositing into the pool and
+/// withdrawing straight back out is barely more private than a direct transfer:
+/// the amounts match, the counts match, and the two are seconds apart. The
+/// denomination ladder only pays off when a spend draws on notes that were
+/// already sitting there, mixed with other people's. So this lives ABOVE the
+/// order form, as its own deliberate action, and says why.
+///
+/// Deposits are public and that is fine — they sit on the funder's side of the
+/// anonymity boundary, like a withdrawal from an exchange. What must never be
+/// public is which note pays for which order.
+function ShieldedWallet({ session, signed, busy, say }: any) {
+  const stable = stablecoinAsset();
+  const pool = ((import.meta as any).env?.VITE_SHIELD_POOL as string | undefined)?.trim();
+  const [amount, setAmount] = useState("");
+  const [asset, setAsset] = useState<"token" | "native">(stable ? "token" : "native");
+  const [working, setWorking] = useState(false);
+  const [tick, setTick] = useState(0); // re-read the note store after a deposit
+
+  // The id is derived from the precompile address, not stored: the address is
+  // what the deployment configures, and the two must never disagree.
+  const tokenAssetId = stable ? assetIdOf(stable.address) ?? undefined : undefined;
+  const tokenKey = useMemo(
+    () => (tokenAssetId === undefined ? 0n : precompileFor(tokenAssetId)),
+    [tokenAssetId]
+  );
+  const nativeNotes: bigint[] = useMemo(() => shieldedNoteValues(0n), [tick]);
+  const tokenNotes: bigint[] = useMemo(
+    () => (tokenAssetId === undefined ? [] : shieldedNoteValues(tokenKey)), [tick, tokenKey, tokenAssetId]
+  );
+
+  if (!pool) return null; // nothing honest to offer without a pool
+
+  const isToken = asset === "token" && !!stable;
+  const unit = (v: bigint) => (isToken ? fmtAsset(v, stable!.address) : `${fmt(v)} PAS`);
+  const parse = (s: string) => (isToken ? parseAsset(s, stable!.address) : parseEther(s || "0"));
+
+  // Show the plan BEFORE committing: how many notes, and what the round-up costs.
+  const preview = useMemo(() => {
+    try {
+      const v = parse(amount);
+      if (v <= 0n) return null;
+      return cover(v, isToken ? LADDER_USDC : LADDER_NATIVE);
+    } catch { return null; }
+  }, [amount, isToken]);
+
+  async function topUp() {
+    if (!session || !signed) return say("Connect your main wallet first", true);
+    if (!preview) return say("Enter an amount", true);
+    setWorking(true);
+    try {
+      const r = await topUpShielded(signed.vault.runner, parse(amount), isToken ? tokenAssetId : undefined);
+      setTick((t) => t + 1);
+      setAmount("");
+      say(
+        `Topped up ${unit(r.deposited)} as ${r.rungs.length} note${r.rungs.length > 1 ? "s" : ""}` +
+        (r.overshoot > 0n ? ` (${unit(r.overshoot)} over — it returns as change)` : "")
+      );
+    } catch (e: any) {
+      say(e?.reason ?? e?.shortMessage ?? e?.message ?? String(e), true);
+    } finally {
+      setWorking(false);
+    }
+  }
+
+  const held = isToken ? tokenNotes : nativeNotes;
+  const total = held.reduce((a, b) => a + b, 0n);
+
+  return (
+    <div className="card">
+      <div className="lbl">shielded wallet — top up now, order later</div>
+      <div className="amt">
+        {fmt(nativeNotes.reduce((a, b) => a + b, 0n))} PAS
+        {stable && <> · {fmtAsset(tokenNotes.reduce((a, b) => a + b, 0n), stable.address)}</>}
+      </div>
+      <div className="hint">
+        {nativeNotes.length + tokenNotes.length === 0
+          ? "No shielded notes yet. Orders are funded from here, never from your main wallet directly."
+          : `${nativeNotes.length + tokenNotes.length} note${nativeNotes.length + tokenNotes.length > 1 ? "s" : ""} held.`}
+      </div>
+      <div className="hint" style={{ color: "var(--cyan)" }}>
+        Top up well before you order. Depositing and spending back to back matches
+        on amount, count and timing — it barely hides anything. Notes that have sat
+        a while, mixed with other people's, are what the pool actually protects.
+      </div>
+
+      <div className="btn-row" style={{ flexWrap: "wrap", marginTop: 8 }}>
+        {stable && (
+          <select value={asset} onChange={(e) => setAsset(e.target.value as any)}>
+            <option value="token">{stable.symbol} — escrow</option>
+            <option value="native">PAS — gas</option>
+          </select>
+        )}
+        <input style={{ flex: 1, minWidth: 120 }} inputMode="decimal"
+          placeholder={`amount in ${isToken ? stable!.symbol : "PAS"}`}
+          value={amount} onChange={(e) => setAmount(e.target.value)} />
+        <button className="btn small" disabled={busy || working || !preview} onClick={topUp}>
+          {working ? "Depositing…" : "Top up"}
+        </button>
+      </div>
+
+      {preview && (
+        <div className="hint">
+          {preview.rungs.length} note{preview.rungs.length > 1 ? "s" : ""}:{" "}
+          {preview.rungs.map(unit).join(" + ")}
+          {preview.overshoot > 0n && <> — rounds up by {unit(preview.overshoot)}, returned as change</>}
+          {preview.rungs.length > 4 && (
+            <span style={{ display: "block" }}>
+              That is a lot of separate deposits. Rounding up to the next rung is
+              usually cheaper and quieter.
+            </span>
+          )}
+        </div>
+      )}
+      {held.length > 0 && (
+        <div className="hint">
+          held {isToken ? stable!.symbol : "PAS"} notes: {held.map(unit).join(", ")} ({unit(total)})
+        </div>
+      )}
     </div>
   );
 }
@@ -959,6 +1111,7 @@ function CustomerView({ session, orders, venues, act, busy, signed, say, myLoc, 
 
   return (
     <>
+      <ShieldedWallet {...{ session, signed, busy, say }} />
       <CreateOrder {...{ session, venues, act, busy, say, myLoc, locateMe }} />
       <div className="card"><CustomerProfileCard /></div>
       <div className="section-note">
@@ -1286,7 +1439,12 @@ function CreateOrder({ session, venues, act, busy, say, myLoc, locateMe }: any) 
   const [cart, setCart] = useState<Cart>([]);
   const [note, setNote] = useState(""); // note to the kitchen, travels on the ticket
   const [menuLoading, setMenuLoading] = useState(false);
-  const [asset, setAsset] = useState<"native" | "token">("native"); // escrow asset (C3)
+  // Stablecoin by default (C5). Orders are denominated in dollars, and each
+  // asset's notes are their own anonymity set, so a free choice would split an
+  // already-thin crowd. Native stays reachable via VITE_ALLOW_NATIVE_ORDERS.
+  const [asset, setAsset] = useState<"native" | "token">(
+    tokenOrdersEnabled() && !nativeOrdersEnabled() ? "token" : "native"
+  );
   const { rate } = usePasUsd(); // fiat display rate (C2)
   const catalog = useCatalog(venues as VenueRow[]);
 
@@ -1345,7 +1503,7 @@ function CreateOrder({ session, venues, act, busy, say, myLoc, locateMe }: any) 
           onCancel={() => setMapOpen(false)}
         />
       )}
-      {tokenOrdersEnabled() && (
+      {tokenOrdersEnabled() && nativeOrdersEnabled() && (
         <label className="field">
           <span>pay with</span>
           <div className="btn-row">
@@ -1354,6 +1512,10 @@ function CreateOrder({ session, venues, act, busy, say, myLoc, locateMe }: any) 
             <button type="button" className={`btn small ${asset === "token" ? "" : "ghost"}`}
               onClick={() => setAsset("token")}>{stable!.symbol} · stablecoin</button>
           </div>
+          <span className="hint">
+            Each asset's shielded notes are a separate crowd, so paying in the less
+            used one hides you among fewer people.
+          </span>
         </label>
       )}
       {menuLoading && <p className="hint">Loading menu…</p>}

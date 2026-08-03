@@ -75,6 +75,13 @@ const load = (): ShieldNote[] => {
 };
 const save = (n: ShieldNote[]) => localStorage.setItem(PENDING_KEY, JSON.stringify(n));
 export const pendingShieldNotes = (): ShieldNote[] => load();
+
+/// Unspent notes cut from ONE asset. Notes live in a single device store but in
+/// separate on-chain trees, so anything that proves, spends or counts them must
+/// filter — a native proof built over the pooled list would pick up USDC leaves
+/// and reconstruct a root the vault has never held.
+export const shieldNotesFor = (token?: string): ShieldNote[] =>
+  load().filter((n) => (isTokenNote(n) ? n.token!.toLowerCase() === token?.toLowerCase() : !token));
 export const rememberShieldNote = (n: ShieldNote) => save([...load(), n]);
 export const forgetShieldNote = (commitment: string) =>
   save(load().filter((n) => n.commitment !== commitment));

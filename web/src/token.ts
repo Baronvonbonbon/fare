@@ -43,9 +43,41 @@ export function tokenOrdersEnabled(): boolean {
   return !!ADDRESSES.stablecoin;
 }
 
+/// May a customer still escrow in native PAS when a stablecoin is available?
+///
+/// **Off by default.** Orders default to the stablecoin, and not only because a
+/// customer thinks in dollars: the two assets have different privacy properties
+/// in practice. Both have a shielded payout path now, but each asset's notes form
+/// their OWN anonymity set — separate note tree, separate pool escrow — so
+/// offering a free choice splits an already-thin crowd in two and lets a customer
+/// pick the smaller one without knowing they did.
+///
+/// The contract keeps `createOrder` for compatibility and drain; this only stops
+/// the app from offering it. Set `VITE_ALLOW_NATIVE_ORDERS=1` to put the selector
+/// back — useful when no USDC can be sourced.
+export function nativeOrdersEnabled(): boolean {
+  if (!ADDRESSES.stablecoin) return true; // nothing else to pay with
+  return ((import.meta as any).env?.VITE_ALLOW_NATIVE_ORDERS as string | undefined)?.trim() === "1";
+}
+
 /// The configured stablecoin asset, or null when none is deployed.
 export function stablecoinAsset(): Asset | null {
   return stableMeta;
+}
+
+/// The Asset Hub asset id behind an ERC-20 PRECOMPILE address, which encodes the
+/// id in its first 4 bytes followed by a `0x01200000` marker. Returns null for an
+/// ordinary contract — a real ERC-20 has no asset id and cannot be shielded as
+/// one. Mirrors `assetIdOf` in venue-node/relay.mjs.
+///
+/// Which of the two forms you need is a live trap: `depositAsset` takes the ID,
+/// while the pool's escrow ledger and the note commitment key on the ADDRESS.
+export function assetIdOf(token: string): bigint | null {
+  const a = String(token).toLowerCase().replace(/^0x/, "");
+  if (a.length !== 40 || !a.endsWith("01200000")) return null;
+  if (a.slice(8, 32) !== "0".repeat(24)) return null;
+  const id = BigInt("0x" + a.slice(0, 8));
+  return id > 0n ? id : null;
 }
 
 /// Resolve an order's escrow `token` address to its Asset (native or the stablecoin).

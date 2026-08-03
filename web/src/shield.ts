@@ -80,20 +80,54 @@ export async function fundViaShield(burner: string, amountWei: bigint): Promise<
 // only when a pool is configured (VITE_SHIELD_POOL) — otherwise the registry
 // stays empty and callers fall back to the faucet/relay drip (unchanged).
 // ─────────────────────────────────────────────────────────────────────────────
-import { Wallet, parseEther, formatEther, type Provider, type Signer } from "ethers";
+import { Contract, Wallet, parseEther, formatEther, type Provider, type Signer } from "ethers";
 import { readProvider, sendProvider, type DripResult as _Drip } from "./chain";
 import {
-  depositAndSnapshot, buildWithdrawal, recordChangeNote, commitmentOf,
-  type NoteRecord,
+  depositAndSnapshot, depositAssetAndSnapshot, buildWithdrawal, recordChangeNote,
+  commitmentOf, precompileFor, type NoteRecord,
 } from "./shieldpool";
+import { LADDER_NATIVE, LADDER_USDC, cover } from "./denominations";
 
 const NOTES_KEY = "fare.shield.notes"; // device-local spendable notes (secrets!)
 const loadNotes = (): NoteRecord[] => { try { return JSON.parse(localStorage.getItem(NOTES_KEY) || "[]"); } catch { return []; } };
 const saveNotes = (n: NoteRecord[]) => localStorage.setItem(NOTES_KEY, JSON.stringify(n));
 function upsertNote(rec: NoteRecord) { const n = loadNotes(); n.push(rec); saveNotes(n); }
 function markSpent(nullifier: string) { saveNotes(loadNotes().map((r) => (r.nullifier === nullifier ? { ...r, spent: true } : r))); }
-function pickSpendable(minValueWei: bigint): NoteRecord | null {
-  return loadNotes().filter((r) => !r.spent && BigInt(r.value) >= minValueWei).sort((a, b) => (BigInt(a.value) < BigInt(b.value) ? -1 : 1))[0] ?? null;
+/// The asset a note is denominated in, as the pool sees it: the ERC-20
+/// PRECOMPILE ADDRESS as a field element, or 0 for native. Notes for every asset
+/// share one device store, so anything that picks, sums or spends must filter.
+const assetKey = (r: { asset?: string }): bigint => BigInt(r.asset ?? "0");
+
+/// Unspent notes for one asset, smallest first.
+function notesOf(asset: bigint): NoteRecord[] {
+  return loadNotes()
+    .filter((r) => !r.spent && assetKey(r) === asset)
+    .sort((a, b) => (BigInt(a.value) < BigInt(b.value) ? -1 : 1));
+}
+
+/// The smallest unspent note of `asset` worth at least `minValue`.
+///
+/// Filtering by asset is load-bearing, not tidiness. Token notes reach this same
+/// store through `spendShieldNote` → `adoptShieldedNote`, and without the filter
+/// a native withdrawal could select a USDC note — which would prove against the
+/// wrong escrow key and revert. Today the decimals happen to hide it (100 USDC
+/// is 1e8, no native threshold is that small), but that is an accident of
+/// scaling, not a guarantee, and it would break the first time a note was worth
+/// more than ~1e18 smallest-units.
+function pickSpendable(minValue: bigint, asset: bigint = 0n): NoteRecord | null {
+  return notesOf(asset).find((r) => BigInt(r.value) >= minValue) ?? null;
+}
+
+/// Total unspent shielded value for one asset. `asset` is the precompile address
+/// as a bigint (`precompileFor(id)`), or 0 for native.
+export function shieldedBalance(asset: bigint = 0n): bigint {
+  return notesOf(asset).reduce((a, r) => a + BigInt(r.value), 0n);
+}
+
+/// Unspent note denominations for one asset, so the UI can show the crowd a
+/// spend would hide in rather than just a total.
+export function shieldedNoteValues(asset: bigint = 0n): bigint[] {
+  return notesOf(asset).map((r) => BigInt(r.value));
 }
 
 /// Adopt a note this device owns but did not deposit itself — a batched
@@ -119,8 +153,11 @@ export class KusamaShieldFunder implements ShieldedFunder {
     private relayUrl: () => string | undefined,
   ) {}
 
+  /// Availability is about NATIVE notes specifically: `fundBurner` withdraws
+  /// native for gas. A wallet holding only USDC notes must report unavailable,
+  /// or it would claim it can fund a burner and then fail at the pick.
   async available(): Promise<boolean> {
-    return !!this.poolAddr && loadNotes().some((r) => !r.spent && BigInt(r.value) > 0n);
+    return !!this.poolAddr && shieldedBalance(0n) > 0n;
   }
 
   async deposit(amountWei: bigint): Promise<ShieldedNote> {
@@ -185,6 +222,53 @@ export class KusamaShieldFunder implements ShieldedFunder {
     const { record } = await depositAndSnapshot(this.poolAddr, w, this.provider, dep, RETURN_GAS);
     upsertNote(record);
   }
+}
+
+/// Top up the shielded note wallet: cut `amount` into ladder rungs and deposit
+/// each as its own note.
+///
+/// WHY THIS IS A SEPARATE ACTION FROM PLACING AN ORDER, and it is the whole
+/// point of the ladder. Depositing N rungs and withdrawing N rungs to a burner
+/// minutes later is a near-perfect fingerprint EVEN AT UNIFORM RUNGS — the count,
+/// the sizes and the timing all line up. Rungs only buy anything if the deposit
+/// and the spend are separated in time and mixed with other people's, which
+/// means an order must spend notes that ALREADY EXISTED. So: top up whenever,
+/// order later. A just-in-time top-up is barely better than a plain transfer, and
+/// the UI should say so rather than quietly offer it at checkout.
+///
+/// Rounds UP (`cover`): being a cent short means the order cannot be placed,
+/// while the overshoot comes back as an ordinary change note.
+///
+/// `assetId` undefined deposits native PAS; otherwise an Asset Hub asset id
+/// (1337 = USDC), which needs an ERC-20 approval first. The approval is BOUNDED
+/// to exactly the total — `approve(MaxUint256)` reverts on the asset precompile
+/// ("Balance conversion failed": it narrows to pallet-assets' u128).
+export async function topUpShielded(
+  signer: Signer, amount: bigint, assetId?: bigint
+): Promise<{ rungs: bigint[]; overshoot: bigint; deposited: bigint }> {
+  const pool = ((import.meta as any).env?.VITE_SHIELD_POOL as string | undefined)?.trim();
+  if (!pool) throw new Error("no shielded pool configured");
+  const provider = readProvider as unknown as Provider;
+  const ladder = assetId === undefined ? LADDER_NATIVE : LADDER_USDC;
+  const { rungs, overshoot } = cover(amount, ladder);
+  if (rungs.length === 0) return { rungs: [], overshoot: 0n, deposited: 0n };
+  const total = rungs.reduce((a, b) => a + b, 0n);
+
+  if (assetId !== undefined) {
+    const token = "0x" + precompileFor(assetId).toString(16).padStart(40, "0");
+    const erc = new Contract(token, ["function approve(address,uint256) returns (bool)"], signer);
+    await (await erc.approve(pool, total)).wait();
+  }
+
+  let deposited = 0n;
+  for (const rung of rungs) {
+    const { record } = assetId === undefined
+      ? await depositAndSnapshot(pool, signer, provider, rung, DEPOSIT_GAS)
+      : await depositAssetAndSnapshot(pool, signer, provider, assetId, rung, DEPOSIT_GAS);
+    upsertNote(record);
+    deposited += rung;
+  }
+  return { rungs, overshoot, deposited };
 }
 
 /// Install the Kusama Shield funder if a pool is configured. Called once at app
