@@ -6,8 +6,13 @@
 // relays (/photo, P2). Content-addressed by SHA-256(ct) with a ~2-week TTL —
 // storage sees only ciphertext.
 
+import { hostGet, hostPut, inHost } from "./host";
 import type { SealedPhoto } from "./photo";
 import { relayPool } from "./pool";
+
+/// Ids of photos stored on Bulletin through the host carry this prefix, so a
+/// reader knows which store to ask. The rest is the BLAKE2b-256 key.
+export const BULLETIN_PREFIX = "bulletin:";
 
 const PHOTO_PATH = "/api/photo";
 
@@ -41,9 +46,18 @@ function endpoints(pathAndQuery: string): string[] {
   return [`${PHOTO_PATH}${pathAndQuery}`, ...relayPool().map((b) => `${b}/photo${pathAndQuery}`)];
 }
 
-/// Store a sealed photo; returns its content id. Tries the shared KV store, then
-/// venue relays.
+/// Store a sealed photo; returns its content id. Inside the Polkadot app it goes
+/// to Bulletin through the host (almanac P6b: the only Product upload path that
+/// works); otherwise, or if that fails, the shared KV store, then venue relays.
 export async function storeSealed(sealed: SealedPhoto): Promise<string> {
+  if (await inHost()) {
+    try {
+      const key = await hostPut(new TextEncoder().encode(JSON.stringify(sealed)));
+      return `${BULLETIN_PREFIX}${key}`;
+    } catch (e) {
+      console.warn("Bulletin upload failed, falling back to relays:", e);
+    }
+  }
   for (const url of endpoints("")) {
     try {
       const res = await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(sealed) });
@@ -59,6 +73,16 @@ export async function storeSealed(sealed: SealedPhoto): Promise<string> {
 
 /// Fetch a sealed photo by id (to be opened with photo.ts openPhoto + the key).
 export async function fetchSealed(id: string): Promise<SealedPhoto> {
+  if (id.startsWith(BULLETIN_PREFIX)) {
+    // Only the host can look these up for now; a reader outside the app would
+    // need the devnet IPFS gateway and the CID built from this key.
+    if (!(await inHost())) throw new Error("this photo is on Bulletin — open it in the Polkadot app");
+    const bytes = await hostGet(id.slice(BULLETIN_PREFIX.length));
+    if (!bytes) throw new Error("photo not found on Bulletin (expired?)");
+    const j = JSON.parse(new TextDecoder().decode(bytes)) as { iv?: string; ct?: string };
+    if (j.iv && j.ct) return { iv: j.iv, ct: j.ct };
+    throw new Error("Bulletin returned something that is not a sealed photo");
+  }
   for (const url of endpoints(`?id=${id}`)) {
     try {
       const res = await fetch(url);
