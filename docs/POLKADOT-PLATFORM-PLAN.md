@@ -337,7 +337,7 @@ rest of this reads.
 Camera working is the one that mattered most: it was the "driver flow is dead without it" risk,
 and it is closed.
 
-#### Geolocation is a platform gap, not a user refusal — **the one blocker left**
+#### Geolocation is a platform gap, not a user refusal — *no longer a blocker, see the 2026-09-18 update below and §4.10*
 
 An Android WebView only receives location if the *host app* holds the OS permission **and** answers
 `onGeolocationPermissionsShowPrompt`. The probe reports the Permissions API state next to the
@@ -360,6 +360,26 @@ witness, so there is no degraded mode that still proves delivery.
 
 **Raise this with Parity as a platform bug** (Part 8). Until it is fixed the driver surface is
 **blocked**, and Phase 1 cannot exit. Everything else on the device works.
+
+**Update 2026-09-18 — not re-measured yet, and no longer the blocker it looked like.**
+
+- The September 8 devnet release shipped new mobile and Desktop apps (almanac measured Polkadot
+  app 1.0.0 (40) on 2026-09-13), but no probe run since 2026-07-31 has tested location.
+  [products-devnet-issues#7](https://github.com/Polkadot-Community-Foundation/products-devnet-issues/issues/7)
+  is still open and untriaged.
+- The SDK added no location API between truapi 0.13.1 and 0.17.0 (`product-sdk` 0.29.0,
+  `product-sdk-host` 0.21.0); the new host namespaces are `pocket` and `renderer`. The one lead
+  was there all along: truapi declares `requestDevicePermission("Location")`, while #7 was filed
+  saying no location capability existed. `web/src/host.ts` now asks the host for it before the
+  first fix of a session, and `web/src/geo.ts` classifies a failure — a denial with the permission
+  still `prompt` is reported as `host-callback-missing`, not as the user's refusal.
+- **To measure:** `sonde` (`caniusethis.dot`) is rebuilt on the current SDK. Run
+  `host.permissions.location`, then `web.sensors.geolocation`. Three outcomes: the grant unblocks
+  the web API (#7 becomes a documentation issue); the grant succeeds and the web API still fails
+  (two permission systems that do not talk — worse); the call errors (declared, not implemented).
+- **Whatever the answer, settlement does not need a GPS fix** — see §4.10. The line above, "there
+  is no degraded mode that still proves delivery", was wrong: it read the geometry as the
+  guarantee, when `docs/GPS.md` already says the guarantee is the two adverse signatures.
 
 #### The Ring VRF alias is not available yet
 
@@ -492,6 +512,117 @@ Confirmed empirically while trying: `MAX_STATEMENT_SIZE = 512` bytes and `DEFAUL
 (`createSlotAccountProver`, `deriveSlotAccountPublicKey`) exist at that layer, consistent with the
 slot model in §4.6.
 
+### 4.10 Settlement without a GPS fix — no contract or circuit change
+
+*Built 2026-09-18* — `web/src/handoff.ts`, wired into the driver, venue and customer screens; the contract half is proven by `test/gps-free-settlement.test.ts`, which settles both steps with a live Groth16 proof against the unchanged `FareSettlement` and verifier, and shows the venue signature and the blind-signed commitment are still enforced. Not yet run on a device. `docs/GPS.md` states the model: the contract cannot sense
+location; what releases money is **two signatures from parties whose interests oppose each other
+at that moment**, and spoofed GPS was already bounded only by the counterparty refusing to sign.
+Read with that in mind, the code uses the GPS fix as evidence in both settlement paths, not as
+the guarantee:
+
+| Step | Today | Without a fix | What still holds it |
+|---|---|---|---|
+| **Pickup** (`confirmPickup`) | Driver and venue each sign a `LocationAttestation` from their own GPS; the contract checks both lie within the pickup radius of the venue pin | The driver signs the **venue's registered pin** (`FareVenues.locationOf`) as its coordinates, scanned from a QR the venue counter shows alongside its own signed attestation. The geometry passes by construction | The venue's hot-signer signature — the venue hands over goods it loses if the pickup is fake. Unchanged |
+| **Dropoff** (`confirmDropoffZK`) | The driver signs a commitment to its GPS position and hands the plaintext to the customer, whose device proves proximity to the committed drop and submits | The **customer's** device builds the driver commitment from the drop position and a fresh salt and shows it as a QR; the driver scans and signs it; the customer proves (driver position = drop) and submits. Two scans instead of one. The drop location still never reaches the driver in the clear, and nothing reaches the chain | The customer's own act of proving and submitting — they release the fare only with the goods in hand. Unchanged: the customer already builds and submits the proof today |
+
+What is lost is **dispute evidence**, not settlement. GPS.md's row "customer refuses to sign after
+receiving goods" relies on the arbiter seeing the driver's dropoff attestation; without a fix that
+attestation says nothing about where the driver actually was. What remains is the pickup
+confirmation, the delivery photo (§4.12), and the live-tracking trail — itself GPS. So **GPS
+becomes an optional strengthening, used when the runtime gives it**, and a dispute without it
+leans on the photo. The UI should say which mode a delivery settled in, and reputation may weigh
+the two differently.
+
+Both flows use the camera and `BarcodeDetector`, which work inside the Android app (§4.7; almanac
+P12), and the payload codes the web app already exchanges (`encodePayload`). Nothing changes in
+`FareSettlement`, `proximity.circom`, or the verifying key.
+
+### 4.11 Signalling over the Statement Store, payloads over WebRTC
+
+*Proposed by the project owner 2026-09-18.* Chat, calls and data between parties use the Statement
+Store only to find each other, then carry the payload over a direct WebRTC connection.
+
+**Why it fits.** almanac measured the pieces on the current devnet (2026-09-16 – 17): a statement
+published on one phone is found on another by a **topic both sides compute from a shared secret**;
+publishing again on the same channel **replaces** the old statement; and a new subscription
+**receives statements that already exist**, so a party that opens the order late still finds the
+offer. That is a rendezvous point. The host also declares a `WebRtc` permission
+(`RemotePermission` in truapi), so the product is expected to ask for it.
+
+**The budget decides the shape.** A statement holds at most **512 bytes, and one account about
+1 KiB in total** (`product-sdk-statement-store` constants; almanac P9 saw two to four statements
+an account, not settled). A browser's SDP offer is several kilobytes, and trickled ICE candidates
+are one message each. So:
+
+- **Non-trickle, minified SDP.** Wait for ICE gathering to finish, then send only what varies —
+  ICE ufrag and password, the DTLS fingerprint, and a few candidates — roughly 150–250 bytes. Both
+  ends run the same app, so each rebuilds the full SDP from a template.
+- **One statement per party per order, replaced in place:** offer, then answer, on a channel
+  derived from the order.
+- **Seal it.** Candidates carry the phone's IP addresses, and statements are public gossip. Seal the
+  offer with the order's existing E2E keys (`msg.ts`), and derive the topic from a secret the two
+  parties share — **not `topicOf(orderId)`**, which anyone can compute.
+
+**What goes over the connection:** chat and photos (no storage at all while both are online), the
+live location stream (a stream is a poor fit for a 1 KiB account budget), and voice calls, which
+also need the `Microphone` device permission — not yet measured inside the app.
+
+**The risks, in order:**
+
+1. **NAT.** Drivers are on cellular networks, usually behind carrier-grade NAT, where direct WebRTC
+   often fails without a TURN relay. almanac's P13 plan tests two phones on one Wi-Fi; that proves
+   the API, not the road. A TURN server on the venue node is the realistic fallback, and a failed
+   connection still has the existing relay path.
+2. **Linkage.** Statements are signed by the product's allowance account (§4.9) — per product, not
+   per user, but still linkable across one user's orders within FARE. S3 (a per-order allowance)
+   remains the gate for the customer side, as §4.3 says.
+3. **Both online.** WebRTC is live only. The relay (and Bulletin, §4.12) stays as offline backfill.
+
+**Measure first:** almanac P13 (does `RTCPeerConnection` work after the `WebRtc` grant), then two
+phones on different cellular networks, then how long a statement takes to reach the other phone —
+nobody has measured that latency yet.
+
+### 4.12 Bulletin as dispute evidence — temporary by design
+
+*Proposed by the project owner 2026-09-18.* Delivery photos and similar evidence go to Bulletin
+through the host (`web/src/photoflow.ts` via `host.ts` — almanac P6b), where they live about 14
+days. The proposal: that lifetime *is* the evidence window.
+
+**It works if four conditions hold:**
+
+1. **Commit at event time, not at dispute time.** Bulletin gives availability; integrity has to
+   come from a hash fixed when the event happened. Today the photo key travels only in the E2E
+   channel, and `FareDisputes.openDispute` takes a free `evidenceURI` string at dispute time, so a
+   party could upload something new and cite it. The BLAKE2b-256 key of the sealed photo belongs
+   in something signed at dropoff — a field the customer's confirmation or the driver's signed
+   commitment carries. The arbiter then checks that the bytes hash to a value committed before
+   the dispute existed.
+2. **The dispute clock must fit inside the storage clock.** Evidence stored at delivery expires
+   after about 14 days (201600 blocks a grant). Opening and ruling must both finish well inside
+   that — for example, open within 72 hours of delivery, rule within 10 days. A Product cannot
+   renew what the host stored (the slot key stays in the host), but the filing party can upload
+   the same bytes again: same content key, a fresh 14 days.
+3. **Only the arbiter can read it.** Photos are already sealed (AES-GCM, `photo.ts`) with the key
+   travelling E2E. At dispute time the filing party encrypts that key to the arbiter's public key
+   and includes it in the dispute bundle. When the ciphertext expires and the keys are dropped,
+   the evidence is gone for everyone — which is the point.
+4. **The arbiter can read it outside the app.** The ops console runs on Desktop or in a browser.
+   almanac P7: the devnet IPFS gateway serves raw BLAKE2b-256 CIDs, so the console fetches by CID
+   and checks the hash; the host lookup is only needed on a phone. (`photoflow.fetchSealed` does
+   not do the gateway half yet.)
+
+**Two limits.**
+
+- **Bulletin is on the Products Devnet, which resets; the contracts are on Paseo.** A reset during
+  a dispute destroys the evidence. Acceptable for the demo, not for production, which needs
+  evidence storage and contracts on networks with the same lifetime.
+- **Missing evidence is not evidence.** An upload can be withheld. The dispute rule must put the
+  burden on the party who benefits from the evidence: a driver claiming delivery with no committed
+  photo key loses the default.
+
+Cost is negligible: a delivery photo is about 3 KiB, and one allowance claim is 10 uploads and
+4 MiB.
+
 ---
 
 ## Part 5 — Target architecture
@@ -551,11 +682,21 @@ content-addressed bundle, and an identity layer it did not have.
      after one approval tap on the phone, confirming §4.6's correction. But **`cloudStorage.upload()`
      then hangs indefinitely** — a 25-byte payload stalled for 180 s with the allowance granted,
      the App rebuilt, an account selected, and the right chain environment accepted. No error, no
-     rejection, no prompt. Reported as
-     [products-devnet-issues#7](https://github.com/Polkadot-Community-Foundation/products-devnet-issues/issues/7).
-     **Until Bulletin writes work from a Product, Phase 2 cannot start** — photos, menus, and the
-     ZK artifacts all depend on that one call. The `dev-dot.li` gateway is not a fallback: it
-     carries no Bulletin chain at all.
+     rejection, no prompt. *(This line used to cite
+     [#7](https://github.com/Polkadot-Community-Foundation/products-devnet-issues/issues/7), which
+     is the geolocation issue; the storage reports are
+     [#8](https://github.com/Polkadot-Community-Foundation/products-devnet-issues/issues/8) and
+     [#13](https://github.com/Polkadot-Community-Foundation/products-devnet-issues/issues/13).)*
+     ~~Until Bulletin writes work from a Product, Phase 2 cannot start.~~ **Superseded
+     2026-09-18 by almanac's measurements (P6, P6b, P6c, 2026-09-14 – 17):** `cloudStorage.upload`
+     is still refused (`Invalid: Payment` — it signs with the product account, which holds no
+     authorization). But the host's own `getPreimageManager().submit()`, after asking for the
+     `PreimageSubmit` permission, stores on Bulletin and is paid from the product's slot account:
+     256 bytes in 4–9 s, 1 MiB in 41 s, one upload per transaction, the #13 codec error gone. The
+     host's lookup finds BLAKE2b-256 content only. `web/src/host.ts` uses this path, and
+     `photoflow.ts` stores delivery photos with it inside the app. **Phase 2 is unblocked for
+     photos.** Menus need renewing every ~14 days, and a Product cannot renew what the host
+     stored, so menus stay open.
    - **S1(a)** ✅ **We are authorized at the account level.** `ascendyendor00.dot`, product account
      `baronvonbonbon.01`, live on this device. Phase 2 storage work is unblocked. Still to
      measure before relying on it: the actual quota (`checkAuthorization` →
@@ -564,7 +705,8 @@ content-addressed bundle, and an identity layer it did not have.
    - **S2** ✅ **Resolved — Products run inside the mobile Polkadot App**, in an Android WebView
      (§4.7). Camera, Web Crypto, and secp256k1 EIP-712 signing all confirmed working on-device.
      **Geolocation is blocked by the host** (`permission state: prompt` alongside a denial = the
-     callback is never answered) — a platform bug, and the one thing stopping Phase 1. See §4.7.
+     callback is never answered) — a platform bug. *2026-09-18: not re-measured on the new app yet;
+     no longer stops Phase 1, because settlement works without a fix (§4.10).* See §4.7.
    - **S3** Per-order `derivationIndex` statement-store allowance (gates §4.3)
    - **S4** CASH/pUSD custody by a `pallet-revive` contract (gates §4.5)
    - **S5** ✅ **Mechanism confirmed on-chain, and it costs more than §4.1 assumed.** Measured
@@ -694,6 +836,9 @@ content-addressed bundle, and an identity layer it did not have.
    appears to go unanswered. Reproduced on a Pixel 10 Pro XL, Android 16, Polkadot App WebView.
    Camera via `getUserMedia` works in the same runtime, so this is specific to location. **This
    blocks every location-dependent Product.** *(the one blocker on Phase 1 — see §4.7)*
+   *2026-09-18:* ask as well whether `requestDevicePermission("Location")` is the intended route
+   and whether a grant reaches `navigator.geolocation`. For FARE it is no longer a blocker — §4.10
+   settles without a fix.
 10. `getAnonymousAlias()` returns `null` — is the Ring VRF alias unimplemented in this build, or
     gated on something? And is it stable per user, or fresh per call? *(decides §4.4b)*
 

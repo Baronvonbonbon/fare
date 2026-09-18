@@ -1,5 +1,7 @@
 // Geolocation → microdegree fixed-point (the contract's coordinate format).
 
+import { askHostLocation } from "./host";
+
 export interface MicroDeg {
   lat: number;
   lon: number;
@@ -31,20 +33,80 @@ export function fmtCoord(m: MicroDeg): string {
   return `${lat.toFixed(5)}, ${lon.toFixed(5)}`;
 }
 
+/// Why a fix failed. `host-callback-missing` is issue #7's signature: denied
+/// while the permission is still `prompt`, so nobody ever decided — the host
+/// app never answered the WebView. A real refusal leaves the state `denied`.
+export type GeoFailure = "unsupported" | "denied" | "host-callback-missing" | "unavailable" | "timeout";
+
+export class GeoError extends Error {
+  constructor(public readonly reason: GeoFailure, message: string) {
+    super(message);
+    this.name = "GeoError";
+  }
+}
+
+async function permissionState(): Promise<PermissionState | "unknown"> {
+  try {
+    return (await navigator.permissions.query({ name: "geolocation" })).state;
+  } catch {
+    return "unknown";
+  }
+}
+
+/// Turn a GeolocationPositionError into a GeoError that says whose fault it is.
+export async function classifyGeoError(err: GeolocationPositionError): Promise<GeoError> {
+  if (err.code === 1 /* PERMISSION_DENIED */) {
+    return (await permissionState()) === "prompt"
+      ? new GeoError(
+          "host-callback-missing",
+          "Location is blocked by this app, not by you: no permission prompt was ever shown (products-devnet-issues#7)"
+        )
+      : new GeoError("denied", "Location permission was refused");
+  }
+  if (err.code === 3 /* TIMEOUT */) return new GeoError("timeout", "No GPS fix in time — try again with a clearer sky view");
+  return new GeoError("unavailable", `Location unavailable: ${err.message}`);
+}
+
 /// Current device position in microdegrees. High accuracy — this feeds a
 /// signed on-chain attestation, so we want the GPS fix, not the IP guess.
-export function getPosition(): Promise<MicroDeg> {
+/// Inside the Polkadot app the host's Location permission is asked for first.
+export async function getPosition(): Promise<MicroDeg> {
+  if (!("geolocation" in navigator)) throw new GeoError("unsupported", "Geolocation unavailable in this browser");
+  await askHostLocation();
   return new Promise((resolve, reject) => {
-    if (!("geolocation" in navigator)) {
-      reject(new Error("Geolocation unavailable in this browser"));
-      return;
-    }
     navigator.geolocation.getCurrentPosition(
       (pos) => resolve(toMicroDeg(pos.coords.latitude, pos.coords.longitude)),
-      (err) => reject(new Error(`Geolocation failed: ${err.message}`)),
+      (err) => void classifyGeoError(err).then(reject),
       { enableHighAccuracy: true, timeout: 15_000, maximumAge: 30_000 }
     );
   });
+}
+
+/// Continuous position, for live tracking. Returns a stop function. The host
+/// permission is asked first, so the first callback may arrive after a prompt.
+export function watchPosition(
+  onFix: (m: MicroDeg) => void,
+  onError: (e: GeoError) => void,
+  opts: PositionOptions = { enableHighAccuracy: true, maximumAge: 5000 }
+): () => void {
+  if (!("geolocation" in navigator)) {
+    onError(new GeoError("unsupported", "no geolocation on this device"));
+    return () => {};
+  }
+  let stopped = false;
+  let wid: number | null = null;
+  void askHostLocation().then(() => {
+    if (stopped) return;
+    wid = navigator.geolocation.watchPosition(
+      (pos) => onFix(toMicroDeg(pos.coords.latitude, pos.coords.longitude)),
+      (err) => void classifyGeoError(err).then(onError),
+      opts
+    );
+  });
+  return () => {
+    stopped = true;
+    if (wid !== null) navigator.geolocation.clearWatch(wid);
+  };
 }
 
 /// Human distance: metres under 1 km, else 1-decimal km.
