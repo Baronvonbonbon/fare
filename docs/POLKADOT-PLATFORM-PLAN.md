@@ -377,6 +377,19 @@ witness, so there is no degraded mode that still proves delivery.
   `host.permissions.location`, then `web.sensors.geolocation`. Three outcomes: the grant unblocks
   the web API (#7 becomes a documentation issue); the grant succeeds and the web API still fails
   (two permission systems that do not talk — worse); the call errors (declared, not implemented).
+- **Measured 2026-09-18 on the September app** (sonde at `sondeprobe.dot`, Pixel 10 Pro XL, Android
+  16, WebView Chromium 152 — was 150 in July). The web half is **unchanged**:
+  `navigator.geolocation` denied with the permission still `prompt`, the same `host-callback-missing`
+  signature, so #7 stands. The host half **could not run**: every host call failed at the handshake,
+  *"the host did not answer on wire codec 2"*. `@parity/truapi` moved its wire codec from 1 to 2 in
+  0.16.0; `product-sdk-host` 0.20 and 0.21 depend on it, and **0.19.1 is the last release on codec 1**
+  — which the app on this phone still speaks. Both sonde and FARE are pinned exactly to host 0.19.1
+  (truapi 0.13.1) until an app release answers codec 2; `requestDevicePermission("Location")` is
+  re-measured on the republished probe. Other results from the same run that bear on this plan:
+  camera and **microphone** capture work (calls, §4.11); an `RTCPeerConnection` gathers ICE
+  candidates (§4.11 — the API is there, connectivity between phones is not measured);
+  service workers, `PushManager`, `Notification`, IndexedDB and CacheStorage are absent (FARE's web
+  push already detects this and switches itself off; host notifications are the route).
 - **Whatever the answer, settlement does not need a GPS fix** — see §4.10. The line above, "there
   is no degraded mode that still proves delivery", was wrong: it read the geometry as the
   guarantee, when `docs/GPS.md` already says the guarantee is the two adverse signatures.

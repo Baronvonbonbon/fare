@@ -139,3 +139,22 @@ describe("delivery photos inside the app go to Bulletin", () => {
     await expect(fetchSealed(`${BULLETIN_PREFIX}0xabc`)).rejects.toThrow(/Polkadot app/);
   });
 });
+
+describe("a host that never answers", () => {
+  it("does not hold a photo hostage: the upload falls back to the relays", async () => {
+    vi.useFakeTimers();
+    try {
+      sdk.inside = true;
+      const never = new Promise<never>(() => {});
+      const mod = await import("@parity/product-sdk-host");
+      const spy = vi.spyOn(mod, "requestResourceAllocation").mockReturnValue(never as any);
+      (globalThis as any).fetch = vi.fn(async () => new Response(JSON.stringify({ id: "kv-3" }), { status: 200 }));
+      const stored = storeSealed({ iv: "aXY=", ct: "Y3Q=" });
+      await vi.advanceTimersByTimeAsync(61_000);
+      expect(await stored).toBe("kv-3");
+      spy.mockRestore();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});

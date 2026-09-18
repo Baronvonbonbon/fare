@@ -55,7 +55,7 @@ export function askHostLocation(): Promise<HostLocationGrant> {
   return (locationAsked ??= (async (): Promise<HostLocationGrant> => {
     if (!(await inHost())) return "no-host";
     try {
-      const r = await withTimeout(requestDevicePermission("Location"), 60_000, "location permission");
+      const r = await withTimeout(requestDevicePermission("Location"), ASK_MS, "location permission");
       if (!r.ok) {
         console.warn("host Location permission:", formatHostError(r.error));
         return "error";
@@ -70,6 +70,8 @@ export function askHostLocation(): Promise<HostLocationGrant> {
 
 // ── Bulletin, through the host ──────────────────────────────────────────────
 
+/// Asking the user: long enough to read a prompt and tap it.
+const ASK_MS = 60_000;
 /// almanac P6c: 1 MiB took 41 s on a phone. A delivery photo is ~3 KiB.
 const PUT_MS = 120_000;
 /// almanac P7: a blob the host holds comes back in under a second.
@@ -87,12 +89,14 @@ let preimages: Promise<PreimageManager> | null = null;
 function openPreimages(): Promise<PreimageManager> {
   return (preimages ??= (async () => {
     if (!(await inHost())) throw new Error("not inside the Polkadot app");
+    // Each step has a deadline: a host on another wire codec never answers at all (sonde,
+    // 2026-09-18), and a caller waiting here would never reach its relay fallback.
     // The type spells it "BulletInAllowance", which throws; only this spelling allocates (sonde).
-    await requestResourceAllocation([{ tag: "BulletinAllowance", value: undefined } as never]);
-    const permission = await requestPermission({ tag: "PreimageSubmit", value: undefined });
+    await withTimeout(requestResourceAllocation([{ tag: "BulletinAllowance", value: undefined } as never]), ASK_MS, "Bulletin allowance");
+    const permission = await withTimeout(requestPermission({ tag: "PreimageSubmit", value: undefined }), ASK_MS, "storage permission");
     if (!permission.ok) throw new Error(`storage permission: ${formatHostError(permission.error)}`);
     if (!permission.value) throw new Error("the Polkadot app did not allow FARE to store data");
-    const manager = await getPreimageManager();
+    const manager = await withTimeout(getPreimageManager(), DETECT_MS * 4, "storage manager");
     if (!manager) throw new Error("this Polkadot app offers no storage");
     return manager;
   })()).catch((e: unknown) => {
