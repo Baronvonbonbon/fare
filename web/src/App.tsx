@@ -89,7 +89,8 @@ import {
   tokenOrdersEnabled, nativeOrdersEnabled, stablecoinAsset, assetOf, assetIdOf, fmtAsset, parseAsset,
   approveToken, stablecoinBalance,
 } from "./token";
-import { MicroDeg, distanceMeters, fmtCoord, fmtDist, getPosition, snapToGrid } from "./geo";
+import { MicroDeg, distanceMeters, fmtCoord, fmtDist, getPosition, snapToGrid, watchPosition, GeoError } from "./geo";
+import { DROPOFF_REQUEST, clearPendingRequest, driverWitness, loadPendingRequest, makeDropoffRequest, pickupPosition, signDropoffRequest } from "./handoff";
 import { QRScan, QRShow } from "./qr";
 import { VenuePin, TrackMap } from "./map";
 import { AreaMap, PinMap } from "./tilemap";
@@ -1897,21 +1898,16 @@ function TrackPublisher({ orderId, myPriv, myAddr, peerAddr }: { orderId: bigint
   // Location watch, gated on the opt-in toggle.
   useEffect(() => {
     if (!sharing) return;
-    if (!("geolocation" in navigator)) { setNote("no geolocation on this device"); return; }
     let last = 0;
-    const wid = navigator.geolocation.watchPosition(
-      (pos) => {
+    return watchPosition(
+      ({ lat, lon }) => {
         const now = Date.now();
         if (now - last < 8000) return; // throttle to ~8s
         last = now;
-        const lat = Math.round(pos.coords.latitude * 1e6);
-        const lon = Math.round(pos.coords.longitude * 1e6);
         threadRef.current?.sendLoc(lat, lon).then((ok) => setNote(ok ? "sharing your location…" : "waiting for the customer to open tracking…")).catch(() => {});
       },
-      (err) => setNote(err.message),
-      { enableHighAccuracy: true, maximumAge: 5000 }
+      (err) => setNote(err.message)
     );
-    return () => navigator.geolocation.clearWatch(wid);
   }, [sharing]);
 
   const onFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -2024,6 +2020,8 @@ function TrackPanel({ orderId, myPriv, myAddr, peerAddr, drop, venue }: { orderI
 function CustomerOrder({ o, venues, act, busy, session, say }: any) {
   const [payload, setPayload] = useState("");
   const [scanning, setScanning] = useState(false);
+  // No-GPS dropoff (handoff.ts): the commitment this device asks the driver to sign.
+  const [requestCode, setRequestCode] = useState("");
   // The assigned driver's registry entry. With a private profile (§5) this is a
   // commitment, and it is what a revealed profile must hash to before the app
   // shows it as verified.
@@ -2091,8 +2089,9 @@ function CustomerOrder({ o, venues, act, busy, session, say }: any) {
       const other = decodePayload(driverPayload);
       if (other.kind !== "dropoff-driver") throw new Error("That's not a driver handoff code");
       const { att, sig } = other; // DriverCommitAttestation + signature
-      const dp = other.pos; // { lat, lon, salt } shared by the driver at the door
-      if (!dp) throw new Error("Driver code is missing the position data");
+      // With a fix, the driver's code carries their position; without one it
+      // answers the handoff request this device showed (handoff.ts, §4.10).
+      const { driver: dp, mode } = driverWitness(other, drop, loadPendingRequest(o.id));
 
       const radiusMeters = Number(await contracts().settlement.dropoffRadiusMeters());
       say("Building delivery proof… (a few seconds)");
@@ -2110,7 +2109,8 @@ function CustomerOrder({ o, venues, act, busy, session, say }: any) {
       await act("Confirm delivery", () =>
         relaySettle(os, "confirmDropoffZK", [att, sig, proof, pubSignals])
       );
-      say("Delivery confirmed — fare released 🎉");
+      clearPendingRequest(o.id);
+      say(mode === "gps" ? "Delivery confirmed — fare released 🎉" : "Delivery confirmed by handoff code (no driver GPS) — fare released 🎉");
     } catch (e: any) {
       say(e?.message ?? String(e), true);
     }
@@ -2221,7 +2221,30 @@ function CustomerOrder({ o, venues, act, busy, session, say }: any) {
               onClick={() => confirmDelivery(payload)}>
               Confirm delivery
             </button>
+            <button className="btn ghost small" disabled={busy || orphaned}
+              onClick={() => {
+                try {
+                  const stored = localStorage.getItem(dropStoreKey(o.dropCommit));
+                  if (!stored) throw new Error("Drop-location secret not on this device");
+                  setRequestCode(makeDropoffRequest(o.id, JSON.parse(stored)).payload);
+                } catch (e: any) { say(e?.message ?? String(e), true); }
+              }}>
+              Driver has no GPS?
+            </button>
           </div>
+          {requestCode && (
+            <>
+              <p className="hint">
+                Let the driver scan this, then scan the code they show back. It carries a sealed
+                commitment to your address, not the address — the driver never learns it.
+              </p>
+              <QRShow value={requestCode} />
+              <details className="payload-details">
+                <summary>show code text</summary>
+                <div className="payload-box">{requestCode}</div>
+              </details>
+            </>
+          )}
         </>
       )}
       {(o.status === 2 || o.status === 3) && (
@@ -2543,14 +2566,16 @@ function DriverJob({ o, venues, act, busy, signed, session, say }: any) {
   // the venue pin is public, so there's nothing to hide at pickup).
   async function submitPickup() {
     try {
-      const pos = await getPosition();
-      if (venue) {
-        const d = distanceMeters(pos, { lat: venue.lat, lon: venue.lon });
+      if (!venue) throw new Error("Venue not loaded yet — try again in a moment");
+      // The fix, coarsened to a ~33 m grid so the exact spot never enters calldata
+      // (geo.ts) — or, with no fix, the venue pin: the venue's signature is what
+      // holds the pickup either way (handoff.ts, §4.10).
+      const { pos: at, mode, why } = await pickupPosition({ lat: venue.lat, lon: venue.lon });
+      if (mode === "pin") say(`No GPS (${why}) — signing the venue pin; the venue's code confirms you're here`);
+      else {
+        const d = distanceMeters(at, { lat: venue.lat, lon: venue.lon });
         if (d > 400) say(`Heads up: you look ~${Math.round(d)} m from the venue pin`, true);
       }
-      // Coarsen to a ~33 m grid before signing so the exact spot never enters
-      // calldata (privacy); still well within the pickup radius. See geo.ts.
-      const at = snapToGrid(pos);
       const myAtt = {
         orderId: o.id.toString(), phase: 1, actor: session.address,
         lat: at.lat, lon: at.lon, timestamp: Math.floor(Date.now() / 1000),
@@ -2586,6 +2611,18 @@ function DriverJob({ o, venues, act, busy, signed, session, say }: any) {
       setPayload(encodePayload("dropoff-driver", att, sig, { lat: pos.lat, lon: pos.lon, salt }));
       say("Handoff signed — show the code to your customer");
     } catch (e: any) {
+      if (e instanceof GeoError) say(`${e.message}. Ask the customer for their handoff code and scan it instead.`, true);
+      else say(e?.message ?? String(e), true);
+    }
+  }
+
+  // Dropoff without a fix (handoff.ts, §4.10): sign the commitment the customer
+  // shows. It seals their address, so nothing about the drop reaches this device.
+  async function signCustomerRequest(requestPayload: string) {
+    try {
+      setPayload(await signDropoffRequest(session, o.id, requestPayload));
+      say("Handoff signed — show the code back to your customer");
+    } catch (e: any) {
       say(e?.message ?? String(e), true);
     }
   }
@@ -2609,7 +2646,8 @@ function DriverJob({ o, venues, act, busy, signed, session, say }: any) {
         <>
           <p className="hint">
             At the counter: ask the venue for their signed pickup code, paste it, and confirm. Your
-            GPS position is signed and checked on-chain against the venue pin.
+            GPS position is signed and checked on-chain against the venue pin — or, if this device
+            has no GPS, the pin itself; the venue's code is what confirms you're here.
           </p>
           {scanning && (
             <QRScan
@@ -2644,7 +2682,17 @@ function DriverJob({ o, venues, act, busy, signed, session, say }: any) {
             <button className="btn" disabled={busy || !session} onClick={signDropoffHandoff}>
               Sign dropoff handoff
             </button>
+            <button className="btn ghost small" disabled={busy || !session} onClick={() => setScanning(true)}>
+              ⧉ No GPS? Scan customer's code
+            </button>
           </div>
+          {scanning && (
+            <QRScan
+              expectKind={DROPOFF_REQUEST}
+              onResult={(v) => { setScanning(false); signCustomerRequest(v); }}
+              onCancel={() => setScanning(false)}
+            />
+          )}
           {payload && (
             <>
               <p className="hint">Let your customer scan this (or paste the code below):</p>
@@ -3285,14 +3333,19 @@ function VenuePickup({ o, venues, session, say }: any) {
       <OrderMeta o={o} venues={venues} />
       <VenueTicket o={o} session={session} />
       <p className="hint">
-        Handing the goods to driver {short(o.driver)}? Sign the pickup — your GPS position is
-        checked against your registered pin, and the order value releases to your payout address.
+        Handing the goods to driver {short(o.driver)}? Sign the pickup — your GPS position (or, with
+        no GPS, your registered pin) is checked against the pin, and the order value releases to
+        your payout address.
       </p>
       <div className="btn-row">
         <button className="btn" disabled={!session}
           onClick={async () => {
             try {
-              const pos = await getPosition();
+              const venue = venues.find((v: VenueRow) => v.id === o.venueId);
+              if (!venue) throw new Error("Venue not loaded yet — try again in a moment");
+              // No fix → sign the registered pin (handoff.ts, §4.10).
+              const { pos, mode } = await pickupPosition({ lat: venue.lat, lon: venue.lon });
+              if (mode === "pin") say("No GPS here — signing your registered pin instead");
               const att = {
                 orderId: o.id.toString(), phase: 1, actor: session.address,
                 lat: pos.lat, lon: pos.lon, timestamp: Math.floor(Date.now() / 1000),
