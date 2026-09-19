@@ -390,6 +390,13 @@ witness, so there is no degraded mode that still proves delivery.
   candidates (§4.11 — the API is there, connectivity between phones is not measured);
   service workers, `PushManager`, `Notification`, IndexedDB and CacheStorage are absent (FARE's web
   push already detects this and switches itself off; host notifications are the route).
+- **Measured 2026-09-19 on the republished probe** (`sondeprobes.dot`, codec 1, same phone): the
+  handshake passes, and the host **grants** `requestDevicePermission("Location")`, but
+  `navigator.geolocation` straight after still fails, with the permission still `prompt`. That is
+  the second of the three outcomes above: two permission systems that don't talk. #7 stands, with
+  this as evidence. FARE's `askHostLocation()` stays (it costs one prompt), and the GPS-free path
+  (§4.10) is the one that settles. Summarised for other builders in
+  [polkadot-host-capabilities](https://github.com/Baronvonbonbon/polkadot-host-capabilities/blob/main/capabilities/location.md).
 - **Whatever the answer, settlement does not need a GPS fix** — see §4.10. The line above, "there
   is no degraded mode that still proves delivery", was wrong: it read the geometry as the
   guarantee, when `docs/GPS.md` already says the guarantee is the two adverse signatures.
